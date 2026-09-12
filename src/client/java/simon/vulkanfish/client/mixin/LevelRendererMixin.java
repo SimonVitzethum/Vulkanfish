@@ -48,6 +48,19 @@ public class LevelRendererMixin {
         }
     }
 
+    /** Entity-Schatten: welche Zeichnungen der Welt Schatten werfen (siehe EntityShadowCapture). */
+    @WrapOperation(method = "render", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher;prepareFrame(Lnet/minecraft/client/renderer/SubmitNodeStorage;)Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;"))
+    private net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame vulkanfish$captureEntityDraws(
+            net.minecraft.client.renderer.feature.FeatureRenderDispatcher dispatcher, net.minecraft.client.renderer.SubmitNodeStorage storage,
+            Operation<net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame> original) {
+        simon.vulkanfish.client.render.EntityShadowCapture.begin();
+        var frame = original.call(dispatcher, storage);
+        simon.vulkanfish.client.render.EntityShadowCapture.end(
+                ((FeatureRenderDispatcherAccessor) dispatcher).vulkanfish$stagedVertexBuffer());
+        return frame;
+    }
+
     /** Abbau-Animation: auf Eis/Glas das Riss-Overlay hinter unseren Wasser-/Glas-Pass schieben. */
     @Inject(method = "submitBlockDestroyAnimation", at = @At("HEAD"))
     private void vulkanfish$breakingOverlayOrder(com.mojang.blaze3d.vertex.PoseStack poseStack,

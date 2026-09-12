@@ -31,7 +31,18 @@ public abstract class PreparedFrameMixin {
             BreakingOverlayDefer.add(self, phase, context);
             return;
         }
+        // Vanillas runde Entity-Schattenflecken: mit echten Sonnenschatten (Entities in der
+        // Schattenkarte) doppelt -> weglassen, solange unser Renderer zeichnet
+        if (BreakingOverlayDefer.nativeActive() && vulkanfish$isShadowBlobs(phase)) return;
         original.call(self, phase, context);
+    }
+
+    private boolean vulkanfish$isShadowBlobs(FeatureRenderPhase<?> phase) {
+        if (submitNodeStorage == null) return false;
+        for (SubmitNodeCollection c : submitNodeStorage.getSubmitsPerOrder().values()) {
+            if (c.shadows == phase) return true;
+        }
+        return false;
     }
 
     private boolean vulkanfish$isBreakingOverlay(FeatureRenderPhase<?> phase) {

@@ -410,6 +410,7 @@ public final class VulkanfishRenderer {
             selfTestCommand("fill 25 59 -62 43 61 -46 minecraft:water");
             selfTestCommand("fill 25 62 -62 43 62 -46 minecraft:ice");
             selfTestCommand("fill 39 63 -60 40 65 -60 minecraft:glass");
+            selfTestCommand("fill 23 63 -70 23 67 -66 minecraft:stone_bricks"); // Wand: Kuh steht in ihrem Schatten
             selfTestCommand("summon minecraft:cow 27 63 -68 {NoAI:1b,Rotation:[90f,0f]}");
             selfTestCommand("summon minecraft:sheep 31 63 -67 {NoAI:1b,Rotation:[45f,0f]}");
             selfTestCommand("summon minecraft:villager 35 63 -68 {NoAI:1b,Rotation:[180f,0f]}");
@@ -419,12 +420,18 @@ public final class VulkanfishRenderer {
         if (f >= 320 && player != null) {
             if (f == 320) {
                 selfTestCommand("gamemode spectator @p");
-                selfTestCommand("tp @p 34 68.5 -66 0 48");
+                selfTestCommand("tp @p 33 67 -76 0 30"); // Tiere + Schatten
             }
+            if (f == 650) selfTestCommand("tp @p 34 68.5 -66 0 48"); // Teich
             if (f == 850) selfTestCommand("tp @p 35 64.6 -59.5 0 30"); // nah an die Bruchstellen
-            lockView(player, 0.0f, f >= 850 ? 30.0f : 48.0f);
+            lockView(player, 0.0f, f >= 850 ? 30.0f : f >= 650 ? 48.0f : 30.0f);
         }
         if (f == 330) FrameDataCapture.testSunAngle = 20.0f;
+        if (f == 600) {
+            var b = simon.vulkanfish.client.render.EntityShadowCapture.frame();
+            LOG.info("[vulkanfish] Eistest: {} Entity-Schatten-Batches, {} Vertices", b.size(),
+                    b.stream().mapToInt(simon.vulkanfish.client.render.EntityShadowCapture.Batch::vertexCount).sum());
+        }
         var level = Minecraft.getInstance().level;
         if (level != null && f >= 710 && f < 790) level.destroyBlockProgress(4711, hit, (int) ((f - 710) / 8));
         if (level != null && f == 790) level.destroyBlockProgress(4711, hit, -1);
@@ -432,7 +439,7 @@ public final class VulkanfishRenderer {
             selfTestCommand("setblock " + hit.getX() + " " + hit.getY() + " " + hit.getZ() + " minecraft:water"); // Spielerabbau: Eis -> Wasser
             selfTestCommand("setblock " + hit2.getX() + " " + hit2.getY() + " " + hit2.getZ() + " minecraft:air");
         }
-        if (f == 700 || f == 750 || f == 785 || f == 801 || f == 803 || f == 806 || f == 812 || f == 840 || f == 900 || f == 940) pendingScreenshot = f;
+        if (f == 600 || f == 700 || f == 750 || f == 785 || f == 801 || f == 803 || f == 806 || f == 812 || f == 840 || f == 900 || f == 940) pendingScreenshot = f;
     }
 
     private final java.util.List<Long> testFrameNs = new java.util.ArrayList<>();

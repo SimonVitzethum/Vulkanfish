@@ -38,6 +38,11 @@ public final class BreakingOverlayDefer {
         }
     }
 
+    /** Unser Renderer zeichnet diesen Frame (Stand beim Einreichen der Abbau-Animation). */
+    public static boolean nativeActive() {
+        return enabled;
+    }
+
     public static boolean active() {
         return enabled && translucentBreaking;
     }

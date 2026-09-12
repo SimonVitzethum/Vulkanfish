@@ -64,6 +64,8 @@ import org.lwjgl.vulkan.VkPipelineViewportStateCreateInfo;
 import org.lwjgl.vulkan.VkPushConstantRange;
 import org.lwjgl.vulkan.VkQueryPoolCreateInfo;
 import org.lwjgl.vulkan.VkQueue;
+import org.lwjgl.vulkan.VkVertexInputAttributeDescription;
+import org.lwjgl.vulkan.VkVertexInputBindingDescription;
 import org.lwjgl.vulkan.VkQueueFamilyProperties;
 import org.lwjgl.vulkan.VkRect2D;
 import org.lwjgl.vulkan.VkRenderingAttachmentInfo;
@@ -211,6 +213,8 @@ public final class NativePassRunner {
     private long oitFsMeshModule;
     private long oitCompositeFragModule;
     private long pipeOitComposite;   // lazy im Main-Format
+    private long pipeEntityShade, layoutEntityShade, entityShadeFragModule; // Sonnenschatten auf Vanilla-Entities
+    private boolean shadowsOn; // Schattenkarte in diesem Frame gezeichnet
     private Buf oitNodes;
     private Buf oitCounter;
     private int oitCapacity;
@@ -1016,6 +1020,7 @@ public final class NativePassRunner {
             if (!createPipelines(arena, loader)) return fail("Pipeline-Erstellung fehlgeschlagen");
             if (rtWanted) initRt(arena, loader);
             initLod(arena, loader);
+            initEntityShadow(arena, loader);
             shadowMap = makeImage(arena, SHADOW_RES, SHADOW_RES, 1, FMT_DEPTH,
                     VK10.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK10.VK_IMAGE_USAGE_SAMPLED_BIT
                             | VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -1308,6 +1313,9 @@ public final class NativePassRunner {
         layoutOitComposite = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, SI}}, M | F), 0, 0);
         oitFsMeshModule = module(arena, loader, "oitFullscreenMesh");
         oitCompositeFragModule = module(arena, loader, "oitCompositeFrag");
+        layoutEntityShade = pipelineLayout(arena, setLayout(arena,
+                new int[][]{{0, UB}, {1, SI}, {2, SI}, {3, SI}, {4, SM}}, M | F), 0, 0);
+        entityShadeFragModule = module(arena, loader, "entityShadeFrag");
         // TAA: 0I(aktuell) 1I(Tiefe) 2I(History) 3ST(History neu) 4ST(Ausgabe) 5SMP 6U
         layoutTaa = pipelineLayout(arena, setLayout(arena,
                 new int[][]{{0, SI}, {1, SI}, {2, SI}, {3, ST}, {4, ST}, {5, SM}, {6, UB}}, C), 0, 0);
@@ -1327,6 +1335,7 @@ public final class NativePassRunner {
 
     private static final int BLEND_NONE = 0;
     private static final int BLEND_PREMUL_UNDER = 1; // dst = src.rgb + dst.rgb * src.a (OIT-Composite)
+    private static final int BLEND_MULTIPLY = 2;     // dst = dst.rgb * src.rgb (Entity-Schatten)
 
     private long meshPipe(Arena arena, long layout, long meshMod, long fragMod, int colorCount, int colorFormat,
                           int depthOp, boolean depthBias) {
@@ -1371,6 +1380,12 @@ public final class NativePassRunner {
             VkPipelineColorBlendAttachmentState.Buffer att = VkPipelineColorBlendAttachmentState.calloc(colorCount, arena.stack());
             for (int i = 0; i < colorCount; i++) {
                 att.get(i).blendEnable(blend != BLEND_NONE).colorWriteMask(0xF);
+                if (blend == BLEND_MULTIPLY) {
+                    att.get(i).srcColorBlendFactor(VK10.VK_BLEND_FACTOR_DST_COLOR)
+                            .dstColorBlendFactor(VK10.VK_BLEND_FACTOR_ZERO).colorBlendOp(VK10.VK_BLEND_OP_ADD)
+                            .srcAlphaBlendFactor(VK10.VK_BLEND_FACTOR_ZERO)
+                            .dstAlphaBlendFactor(VK10.VK_BLEND_FACTOR_ONE).alphaBlendOp(VK10.VK_BLEND_OP_ADD);
+                }
                 if (blend == BLEND_PREMUL_UNDER) {
                     att.get(i).srcColorBlendFactor(VK10.VK_BLEND_FACTOR_ONE)
                             .dstColorBlendFactor(VK10.VK_BLEND_FACTOR_SRC_ALPHA).colorBlendOp(VK10.VK_BLEND_OP_ADD)
@@ -1397,6 +1412,100 @@ public final class NativePassRunner {
         if (VK10.vkCreateGraphicsPipelines(dev, 0L, ci, null, p) != VK10.VK_SUCCESS) return 0L;
         pipelines.add(p.get(0));
         return p.get(0);
+    }
+
+    // ---------- Entity-Schatten (Vertices aus Vanillas Frame-Puffer, siehe EntityShadowCapture) ----------
+    private static final int ENTITY_QUAD_CHUNK = 1 << 18; // Quads je Draw (Indexpuffer-Groesse)
+    private long layoutEntityShadow, entityShadowModule;
+    private Buf quadIndex;
+    private final java.util.Map<Long, Long> entityShadowPipes = new java.util.HashMap<>();
+
+    private void initEntityShadow(Arena arena, SlangShaderLoader loader) {
+        try {
+            layoutEntityShadow = pipelineLayout(arena, setLayout(arena, new int[][]{{0, UB}}, VK10.VK_SHADER_STAGE_VERTEX_BIT), 0, 0);
+            entityShadowModule = module(arena, loader, "entityShadowVert");
+            long bytes = ENTITY_QUAD_CHUNK * 6L * 4;
+            quadIndex = makeBuffer(arena, bytes, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+                    VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            java.nio.IntBuffer ib = MemoryUtil.memIntBuffer(quadIndex.mapped(), (int) (bytes / 4));
+            // Vanillas Quad-Reihenfolge (0 1 2, 2 3 0)
+            for (int q = 0; q < ENTITY_QUAD_CHUNK; q++) {
+                int v = q * 4, o = q * 6;
+                ib.put(o, v).put(o + 1, v + 1).put(o + 2, v + 2).put(o + 3, v + 2).put(o + 4, v + 3).put(o + 5, v);
+            }
+        } catch (Throwable t) {
+            LOG.warn("[vulkanfish] Entity-Schatten nicht verfuegbar", t);
+            entityShadowModule = 0L;
+        }
+    }
+
+    /** Tiefen-Pipeline fuer einen Vertex-Stride (Entity-/Block-/Item-Formate unterscheiden sich). */
+    private long entityShadowPipe(Arena arena, int stride, int posOffset) {
+        long key = ((long) stride << 32) | posOffset;
+        Long cached = entityShadowPipes.get(key);
+        if (cached != null) return cached;
+        VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(1, arena.stack());
+        stages.get(0).sType$Default().stage(VK10.VK_SHADER_STAGE_VERTEX_BIT).module(entityShadowModule).pName(arena.utf8("main"));
+        VkVertexInputBindingDescription.Buffer vb = VkVertexInputBindingDescription.calloc(1, arena.stack());
+        vb.get(0).binding(0).stride(stride).inputRate(VK10.VK_VERTEX_INPUT_RATE_VERTEX);
+        VkVertexInputAttributeDescription.Buffer va = VkVertexInputAttributeDescription.calloc(1, arena.stack());
+        va.get(0).location(0).binding(0).format(VK10.VK_FORMAT_R32G32B32_SFLOAT).offset(posOffset);
+        VkPipelineVertexInputStateCreateInfo vi = VkPipelineVertexInputStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .pVertexBindingDescriptions(vb).pVertexAttributeDescriptions(va);
+        VkPipelineInputAssemblyStateCreateInfo ia = VkPipelineInputAssemblyStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .topology(VK10.VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+        VkPipelineViewportStateCreateInfo vp = VkPipelineViewportStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .viewportCount(1).scissorCount(1);
+        // wie der Terrain-Schatten: kein Cull (Modelle teils einseitig), Slope-Bias gegen Akne
+        VkPipelineRasterizationStateCreateInfo rs = VkPipelineRasterizationStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .polygonMode(VK10.VK_POLYGON_MODE_FILL).cullMode(VK10.VK_CULL_MODE_NONE)
+                .frontFace(VK10.VK_FRONT_FACE_COUNTER_CLOCKWISE).lineWidth(1.0f)
+                .depthBiasEnable(true).depthBiasConstantFactor(1.5f).depthBiasSlopeFactor(2.0f);
+        VkPipelineMultisampleStateCreateInfo ms = VkPipelineMultisampleStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .rasterizationSamples(VK10.VK_SAMPLE_COUNT_1_BIT);
+        VkPipelineDepthStencilStateCreateInfo ds = VkPipelineDepthStencilStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .depthTestEnable(true).depthWriteEnable(true).depthCompareOp(VK10.VK_COMPARE_OP_LESS_OR_EQUAL);
+        VkPipelineColorBlendStateCreateInfo cb = VkPipelineColorBlendStateCreateInfo.calloc(arena.stack()).sType$Default();
+        VkPipelineDynamicStateCreateInfo dyn = VkPipelineDynamicStateCreateInfo.calloc(arena.stack()).sType$Default()
+                .pDynamicStates(arena.ints(VK10.VK_DYNAMIC_STATE_VIEWPORT, VK10.VK_DYNAMIC_STATE_SCISSOR));
+        VkPipelineRenderingCreateInfo rendering = VkPipelineRenderingCreateInfo.calloc(arena.stack()).sType$Default()
+                .depthAttachmentFormat(FMT_DEPTH);
+        VkGraphicsPipelineCreateInfo.Buffer ci = VkGraphicsPipelineCreateInfo.calloc(1, arena.stack()).sType$Default()
+                .pNext(rendering.address()).pStages(stages).pVertexInputState(vi).pInputAssemblyState(ia)
+                .pViewportState(vp).pRasterizationState(rs).pMultisampleState(ms)
+                .pDepthStencilState(ds).pColorBlendState(cb).pDynamicState(dyn).layout(layoutEntityShadow);
+        LongBuffer p = arena.mallocLong(1);
+        long pipe = VK10.vkCreateGraphicsPipelines(dev, 0L, ci, null, p) == VK10.VK_SUCCESS ? p.get(0) : 0L;
+        if (pipe != 0L) pipelines.add(pipe);
+        entityShadowPipes.put(key, pipe);
+        return pipe;
+    }
+
+    /** Im laufenden Schatten-Rendering: Entity-Geometrie des Frames zeichnen. */
+    private void recordEntityShadows(Arena arena, VkCommandBuffer cmd, int slot,
+                                     java.util.List<simon.vulkanfish.client.render.EntityShadowCapture.Batch> batches) {
+        if (entityShadowModule == 0L || batches.isEmpty()) return;
+        push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntityShadow, W.ub(0, uniforms[slot]));
+        VK10.vkCmdBindIndexBuffer(cmd, quadIndex.buffer(), 0L, VK10.VK_INDEX_TYPE_UINT32);
+        long bound = 0L;
+        for (var b : batches) {
+            long pipe = entityShadowPipe(arena, b.stride(), b.posOffset());
+            if (pipe == 0L) continue;
+            if (pipe != bound) {
+                VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                bound = pipe;
+            }
+            VK10.vkCmdBindVertexBuffers(cmd, 0, arena.longs(b.vkBuffer()), arena.longs(b.byteOffset()));
+            if (b.quads()) {
+                int quads = b.vertexCount() / 4;
+                for (int q0 = 0; q0 < quads; q0 += ENTITY_QUAD_CHUNK) {
+                    int n = Math.min(ENTITY_QUAD_CHUNK, quads - q0);
+                    VK10.vkCmdDrawIndexed(cmd, n * 6, 1, 0, q0 * 4, 0);
+                }
+            } else {
+                VK10.vkCmdDraw(cmd, b.vertexCount() - b.vertexCount() % 3, 1, 0, 0);
+            }
+        }
     }
 
     /** LOD-Fernfeld: Puffer (halbiert bei VRAM-Mangel) + Mesh-Pipeline in den G-Buffer. */
@@ -1776,6 +1885,7 @@ public final class NativePassRunner {
             streamer.flushUploads(this);
             if (lod != null && lodReady) lod.flushUploads(this);
             boolean shadows = d.shadowDistance() > 0f;
+            shadowsOn = shadows;
             writeUniforms(uniforms[slot], d, false);
             if (shadows) writeUniforms(shadowUniforms[slot], d, true);
 
@@ -1894,6 +2004,8 @@ public final class NativePassRunner {
                         VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
                 // schreibt die Tiefe der naechsten Glasschicht (wie Vanillas transluzentes Terrain):
                 // Risse, Partikel, Regen danach werden von Glas/Eis richtig verdeckt
+                pipeEntityShade = meshPipe(arena, layoutEntityShade, oitFsMeshModule, entityShadeFragModule, 1, format,
+                        VK10.VK_COMPARE_OP_ALWAYS, false, BLEND_MULTIPLY, false, false);
                 pipeOitComposite = meshPipe(arena, layoutOitComposite, oitFsMeshModule, oitCompositeFragModule, 1, format,
                         VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_PREMUL_UNDER, true, true);
                 waterColorFormat = format;
@@ -1906,8 +2018,30 @@ public final class NativePassRunner {
             int q = slot * TS_PER_FRAME + TS_TERRAIN;
             fullBarrier(arena, cmd); // Entities/Partikel sind jetzt im Main-Target
             VK10.vkCmdWriteTimestamp(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, q);
-            blit(arena, cmd, mainColor.vkImage(), sceneCopy.image(), width, height);
             copyDepth(arena, cmd, mainDepth.vkImage(), sceneDepth.image());
+            if (shadowsOn && pipeEntityShade != 0L) {
+                // Sonnenschatten auf Vanillas Entities/Block-Entities/Partikel (vor der Szenen-Kopie)
+                fullBarrier(arena, cmd);
+                VkRenderingAttachmentInfo.Buffer shadeColor = VkRenderingAttachmentInfo.calloc(1, arena.stack());
+                shadeColor.get(0).sType$Default().imageView(colorView.vkImageView()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
+                        .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_LOAD).storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE);
+                VkRenderingAttachmentInfo shadeDepth = VkRenderingAttachmentInfo.calloc(arena.stack()).sType$Default()
+                        .imageView(depthView.vkImageView()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
+                        .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_LOAD).storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE);
+                VkRenderingInfo sri = VkRenderingInfo.calloc(arena.stack()).sType$Default().layerCount(1)
+                        .pColorAttachments(shadeColor).pDepthAttachment(shadeDepth);
+                sri.renderArea().offset().set(0, 0);
+                sri.renderArea().extent().set(width, height);
+                KHRDynamicRendering.vkCmdBeginRenderingKHR(cmd, sri);
+                setViewport(arena, cmd, width, height);
+                VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeEntityShade);
+                push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntityShade, W.ub(0, uniforms[slot]),
+                        W.si(1, sceneDepth.view()), W.si(2, depth.view()), W.si(3, shadowMap.view()), W.sm(4, shadowSampler));
+                EXTMeshShader.vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);
+                KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
+                fullBarrier(arena, cmd);
+            }
+            blit(arena, cmd, mainColor.vkImage(), sceneCopy.image(), width, height);
             // Listen leeren: Kopf = 0xFFFFFFFF, Zaehler 0, Kapazitaet fuer den Shader
             VkClearColorValue empty = VkClearColorValue.calloc(arena.stack());
             empty.uint32(0, -1).uint32(1, -1).uint32(2, -1).uint32(3, -1);
@@ -2305,6 +2439,12 @@ public final class NativePassRunner {
     }
 
     private void recordShadow(Arena arena, VkCommandBuffer cmd, int slot, long atlasView) {
+        var entityBatches = simon.vulkanfish.client.render.EntityShadowCapture.frame();
+        if (!entityBatches.isEmpty()) {
+            // Vanilla hat seinen Entity-Vertexpuffer vorher im selben Command-Strom befuellt
+            barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                    VK10.VK_ACCESS_TRANSFER_WRITE_BIT, VK10.VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+        }
         VkRenderingAttachmentInfo depthAtt = VkRenderingAttachmentInfo.calloc(arena.stack()).sType$Default()
                 .imageView(shadowMap.view()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
                 .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_CLEAR).storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE);
@@ -2320,6 +2460,7 @@ public final class NativePassRunner {
                 W.sb(0, meshlets), W.sb(1, verts), W.sb(2, tris), W.ub(3, shadowUniforms[slot]),
                 W.si(4, atlasView), W.sm(5, atlasSampler), W.sb(6, visShadow));
         EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, shadowIndirect.buffer(), 0L, 1, 12);
+        recordEntityShadows(arena, cmd, slot, entityBatches);
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK10.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK10.VK_ACCESS_SHADER_READ_BIT);

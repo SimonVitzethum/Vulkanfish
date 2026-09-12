@@ -232,6 +232,18 @@
       "entry": "lodMeshMain",
       "stage": "compute",
       "spv": "lod_mesher.spv"
+    },
+    {
+      "file": "entity_shadow.slang",
+      "entry": "entityShadowVert",
+      "stage": "vertex",
+      "spv": "entity_shadow_vert.spv"
+    },
+    {
+      "file": "entity_shade.slang",
+      "entry": "entityShadeFrag",
+      "stage": "fragment",
+      "spv": "entity_shade_frag.spv"
     }
   ]
 }
