@@ -12,6 +12,7 @@
 [[vk::binding(4, 0)]] [format("rgba8")] RWTexture2D<float4> gSceneColor;
 [[vk::binding(5, 0)]] [format("rgba16f")] RWTexture2D<float4> gFront;
 [[vk::binding(6, 0)]] StructuredBuffer<uint> gCounter; // [1] Kapazitaet
+[[vk::binding(7, 0)]] [format("r32f")] RWTexture2D<float> gFrontDepth; // naechste Schicht davor (0 = keine)
 
 static const uint MAX_LAYERS = 16;     // die naechsten 16 Schichten zaehlen, der Rest ist verdeckt genug
 static const uint MAX_WALK = 256;      // Schutz gegen kaputte Listen
@@ -46,6 +47,7 @@ void oitResolve(in uint3 tid : SV_DispatchThreadID)
     if (idx == END)
     {
         gFront[p] = float4(0.0, 0.0, 0.0, 1.0);
+        gFrontDepth[p] = 0.0;
         return;
     }
 
@@ -95,6 +97,7 @@ void oitResolve(in uint3 tid : SV_DispatchThreadID)
     float3 scene = gSceneColor[p].rgb;
     float3 front = float3(0.0);
     float trans = 1.0;
+    float nearest = 0.0;
     for (uint i = 0; i < n; i++)
     {
         float4 c = unpackRgba8(color[i]);
@@ -106,6 +109,7 @@ void oitResolve(in uint3 tid : SV_DispatchThreadID)
         {
             front = lerp(front, c.rgb, c.a);
             trans *= 1.0 - c.a;
+            nearest = max(nearest, depth[i]);
             // Ohne Wasser: Glas auch in die Szenen-Kopie, damit Wasser-SSR es spiegelt
             if (!water)
                 scene = lerp(scene, c.rgb, c.a);
@@ -113,10 +117,12 @@ void oitResolve(in uint3 tid : SV_DispatchThreadID)
     }
     gSceneColor[p] = float4(scene, 1.0);
     gFront[p] = float4(front, trans);
+    gFrontDepth[p] = nearest;
 }
 
 // ---------- Fullscreen-Composite (nach dem Wasser, gleicher Rendering-Scope) ----------
 [[vk::binding(0, 0)]] Texture2D<float4> gFrontIn;
+[[vk::binding(1, 0)]] Texture2D<float> gFrontDepthIn;
 
 struct FsOut
 {
@@ -136,11 +142,21 @@ void oitFullscreenMesh(out vertices FsOut verts[3], out indices uint3 tris[1])
 }
 
 // Blend: dst = src.rgb + dst.rgb * src.a  (vormultiplizierte Schichten ueber die Szene)
-[shader("fragment")]
-float4 oitCompositeFrag(FsOut input) : SV_Target0
+struct CompositeOut
 {
-    float4 v = gFrontIn.Load(int3(int2(input.pos.xy), 0));
+    float4 color : SV_Target0;
+    float depth : SV_Depth;   // naechste Glasschicht -> Main-Tiefe (wie Vanillas transluzentes Terrain)
+};
+
+[shader("fragment")]
+CompositeOut oitCompositeFrag(FsOut input)
+{
+    int2 p = int2(input.pos.xy);
+    float4 v = gFrontIn.Load(int3(p, 0));
     if (v.a >= 0.9999)
         discard;
-    return v;
+    CompositeOut o;
+    o.color = v;
+    o.depth = gFrontDepthIn.Load(int3(p, 0));
+    return o;
 }

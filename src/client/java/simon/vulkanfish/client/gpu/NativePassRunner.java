@@ -976,6 +976,7 @@ public final class NativePassRunner {
     private Img sceneDepth;  // Main-Tiefe vor dem Wasser (Terrain + Entities)
     private Img oitHead;     // R32UI: Kopf der Fragment-Liste pro Pixel
     private Img oitFront;    // RGBA16F: Glas vor dem Wasser, vormultipliziert (rgb, Resttransmission)
+    private Img oitFrontDepth; // R32F: Tiefe der naechsten Glasschicht davor (0 = keine)
     private Img shadowMap;
     private boolean shadowInitialized;
 
@@ -1302,9 +1303,9 @@ public final class NativePassRunner {
                 VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, true, true);
         // oitResolve: 0ST(Kopf) 1S(Knoten) 2I(Wassertiefe) 3I(Szenentiefe) 4ST(Szene) 5ST(Front) 6S(Zaehler) + push 8
         layoutOit = pipelineLayout(arena, setLayout(arena,
-                new int[][]{{0, ST}, {1, SB}, {2, SI}, {3, SI}, {4, ST}, {5, ST}, {6, SB}}, C), C, 8);
+                new int[][]{{0, ST}, {1, SB}, {2, SI}, {3, SI}, {4, ST}, {5, ST}, {6, SB}, {7, ST}}, C), C, 8);
         pipeOitResolve = computePipe(arena, layoutOit, module(arena, loader, "oitResolve"));
-        layoutOitComposite = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}}, M | F), 0, 0);
+        layoutOitComposite = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, SI}}, M | F), 0, 0);
         oitFsMeshModule = module(arena, loader, "oitFullscreenMesh");
         oitCompositeFragModule = module(arena, loader, "oitCompositeFrag");
         // TAA: 0I(aktuell) 1I(Tiefe) 2I(History) 3ST(History neu) 4ST(Ausgabe) 5SMP 6U
@@ -1313,8 +1314,10 @@ public final class NativePassRunner {
         pipeTaa = computePipe(arena, layoutTaa, module(arena, loader, "taaResolve"));
         transMeshModule = module(arena, loader, "translucentMesh");
         transFragModule = module(arena, loader, "translucentRecordFrag");
+        // Glas/Eis einseitig wie Vanillas transluzentes Terrain (Scheiben haben eigene Rueckseiten):
+        // sonst erscheinen Innenwaende benachbarter Bloecke durch das Eis hindurch
         pipeTrans = meshPipe(arena, layoutWater, transMeshModule, transFragModule, 0, FMT_LDR,
-                VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, false, true);
+                VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, false, true, VK10.VK_CULL_MODE_FRONT_BIT);
 
         // Entities, RT-GI/Denoise und Bobby-LOD haben noch keinen Frame-Pass.
         return pipeCull != 0 && pipeGbuffer != 0 && pipeShadow != 0 && pipeHiz != 0 && pipeDeferred != 0
@@ -1330,9 +1333,15 @@ public final class NativePassRunner {
         return meshPipe(arena, layout, meshMod, fragMod, colorCount, colorFormat, depthOp, depthBias, BLEND_NONE, true, true);
     }
 
-    /** fragMod 0 = reine Tiefen-Pipeline (nur Mesh-Stage). */
     private long meshPipe(Arena arena, long layout, long meshMod, long fragMod, int colorCount, int colorFormat,
                           int depthOp, boolean depthBias, int blend, boolean depthWrite, boolean depthTest) {
+        return meshPipe(arena, layout, meshMod, fragMod, colorCount, colorFormat, depthOp, depthBias, blend, depthWrite, depthTest,
+                VK10.VK_CULL_MODE_NONE);
+    }
+
+    /** fragMod 0 = reine Tiefen-Pipeline (nur Mesh-Stage). */
+    private long meshPipe(Arena arena, long layout, long meshMod, long fragMod, int colorCount, int colorFormat,
+                          int depthOp, boolean depthBias, int blend, boolean depthWrite, boolean depthTest, int cullMode) {
         VkPipelineShaderStageCreateInfo.Buffer stages = VkPipelineShaderStageCreateInfo.calloc(fragMod != 0L ? 2 : 1, arena.stack());
         stages.get(0).sType$Default().stage(EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT).module(meshMod).pName(arena.utf8("main"));
         if (fragMod != 0L) {
@@ -1347,7 +1356,7 @@ public final class NativePassRunner {
         // Kein Backface-Cull im Rasterizer: Pflanzen-Quads sind einseitig, der
         // Meshlet-Ebenentest verwirft Rueckseiten schon im Cull-Shader.
         VkPipelineRasterizationStateCreateInfo rs = VkPipelineRasterizationStateCreateInfo.calloc(arena.stack()).sType$Default()
-                .polygonMode(VK10.VK_POLYGON_MODE_FILL).cullMode(VK10.VK_CULL_MODE_NONE)
+                .polygonMode(VK10.VK_POLYGON_MODE_FILL).cullMode(cullMode)
                 .frontFace(VK10.VK_FRONT_FACE_COUNTER_CLOCKWISE).lineWidth(1.0f);
         if (depthBias) {
             // Schatten: Slope-Bias gegen Akne an flach beleuchteten Flaechen
@@ -1582,6 +1591,7 @@ public final class NativePassRunner {
             sceneCopy = makeImage(arena, w, h, 1, FMT_LDR, sampled | stor | dst, ca);
             oitHead = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R32_UINT, stor | dst, ca);
             oitFront = makeImage(arena, w, h, 1, FMT_HDR, sampled | stor, ca);
+            oitFrontDepth = makeImage(arena, w, h, 1, FMT_HIZ, sampled | stor, ca);
             // Fragment-Pool: im Mittel 2 Glasschichten pro Pixel (Glas bedeckt selten den ganzen Schirm),
             // 12 Byte pro Fragment; Ueberlauf verwirft nur Fragmente
             oitCapacity = (int) Math.min(Math.max(2L * w * h, 1L << 21), 12L << 20);
@@ -1608,9 +1618,9 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth}) destroyImg(img);
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = null;
-        oitHead = oitFront = null;
+        oitHead = oitFront = oitFrontDepth = null;
         if (oitNodes != null) destroyBuffer(oitNodes);
         oitNodes = null;
         history[0] = history[1] = null;
@@ -1882,8 +1892,10 @@ public final class NativePassRunner {
                 // Eine alte Pipeline bleibt in 'pipelines' und wird erst beim Shutdown zerstoert.
                 pipeWater = meshPipe(arena, layoutWater, waterMeshModule, waterFragModule, 1, format,
                         VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
+                // schreibt die Tiefe der naechsten Glasschicht (wie Vanillas transluzentes Terrain):
+                // Risse, Partikel, Regen danach werden von Glas/Eis richtig verdeckt
                 pipeOitComposite = meshPipe(arena, layoutOitComposite, oitFsMeshModule, oitCompositeFragModule, 1, format,
-                        VK10.VK_COMPARE_OP_ALWAYS, false, BLEND_PREMUL_UNDER, false, false);
+                        VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_PREMUL_UNDER, true, true);
                 waterColorFormat = format;
                 if (pipeWater == 0L || pipeOitComposite == 0L) throw new IllegalStateException("Wasser/Glas-Pipeline fehlgeschlagen");
             }
@@ -1939,7 +1951,8 @@ public final class NativePassRunner {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeOitResolve);
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutOit,
                     W.st(0, oitHead.view()), W.sb(1, oitNodes), W.si(2, depthView.vkImageView()),
-                    W.si(3, sceneDepth.view()), W.st(4, sceneCopy.view()), W.st(5, oitFront.view()), W.sb(6, oitCounter));
+                    W.si(3, sceneDepth.view()), W.st(4, sceneCopy.view()), W.st(5, oitFront.view()), W.sb(6, oitCounter),
+                    W.st(7, oitFrontDepth.view()));
             ByteBuffer pc = arena.malloc(8);
             pc.putInt(0, width).putInt(4, height);
             VK10.vkCmdPushConstants(cmd, layoutOit, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
@@ -1958,7 +1971,8 @@ public final class NativePassRunner {
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutWater, waterBindings);
             EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, waterIndirect.buffer(), 0L, 1, 12);
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeOitComposite);
-            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutOitComposite, W.si(0, oitFront.view()));
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutOitComposite, W.si(0, oitFront.view()),
+                    W.si(1, oitFrontDepth.view()));
             EXTMeshShader.vkCmdDrawMeshTasksEXT(cmd, 1, 1, 1);
             KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
             stamp(cmd, q + 1);
@@ -2171,7 +2185,7 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront}) {
+                oitHead, oitFront, oitFrontDepth}) {
             toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);

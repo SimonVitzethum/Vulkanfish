@@ -11,6 +11,8 @@
 		"GameRendererMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
+		"PreparedFrameInvoker",
+		"PreparedFrameMixin",
 		"RenderSystemMixin",
 		"SectionCompilerMixin",
 		"SpriteContentsAccessor",

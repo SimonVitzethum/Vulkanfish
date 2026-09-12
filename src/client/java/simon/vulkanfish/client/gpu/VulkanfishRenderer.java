@@ -3,6 +3,7 @@ package simon.vulkanfish.client.gpu;
 import com.mojang.blaze3d.textures.GpuTextureView;
 import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
 import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -29,6 +30,7 @@ public final class VulkanfishRenderer {
     private static final boolean TEST_WORLD_EDITS = Boolean.getBoolean("vulkanfish.testWorldEdits");
     private static final boolean SCENE_TEST = Boolean.getBoolean("vulkanfish.sceneTest");
     private static final boolean LOD_TEST = Boolean.getBoolean("vulkanfish.lodTest");
+    private static final boolean ICE_TEST = Boolean.getBoolean("vulkanfish.iceTest");
     // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
     private static volatile boolean vanillaOpaqueDisabled;
     private final GpuDrivenConfig config;
@@ -160,8 +162,82 @@ public final class VulkanfishRenderer {
         }
     }
 
+    /** Selbsttest-Ablauf je Frame (nativ aus renderOpaqueTerrain, Vanilla-Vergleich aus onFrameEnd). */
+    private void selfTestFrame(long f) {
+        if (EXIT_AFTER_FRAMES > 0) {
+            // Selbsttest laeuft ohne Fensterfokus: Minecraft pausiert dann den integrierten Server
+            // (keine Blockupdates, Zeit steht). Pause-Screen schliessen, Optionen bleiben unveraendert.
+            Minecraft mc = Minecraft.getInstance();
+            var screen = mc.gui.screen();
+            if (screen != null && screen.isPauseScreen()) mc.gui.setScreen(null);
+            // Maus nicht fangen: echte Mausbewegung wuerde sonst die Testkamera drehen
+            if (mc.mouseHandler.isMouseGrabbed()) mc.mouseHandler.releaseMouse();
+        }
+        if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.hizTest")) {
+            // A/B: gleiches Standbild mit/ohne Hi-Z -> Differenz = faelschlich weggecullte Geometrie
+            if (f == 560) pendingScreenshot = f;
+            if (f == 580) NativePassRunner.hizForceOff = true;
+            if (f == 620) pendingScreenshot = f;
+            if (f == 640) NativePassRunner.hizForceOff = false;
+        }
+        if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
+            iceTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST) {
+            lodTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && SCENE_TEST && TEST_WORLD_EDITS) {
+            sceneTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && SNAPSHOTS) {
+            // Selbsttest-Tageszeiten fuer Look-Vergleiche: Mittag, Sonnenuntergang, Nacht
+            // Wasser-Szene nur in der Test-Welt (Kopie), nie in einer echten Welt
+            if (f == 300 && TEST_WORLD_EDITS) {
+                LOG.info("[vulkanfish] Selbsttest: Spieler bei {}", Minecraft.getInstance().player.blockPosition());
+                selfTestCommand("gamerule randomTickSpeed 0");          // kein Zufrieren im Schneebiom
+                selfTestCommand("gamerule minecraft:random_tick_speed 0");
+                selfTestCommand("execute at @p run fill ~-10 ~0 ~2 ~10 ~3 ~22 minecraft:air"); // Schneedecke weg
+                selfTestCommand("execute at @p run fill ~-10 ~-4 ~2 ~10 ~-1 ~22 minecraft:water");
+                selfTestCommand("execute at @p run fill ~-3 ~-4 ~8 ~3 ~-3 ~12 minecraft:stone");
+                selfTestCommand("execute at @p run fill ~-10 ~-1 ~15 ~0 ~-1 ~22 minecraft:ice");   // Eis auf dem Teich
+                selfTestCommand("execute at @p run fill ~2 ~0 ~5 ~4 ~1 ~5 minecraft:glass");
+                selfTestCommand("execute at @p run fill ~5 ~0 ~5 ~7 ~1 ~5 minecraft:light_blue_stained_glass");
+            }
+            if (f == 400) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag/Mittag
+            if (f == 1050) FrameDataCapture.testSunAngle = 80.0f;  // tiefe Abendsonne
+            if (f == 1300) FrameDataCapture.testSunAngle = 180.0f; // Mitternacht
+            // Schatten-Debug-Ansicht kurz vor den Mittag-/Abend-Screenshots
+            if (f == 930 || f == 1180) NativePassRunner.debugView = 1;
+            if (f == 960 || f == 1210) NativePassRunner.debugView = 0;
+            if (f == 1400) NativePassRunner.debugView = 5; // Wasser magenta
+            if (f == 1450 && TEST_WORLD_EDITS) selfTestCommand("execute at @p run tp @p ~ ~-3 ~8"); // in den Teich
+            if (f == 1440) NativePassRunner.debugView = 0;
+            if (f == 950 || f == 1200 || f == 1000 || f == 1250 || f == 1420 || f == 1500 || f == 1560) {
+                pendingScreenshot = f;
+            }
+        }
+        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && f > 700 && Minecraft.getInstance().player != null) {
+            // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
+            var player = Minecraft.getInstance().player;
+            if (f >= 1450 && TEST_WORLD_EDITS) {
+                lockView(player, 0.0f, -35.0f); // unter Wasser nach oben: Snell-Fenster
+            } else if (((f >= 1380 && f <= 1440) || (f >= 960 && f <= 1010) || (f >= 1220 && f <= 1260)) && TEST_WORLD_EDITS) {
+                lockView(player, 0.0f, 40.0f); // Blick nach Sueden (+Z) auf den Test-Teich
+            } else {
+                lockView(player, player.getYRot() + 4.0f, (float) Math.sin(f * 0.02) * 35.0f);
+            }
+        }
+        if (EXIT_AFTER_FRAMES > 0 && f == EXIT_AFTER_FRAMES) {
+            // Selbsttest: sauber beenden (prueft den Shutdown-Pfad)
+            LOG.info("[vulkanfish] Selbsttest: {} Frames, beende Client", f);
+            Minecraft.getInstance().stop();
+        }
+    }
+
+    private long vanillaTestFrame;
+
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
+        if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
+            selfTestFrame(++vanillaTestFrame); // Vergleichslauf ohne unseren Renderer (Vanilla-Bild)
+        }
         if (initialized && nativeRunner != null && nativeRunner.isReady() && config.enableTaa()) {
             long t0 = System.nanoTime();
             nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget());
@@ -212,70 +288,7 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        if (EXIT_AFTER_FRAMES > 0) {
-            // Selbsttest laeuft ohne Fensterfokus: Minecraft pausiert dann den integrierten Server
-            // (keine Blockupdates, Zeit steht). Pause-Screen schliessen, Optionen bleiben unveraendert.
-            Minecraft mc = Minecraft.getInstance();
-            var screen = mc.gui.screen();
-            if (screen != null && screen.isPauseScreen()) mc.gui.setScreen(null);
-        }
-        if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.hizTest")) {
-            // A/B: gleiches Standbild mit/ohne Hi-Z -> Differenz = faelschlich weggecullte Geometrie
-            if (f == 560) pendingScreenshot = f;
-            if (f == 580) NativePassRunner.hizForceOff = true;
-            if (f == 620) pendingScreenshot = f;
-            if (f == 640) NativePassRunner.hizForceOff = false;
-        }
-        if (EXIT_AFTER_FRAMES > 0 && LOD_TEST) {
-            lodTest(f);
-        } else if (EXIT_AFTER_FRAMES > 0 && SCENE_TEST && TEST_WORLD_EDITS) {
-            sceneTest(f);
-        } else if (EXIT_AFTER_FRAMES > 0 && SNAPSHOTS) {
-            // Selbsttest-Tageszeiten fuer Look-Vergleiche: Mittag, Sonnenuntergang, Nacht
-            // Wasser-Szene nur in der Test-Welt (Kopie), nie in einer echten Welt
-            if (f == 300 && TEST_WORLD_EDITS) {
-                LOG.info("[vulkanfish] Selbsttest: Spieler bei {}", Minecraft.getInstance().player.blockPosition());
-                selfTestCommand("gamerule randomTickSpeed 0");          // kein Zufrieren im Schneebiom
-                selfTestCommand("gamerule minecraft:random_tick_speed 0");
-                selfTestCommand("execute at @p run fill ~-10 ~0 ~2 ~10 ~3 ~22 minecraft:air"); // Schneedecke weg
-                selfTestCommand("execute at @p run fill ~-10 ~-4 ~2 ~10 ~-1 ~22 minecraft:water");
-                selfTestCommand("execute at @p run fill ~-3 ~-4 ~8 ~3 ~-3 ~12 minecraft:stone");
-                selfTestCommand("execute at @p run fill ~-10 ~-1 ~15 ~0 ~-1 ~22 minecraft:ice");   // Eis auf dem Teich
-                selfTestCommand("execute at @p run fill ~2 ~0 ~5 ~4 ~1 ~5 minecraft:glass");
-                selfTestCommand("execute at @p run fill ~5 ~0 ~5 ~7 ~1 ~5 minecraft:light_blue_stained_glass");
-            }
-            if (f == 400) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag/Mittag
-            if (f == 1050) FrameDataCapture.testSunAngle = 80.0f;  // tiefe Abendsonne
-            if (f == 1300) FrameDataCapture.testSunAngle = 180.0f; // Mitternacht
-            // Schatten-Debug-Ansicht kurz vor den Mittag-/Abend-Screenshots
-            if (f == 930 || f == 1180) NativePassRunner.debugView = 1;
-            if (f == 960 || f == 1210) NativePassRunner.debugView = 0;
-            if (f == 1400) NativePassRunner.debugView = 5; // Wasser magenta
-            if (f == 1450 && TEST_WORLD_EDITS) selfTestCommand("execute at @p run tp @p ~ ~-3 ~8"); // in den Teich
-            if (f == 1440) NativePassRunner.debugView = 0;
-            if (f == 950 || f == 1200 || f == 1000 || f == 1250 || f == 1420 || f == 1500 || f == 1560) {
-                pendingScreenshot = f;
-            }
-        }
-        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && f > 700 && Minecraft.getInstance().player != null) {
-            // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
-            var player = Minecraft.getInstance().player;
-            if (f >= 1450 && TEST_WORLD_EDITS) {
-                player.setYRot(0.0f);   // unter Wasser nach oben: Snell-Fenster
-                player.setXRot(-35.0f);
-            } else if (((f >= 1380 && f <= 1440) || (f >= 960 && f <= 1010) || (f >= 1220 && f <= 1260)) && TEST_WORLD_EDITS) {
-                player.setYRot(0.0f);  // Blick nach Sueden (+Z) auf den Test-Teich
-                player.setXRot(40.0f);
-            } else {
-                player.setYRot(player.getYRot() + 4.0f);
-                player.setXRot((float) Math.sin(f * 0.02) * 35.0f);
-            }
-        }
-        if (EXIT_AFTER_FRAMES > 0 && f == EXIT_AFTER_FRAMES) {
-            // Selbsttest: sauber beenden (prueft den Shutdown-Pfad)
-            LOG.info("[vulkanfish] Selbsttest: {} Frames, beende Client", f);
-            Minecraft.getInstance().stop();
-        }
+        selfTestFrame(f);
         return ok;
     }
 
@@ -355,13 +368,11 @@ public final class VulkanfishRenderer {
             // Nahaufnahme von Sueden: Steinsaeule vor der Fackel wirft ihren Schatten zur Kamera
             if (f == 1150) selfTestCommand("tp @p 40.5 67 -52.5 180 45");
             boolean close = f >= 1150;
-            player.setYRot(close ? 180.0f : 0.0f);
-            player.setXRot(close ? 45.0f : 38.0f);
+            lockView(player, close ? 180.0f : 0.0f, close ? 45.0f : 38.0f);
             if (f == 1450) selfTestCommand("tp @p 34 72 -40 0 5"); // ueber die Kante ins Gelaende
             if (f >= 1450) {
                 // Bewegung fuer den Hi-Z-A/B: gleichmaessig drehen (Disocclusion an Silhouetten)
-                player.setYRot(180.0f + (Math.min(f, 1540) - 1450) * 2.5f); // ab 1540 still (A/B im selben Bild)
-                player.setXRot(8.0f);
+                lockView(player, 180.0f + (Math.min(f, 1540) - 1450) * 2.5f, 8.0f); // ab 1540 still (A/B im selben Bild)
             }
         }
         // GPU-Zeiten nur ueber die Nacht-Nahaufnahme mitteln (viele Fackel-Pixel = RT-Last)
@@ -382,6 +393,48 @@ public final class VulkanfishRenderer {
      * nach dem Laden Screenshots in zwei Richtungen, GPU-Zeiten ueber eine ruhige Phase.
      * Keine Weltaenderung (nur Teleport + Spectator, Zeit fest auf Mittag).
      */
+    /**
+     * Eis-/Entity-Selbsttest (-Dvulkanfish.iceTest, nur Test-Welt): zugefrorener Teich, Eis
+     * wird angeschlagen (Risse) und gebrochen (wird zu Wasser); Tiere in der Sonne fuer Schatten.
+     */
+    private void iceTest(long f) {
+        BlockPos hit = new BlockPos(34, 62, -56), hit2 = new BlockPos(36, 62, -54);
+        if (f == 300) {
+            selfTestCommand("gamerule minecraft:random_tick_speed 0");
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("gamerule minecraft:advance_weather false");
+            selfTestCommand("weather clear");
+            selfTestCommand("kill @e[type=!player]");
+            selfTestCommand("fill 18 63 -78 50 80 -44 minecraft:air");
+            selfTestCommand("fill 18 58 -78 50 62 -44 minecraft:stone");
+            selfTestCommand("fill 25 59 -62 43 61 -46 minecraft:water");
+            selfTestCommand("fill 25 62 -62 43 62 -46 minecraft:ice");
+            selfTestCommand("fill 39 63 -60 40 65 -60 minecraft:glass");
+            selfTestCommand("summon minecraft:cow 27 63 -68 {NoAI:1b,Rotation:[90f,0f]}");
+            selfTestCommand("summon minecraft:sheep 31 63 -67 {NoAI:1b,Rotation:[45f,0f]}");
+            selfTestCommand("summon minecraft:villager 35 63 -68 {NoAI:1b,Rotation:[180f,0f]}");
+            selfTestCommand("summon minecraft:armor_stand 39 63 -68 {ShowArms:1b,ArmorItems:[{},{},{id:\"minecraft:iron_chestplate\",count:1},{id:\"minecraft:iron_helmet\",count:1}]}");
+        }
+        var player = Minecraft.getInstance().player;
+        if (f >= 320 && player != null) {
+            if (f == 320) {
+                selfTestCommand("gamemode spectator @p");
+                selfTestCommand("tp @p 34 68.5 -66 0 48");
+            }
+            if (f == 850) selfTestCommand("tp @p 35 64.6 -59.5 0 30"); // nah an die Bruchstellen
+            lockView(player, 0.0f, f >= 850 ? 30.0f : 48.0f);
+        }
+        if (f == 330) FrameDataCapture.testSunAngle = 20.0f;
+        var level = Minecraft.getInstance().level;
+        if (level != null && f >= 710 && f < 790) level.destroyBlockProgress(4711, hit, (int) ((f - 710) / 8));
+        if (level != null && f == 790) level.destroyBlockProgress(4711, hit, -1);
+        if (f == 800) {
+            selfTestCommand("setblock " + hit.getX() + " " + hit.getY() + " " + hit.getZ() + " minecraft:water"); // Spielerabbau: Eis -> Wasser
+            selfTestCommand("setblock " + hit2.getX() + " " + hit2.getY() + " " + hit2.getZ() + " minecraft:air");
+        }
+        if (f == 700 || f == 750 || f == 785 || f == 801 || f == 803 || f == 806 || f == 812 || f == 840 || f == 900 || f == 940) pendingScreenshot = f;
+    }
+
     private final java.util.List<Long> testFrameNs = new java.util.ArrayList<>();
     private long testLastNs;
 
@@ -394,8 +447,7 @@ public final class VulkanfishRenderer {
         }
         if (f >= 300 && player != null) {
             float yaw = f < 1700 ? 0.0f : 90.0f;
-            player.setYRot(yaw);
-            player.setXRot(12.0f);
+            lockView(player, yaw, 12.0f);
         }
         if (f == 1500 && nativeRunner != null) nativeRunner.passTimings();
         if (f == 1650 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit LOD-Blick: {}", nativeRunner.passTimings());
@@ -419,6 +471,14 @@ public final class VulkanfishRenderer {
                     String.format("%.2f", p99), String.format("%.2f", nativeRunner.slotWaitNs / 1e6 / Math.max(1, a.length)));
         }
         if (f == 900 || f == 1600 || f == 2300 || f == 5300) pendingScreenshot = f;
+    }
+
+    /** Selbsttest: Blickrichtung fest (auch die Vorwerte, sonst verschiebt echte Mausbewegung das Bild). */
+    private static void lockView(net.minecraft.world.entity.player.Player player, float yaw, float pitch) {
+        player.setYRot(yaw);
+        player.setXRot(pitch);
+        player.yRotO = yaw;
+        player.xRotO = pitch;
     }
 
     /** Selbsttest: Befehl im integrierten Server (nur mit -Dvulkanfish.testWorldEdits). */

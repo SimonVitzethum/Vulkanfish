@@ -48,6 +48,15 @@ public class LevelRendererMixin {
         }
     }
 
+    /** Abbau-Animation: auf Eis/Glas das Riss-Overlay hinter unseren Wasser-/Glas-Pass schieben. */
+    @Inject(method = "submitBlockDestroyAnimation", at = @At("HEAD"))
+    private void vulkanfish$breakingOverlayOrder(com.mojang.blaze3d.vertex.PoseStack poseStack,
+                                                 net.minecraft.client.renderer.SubmitNodeCollector collector,
+                                                 LevelRenderState state, CallbackInfo ci) {
+        simon.vulkanfish.client.render.BreakingOverlayDefer.onSubmit(state.blockBreakingRenderStates,
+                VulkanfishClient.RENDERER != null && VulkanfishClient.RENDERER.useGpuDrivenPath());
+    }
+
     @Inject(method = "render", at = @At("RETURN"))
     private void vulkanfish$onFrameEnd(CallbackInfo ci) {
         if (VulkanfishClient.RENDERER != null) VulkanfishClient.RENDERER.onFrameEnd();

@@ -152,6 +152,7 @@ final class SectionMesher {
                     if (state.isAir()) continue;
                     FluidState fluid = state.getFluidState();
                     if (!fluid.isEmpty()) {
+                        currentRegion = region;
                         fluidRenderer.tesselate(region, scratch, fluidOut, state, fluid);
                         boolean water = fluid.getType() == Fluids.WATER || fluid.getType() == Fluids.FLOWING_WATER;
                         fluidCapture.flush(this, water ? MAT_WATER : (MAT_LAVA | (15 << 4)));
@@ -342,10 +343,42 @@ final class SectionMesher {
         }
         // Fluid-Oberseiten haben ggf. eine Rueckseite -> kein Ebenentest; Wasser separat gruppiert
         boolean water = (material & 0xF) == MAT_WATER;
+        if (water && touchesSolid(v)) {
+            // Grenzflaeche Wasser | Eis/Glas/Block: fast gleiche Brechzahl -> keine Spiegelung (Bit 4)
+            for (int i = 0; i < 4; i++) words[quads * WORDS_PER_QUAD + i * 4 + 3] |= WATER_INTERFACE << 24;
+        }
         axisKey[quads] = water ? AXIS_WATER : AXIS_NONE;
         category[quads] = (byte) (water ? CAT_WATER : CAT_NO_RT); // Lava leuchtet selbst
         planeKey[quads] = 0;
         quads++;
+    }
+
+    /** Wasser-Emission ist immer 0: Bit 4 des Materialbytes markiert Wasser an einem festen Nachbarn. */
+    static final int WATER_INTERFACE = 16;
+
+    /**
+     * Liegt die Wasserflaeche an einem Block, der Bewegung blockiert (Eis, Glas, Stufen ...)?
+     * Oberseite: Block darueber; Seiten: Nachbar in Normalenrichtung. Offene Flaechen (Luft,
+     * Pflanzen) bleiben normale Wasseroberflaeche mit Spiegelung.
+     */
+    private boolean touchesSolid(float[] v) {
+        float ax = v[5] - v[0], ay = v[6] - v[1], az = v[7] - v[2];
+        float bx = v[10] - v[0], by = v[11] - v[1], bz = v[12] - v[2];
+        float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+        float anx = Math.abs(nx), any = Math.abs(ny), anz = Math.abs(nz);
+        net.minecraft.core.Direction dir;
+        if (any >= anx && any >= anz) {
+            if (ny < 0) return false; // Rueckseite der Oberflaeche (Blick von unten)
+            dir = net.minecraft.core.Direction.UP;
+        } else if (anx >= anz) {
+            dir = nx > 0 ? net.minecraft.core.Direction.EAST : net.minecraft.core.Direction.WEST;
+        } else {
+            dir = nz > 0 ? net.minecraft.core.Direction.SOUTH : net.minecraft.core.Direction.NORTH;
+        }
+        if (currentRegion == null) return false;
+        neighborPos.setWithOffset(scratch, dir);
+        BlockState neighbor = currentRegion.getBlockState(neighborPos);
+        return neighbor.getFluidState().isEmpty() && neighbor.blocksMotion();
     }
 
     private void classify(float[] n) {

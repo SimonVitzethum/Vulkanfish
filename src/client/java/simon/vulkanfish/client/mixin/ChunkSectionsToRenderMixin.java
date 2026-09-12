@@ -32,6 +32,8 @@ public abstract class ChunkSectionsToRenderMixin {
         } else if (group == ChunkSectionLayerGroup.TRANSLUCENT) {
             // Nach Entities/transluzenten Features, vor Vanillas Glas/Eis: unser Wasser
             VulkanfishClient.RENDERER.renderWater();
+            // Risse auf Eis/Glas erst jetzt, ueber dem fertigen Wasser-/Glas-Bild
+            simon.vulkanfish.client.render.BreakingOverlayDefer.flush();
         }
     }
 }

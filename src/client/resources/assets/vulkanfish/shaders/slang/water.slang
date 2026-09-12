@@ -191,9 +191,12 @@ float4 waterFrag(WaterVertOut input) : SV_Target0
     bool below = top ? f.camPos.y < wp.y : f.fogType == 1;
     float3 Nf = top ? float3(0.0, below ? -1.0 : 1.0, 0.0) : faceN * (dot(V, faceN) > 0.0 ? -1.0 : 1.0);
 
+    // Grenzflaeche zu Eis/Glas/Block (SectionMesher.WATER_INTERFACE): gleiche Brechzahl -> keine
+    // Spiegelung, kein Glanz, keine Wellen; nur der Wasserkoerper dahinter
+    bool iface = ((uint(input.tint.a * 255.0 + 0.5) >> 4) & 1u) != 0;
     // Wellen nur auf waagerechten Flaechen, in der Ferne flacher (kein Flimmern)
     float3 N = Nf;
-    if (top)
+    if (top && !iface)
     {
         float2 g = waveGradient(wp.xz, f.time, f.rainFactor) / (1.0 + dist * 0.06);
         N = normalize(float3(-g.x, 1.0, -g.y));
@@ -246,27 +249,31 @@ float4 waterFrag(WaterVertOut input) : SV_Target0
         float2 Lxz = L.xz / max(length(L.xz), 1e-3);
         body *= 1.0 + dot(N.xz, Lxz) * 0.8 * lightFade * shadow;
 
-        // ---------- Oberflaeche: Reflexion ----------
-        float3 R = reflect(V, N);
-        R.y = abs(R.y); // Wellen duerfen nicht in den Boden reflektieren
-        float3 skyRefl = f.dimension == 0 ? display(skyRadiance(f, R, true) * (skyL * skyL), f) : body * 0.5;
-        float3 refl;
-        float fade;
-        if (traceReflection(f, wp, R, refl, fade))
-            refl = lerp(skyRefl, refl, fade);
-        else
-            refl = skyRefl;
-        float cosV = saturate(dot(-V, N));
-        // Fresnel (Schlick, leicht stilisiert: mehr Spiegelung als physikalisch)
-        float fresnel = 0.07 + 0.93 * pow(1.0 - cosV, 4.0);
-        color = lerp(body, refl, fresnel);
+        color = body;
+        if (!iface)
+        {
+            // ---------- Oberflaeche: Reflexion ----------
+            float3 R = reflect(V, N);
+            R.y = abs(R.y); // Wellen duerfen nicht in den Boden reflektieren
+            float3 skyRefl = f.dimension == 0 ? display(skyRadiance(f, R, true) * (skyL * skyL), f) : body * 0.5;
+            float3 refl;
+            float fade;
+            if (traceReflection(f, wp, R, refl, fade))
+                refl = lerp(skyRefl, refl, fade);
+            else
+                refl = skyRefl;
+            float cosV = saturate(dot(-V, N));
+            // Fresnel (Schlick, leicht stilisiert: mehr Spiegelung als physikalisch)
+            float fresnel = 0.07 + 0.93 * pow(1.0 - cosV, 4.0);
+            color = lerp(body, refl, fresnel);
 
-        // Sonnenglanz (eng + breiter Schimmer), mit Schatten
-        float3 H = normalize(L - V);
-        float nh = saturate(dot(N, H));
-        // Enger, heller Glanzpunkt + schwacher Schimmer; Fresnel begrenzt ihn bei steilem Blick
-        float spec = (pow(nh, 1400.0) * 5.0 + pow(nh, 160.0) * 0.12) * saturate(fresnel * 4.0);
-        color += display(directColor(f) * spec * shadow * lightFade * (1.0 - f.rainFactor), f);
+            // Sonnenglanz (eng + breiter Schimmer), mit Schatten
+            float3 H = normalize(L - V);
+            float nh = saturate(dot(N, H));
+            // Enger, heller Glanzpunkt + schwacher Schimmer; Fresnel begrenzt ihn bei steilem Blick
+            float spec = (pow(nh, 1400.0) * 5.0 + pow(nh, 160.0) * 0.12) * saturate(fresnel * 4.0);
+            color += display(directColor(f) * spec * shadow * lightFade * (1.0 - f.rainFactor), f);
+        }
     }
     else
     {
