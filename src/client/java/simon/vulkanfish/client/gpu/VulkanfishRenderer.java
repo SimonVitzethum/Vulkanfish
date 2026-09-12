@@ -169,7 +169,7 @@ public final class VulkanfishRenderer {
             // (keine Blockupdates, Zeit steht). Pause-Screen schliessen, Optionen bleiben unveraendert.
             Minecraft mc = Minecraft.getInstance();
             var screen = mc.gui.screen();
-            if (screen != null && screen.isPauseScreen()) mc.gui.setScreen(null);
+            if (screen instanceof net.minecraft.client.gui.screens.PauseScreen) mc.gui.setScreen(null);
             // Maus nicht fangen: echte Mausbewegung wuerde sonst die Testkamera drehen
             if (mc.mouseHandler.isMouseGrabbed()) mc.mouseHandler.releaseMouse();
         }
@@ -378,6 +378,21 @@ public final class VulkanfishRenderer {
         // GPU-Zeiten nur ueber die Nacht-Nahaufnahme mitteln (viele Fackel-Pixel = RT-Last)
         if (f == 1250 && nativeRunner != null) nativeRunner.passTimings();
         if (f == 1349 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit Nacht-Nahaufnahme: {}", nativeRunner.passTimings());
+        // Fullbright (nur im Test, ohne Speichern) + Videoeinstellungen einmal oeffnen
+        if (f == 1200) simon.vulkanfish.client.VulkanfishSettings.setFullbrightTransient(60);
+        if (f == 1230) pendingScreenshot = f;
+        if (f == 1235) simon.vulkanfish.client.VulkanfishSettings.setFullbrightTransient(0);
+        if (f == 1260) {
+            Minecraft mc = Minecraft.getInstance();
+            mc.gui.setScreen(new net.minecraft.client.gui.screens.options.VideoSettingsScreen(null, mc, mc.options));
+        }
+        if (f == 1290 && Minecraft.getInstance().gui.screen() instanceof net.minecraft.client.gui.screens.options.OptionsSubScreen s) {
+            // Abschnitt Vulkanfish vorhanden? (GUI landet nicht im Level-Screenshot)
+            StringBuilder sb = new StringBuilder();
+            collectWidgetText(s, sb);
+            LOG.info("[vulkanfish] Selbsttest Videoeinstellungen: {}", sb);
+        }
+        if (f == 1300) Minecraft.getInstance().gui.setScreen(null);
         if (f == 1350) NativePassRunner.debugView = 9;
         if (f == 1410) NativePassRunner.debugView = 0;
         if (f == 330) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag
@@ -478,6 +493,14 @@ public final class VulkanfishRenderer {
                     String.format("%.2f", p99), String.format("%.2f", nativeRunner.slotWaitNs / 1e6 / Math.max(1, a.length)));
         }
         if (f == 900 || f == 1600 || f == 2300 || f == 5300) pendingScreenshot = f;
+    }
+
+    /** Selbsttest: Beschriftungen aller Widgets (rekursiv) sammeln. */
+    private static void collectWidgetText(net.minecraft.client.gui.components.events.GuiEventListener l, StringBuilder sb) {
+        if (l instanceof net.minecraft.client.gui.components.AbstractWidget aw) sb.append(aw.getMessage().getString()).append(" | ");
+        if (l instanceof net.minecraft.client.gui.components.events.ContainerEventHandler c) {
+            for (net.minecraft.client.gui.components.events.GuiEventListener child : c.children()) collectWidgetText(child, sb);
+        }
     }
 
     /** Selbsttest: Blickrichtung fest (auch die Vorwerte, sonst verschiebt echte Mausbewegung das Bild). */

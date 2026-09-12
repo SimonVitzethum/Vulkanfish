@@ -42,7 +42,8 @@ public final class EntityShadowCapture {
 
     /** Vor Vanillas prepareFrame der Welt (nicht der Hand/GUI). */
     public static void begin() {
-        capturing = true;
+        // Vanillas Option "Entity-Schatten" schaltet auch die echten Schatten
+        capturing = net.minecraft.client.Minecraft.getInstance().options.entityShadows().get();
         DRAWS.clear();
         SEEN.clear();
     }
@@ -64,6 +65,10 @@ public final class EntityShadowCapture {
     public static void end(StagedVertexBuffer staged) {
         capturing = false;
         List<Batch> out = new ArrayList<>();
+        if (DRAWS.isEmpty()) {
+            frame = out;
+            return;
+        }
         GpuBuffer vb = ((StagedVertexBufferAccessor) staged).vulkanfish$vertexBuffer();
         if (vb instanceof VulkanGpuBuffer vk) {
             for (StagedVertexBuffer.Draw d : DRAWS) {

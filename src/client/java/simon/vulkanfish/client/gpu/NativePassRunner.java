@@ -122,7 +122,7 @@ public final class NativePassRunner {
     public static final int TARGET_LOD_QUADS = 4;
     public static final int TARGET_LOD_MESHLETS = 5;
     public static final int TARGET_LOD_CLUSTERS = 6;
-    private static final int UBO_BYTES = 512;
+    private static final int UBO_BYTES = 528;
     private static final int FRAMES = 3;
     private static final long STAGING_BYTES = 16L << 20;
     private static final long WAIT_TIMEOUT_NS = 2_000_000_000L;
@@ -2297,6 +2297,7 @@ public final class NativePassRunner {
         bb.putInt(492, rt != null ? rt.lightCount() : 0);
         bb.putInt(496, RtAccel.gridOrigin(d.camX())).putInt(500, RtAccel.gridOrigin(d.camY()))
                 .putInt(504, RtAccel.gridOrigin(d.camZ())).putInt(508, 0);
+        bb.putFloat(512, simon.vulkanfish.client.VulkanfishSettings.fullbright());
     }
 
     /** Selbsttest/A-B: Raytracing-Blocklicht abschalten (Vanilla-Blocklicht, gleiche Pipeline). */

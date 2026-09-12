@@ -76,6 +76,15 @@ float3 directColor(FrameUniforms f)
     return lerp(moonColor(f), sunColor(f), f.sunVisibility);
 }
 
+// Fullbright: weiches, leicht kuehles Fuelllicht unabhaengig von Himmels-/Blocklicht. Oben etwas
+// heller als unten, damit Formen lesbar bleiben; AO steckt in der Albedo, Sonnenschatten bleiben.
+float3 fullbrightLight(FrameUniforms f, float3 n)
+{
+    // progressiv: kleine Werte heben nur etwas an, 100 % ist taghell
+    float s = f.fullbright * sqrt(f.fullbright);
+    return s * float3(0.62, 0.66, 0.72) * lerp(0.7, 1.0, n.y * 0.5 + 0.5);
+}
+
 // Himmels-Ambient: Oberseiten bekommen mehr Himmel, Unterseiten Bodenreflex.
 float3 ambientColor(FrameUniforms f, float3 n)
 {

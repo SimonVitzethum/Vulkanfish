@@ -1,0 +1,5 @@
+{
+  "options.vulkanfish.header": "Vulkanfish",
+  "options.vulkanfish.fullbright": "Fullbright",
+  "options.vulkanfish.fullbright.tooltip": "Brightens dark areas (caves, night) with soft fill light. Shading, ambient occlusion and sun shadows are kept."
+}

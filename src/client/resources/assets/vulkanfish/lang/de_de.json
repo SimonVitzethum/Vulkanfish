@@ -1,0 +1,5 @@
+{
+  "options.vulkanfish.header": "Vulkanfish",
+  "options.vulkanfish.fullbright": "Fullbright",
+  "options.vulkanfish.fullbright.tooltip": "Hellt dunkle Bereiche (Höhlen, Nacht) mit weichem Fülllicht auf. Schattierung, Umgebungsverdeckung und Sonnenschatten bleiben erhalten."
+}

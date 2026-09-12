@@ -243,7 +243,8 @@ float4 waterFrag(WaterVertOut input) : SV_Target0
         float3 trans = exp(-absorb * thickness);
         float3 scatterTint = normalize(tintLin + float3(0.05, 0.45, 0.30));
         float3 scatterHdr = scatterTint * 0.50 * (ambientColor(f, float3(0, 1, 0)) * skyL * skyL
-                          + directColor(f) * lightFade * shadow * 0.35 + blockLightColor(input.light.x) * 0.5);
+                          + directColor(f) * lightFade * shadow * 0.35 + blockLightColor(input.light.x) * 0.5
+                          + fullbrightLight(f, float3(0, 1, 0)));
         float3 body = refr * trans + display(scatterHdr, f) * (1.0 - trans);
         // Wellen sichtbar machen: zur Sonne geneigte Flanken leicht heller
         float2 Lxz = L.xz / max(length(L.xz), 1e-3);

@@ -39,7 +39,9 @@ struct FrameUniforms
     uint rtFlags;             // 488  bit0: Raytracing-Blocklicht aktiv
     uint rtLightCount;        // 492
     int4 lightGrid;           // 496  xyz = Ursprung des Lichtgitters (Zellen a 8 Bloecke)
-};                            // 512 Byte
+    float fullbright;         // 512  0 aus .. 1 (Videoeinstellungen)
+    float3 pad512;
+};                            // 528 Byte
 
 // ---- Chunk-Cluster (LOD-Einheit, 2x2 Sections nah, groesser fern) ----
 struct Cluster

@@ -252,7 +252,7 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
         }
     }
 #endif
-    float3 lightSum = direct + ambient + blockLight + MIN_LIGHT;
+    float3 lightSum = direct + ambient + blockLight + fullbrightLight(f, n) + MIN_LIGHT;
     float3 c = albedo * lightSum;
     if (f.debugView != 0 && f.debugView <= 4) // 5+ sind Wasser-Ansichten
     {
