@@ -104,6 +104,8 @@ tasks.register("compileSlang") {
 	inputs.dir(slangSrc)
 	outputs.dir(slangOut)
 	doLast {
+		// Alte .spv (aus dem Manifest entfernte Module) nicht ins Jar mitnehmen
+		slangOut.deleteDir()
 		slangOut.mkdirs()
 		def manifest = new groovy.json.JsonSlurper().parseText(file("$slangSrc/shaders.json").text)
 		manifest.modules.each { m ->
