@@ -120,14 +120,17 @@ public final class VulkanfishRenderer {
             return;
         }
         streamer = new TerrainStreamer(nativeRunner);
+        simon.vulkanfish.client.VulkanfishSettings.initDefaults(config);
         if (config.enableLod() && nativeRunner.lodReady()) {
-            lod = new simon.vulkanfish.client.lod.LodManager(config.lodDistanceChunks(), config.lodPixelError());
+            lod = new simon.vulkanfish.client.lod.LodManager(simon.vulkanfish.client.VulkanfishSettings.lodChunks(),
+                    simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
             nativeRunner.setLod(lod);
-            nativeRunner.setLodGpuBudget(config.lodGpuBudgetMs());
+            nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
             lod.setRunner(nativeRunner);
             FrameDataCapture.lodFogDistance = lod.farBlocks();
             LOG.info("[vulkanfish] LOD-Fernfeld: {} Chunks, max. {} px Fehler pro Voxel, {} Worker-Threads, GPU-Budget {} ms",
-                    config.lodDistanceChunks(), config.lodPixelError(), WorkerPool.threads(), config.lodGpuBudgetMs());
+                    simon.vulkanfish.client.VulkanfishSettings.lodChunks(), simon.vulkanfish.client.VulkanfishSettings.lodPixelError(),
+                    WorkerPool.threads(), simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
         }
         initialized = true;
         vanillaOpaqueDisabled = true;
@@ -144,6 +147,7 @@ public final class VulkanfishRenderer {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || cameraState == null) return;
         long t0 = System.nanoTime();
+        applyLiveSettings();
         streamer.tick(mc.level, cameraState.pos.x, cameraState.pos.y, cameraState.pos.z);
         if (lod != null) {
             // Winkel eines Pixels: 2*tan(fov/2)/Hoehe = 2/(m11*Hoehe)
@@ -233,18 +237,34 @@ public final class VulkanfishRenderer {
 
     private long vanillaTestFrame;
 
+    /** Einstellungen aus dem Spiel (VulkanfishSettings) jeden Frame uebernehmen – Aenderungen gelten sofort. */
+    private boolean taaWasOn = true;
+
+    private void applyLiveSettings() {
+        NativePassRunner.rtForceOff = !simon.vulkanfish.client.VulkanfishSettings.raytracing() || Boolean.getBoolean("vulkanfish.rtOff");
+        if (lod != null) {
+            lod.setDistanceChunks(simon.vulkanfish.client.VulkanfishSettings.lodChunks());
+            lod.setPixelError(simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
+            FrameDataCapture.lodFogDistance = lod.farBlocks();
+            nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
+        }
+    }
+
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
         if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
             selfTestFrame(++vanillaTestFrame); // Vergleichslauf ohne unseren Renderer (Vanilla-Bild)
         }
-        if (initialized && nativeRunner != null && nativeRunner.isReady() && config.enableTaa()) {
+        boolean taaOn = simon.vulkanfish.client.VulkanfishSettings.taa();
+        if (taaOn && !taaWasOn && nativeRunner != null) nativeRunner.resetTaaHistory();
+        taaWasOn = taaOn;
+        if (initialized && nativeRunner != null && nativeRunner.isReady() && taaOn) {
             long t0 = System.nanoTime();
             nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget());
             cpuNanosTaa += System.nanoTime() - t0;
         }
         if (initialized) logCpu();
-        FrameDataCapture.taaJitter = initialized && nativeRunner != null && nativeRunner.isReady() && config.enableTaa();
+        FrameDataCapture.taaJitter = initialized && nativeRunner != null && nativeRunner.isReady() && simon.vulkanfish.client.VulkanfishSettings.taa();
         if (pendingScreenshot < 0) return;
         // Screenshot.grab kopiert SOFORT im Command-Stream -> erst hier ist das Level-Bild fertig
         long tag = pendingScreenshot;
@@ -392,7 +412,16 @@ public final class VulkanfishRenderer {
             collectWidgetText(s, sb);
             LOG.info("[vulkanfish] Selbsttest Videoeinstellungen: {}", sb);
         }
-        if (f == 1300) Minecraft.getInstance().gui.setScreen(null);
+        if (f == 1300) {
+            Minecraft mc = Minecraft.getInstance();
+            mc.gui.setScreen(new simon.vulkanfish.client.gui.VulkanfishSettingsScreen(null, mc.options));
+        }
+        if (f == 1310 && Minecraft.getInstance().gui.screen() instanceof simon.vulkanfish.client.gui.VulkanfishSettingsScreen vs) {
+            StringBuilder sb = new StringBuilder();
+            collectWidgetText(vs, sb);
+            LOG.info("[vulkanfish] Selbsttest Vulkanfish-Einstellungen: {}", sb);
+        }
+        if (f == 1315) Minecraft.getInstance().gui.setScreen(null);
         if (f == 1350) NativePassRunner.debugView = 9;
         if (f == 1410) NativePassRunner.debugView = 0;
         if (f == 330) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag

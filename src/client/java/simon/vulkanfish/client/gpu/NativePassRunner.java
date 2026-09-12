@@ -849,6 +849,11 @@ public final class NativePassRunner {
         genReady = false;
     }
 
+    /** TAA wieder an: alte History verwerfen (sonst ein Frame Nachziehen eines alten Bildes). */
+    public void resetTaaHistory() {
+        historyValid = false;
+    }
+
     public void setLod(simon.vulkanfish.client.lod.LodManager manager) {
         lod = manager;
     }
@@ -1833,7 +1838,7 @@ public final class NativePassRunner {
             }
             recordUploads(arena, cmd, slot);
             stamp(cmd, q0 + 1);
-            if (rt != null) recordRt(arena, cmd, slot, d);
+            if (rt != null && !rtForceOff) recordRt(arena, cmd, slot, d);
             if (pipeLodGen != 0L) recordLodGpu(arena, cmd, slot);
             stamp(cmd, q0 + 2);
             if (!visBitsCleared) {

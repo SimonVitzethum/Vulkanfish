@@ -65,8 +65,8 @@ public final class LodManager {
     public static final int MAX_CLUSTERS = 65535;
     public static final int NEAR_MASK_SIZE = 128; // Chunks je Achse, toroidal
 
-    private final int lodChunks;
-    private final float pixelError;
+    private volatile int lodChunks;
+    private volatile float pixelError;
     private final BobbySource bobby;
     private simon.vulkanfish.client.lod.gen.WorldgenSource worldgen;
     private NativePassRunner runner;
@@ -315,6 +315,26 @@ public final class LodManager {
         this.pixelError = Math.max(0.25f, pixelError);
         this.bobby = new BobbySource();
         instance = this;
+    }
+
+    /** Worldgen-Quelle neu aufsetzen (z. B. neuer Seed): wie ein Weltwechsel beim naechsten Tick. */
+    public void reloadWorldgen() {
+        level = null;
+    }
+
+    /** Fernfeld-Radius aendern (Einstellungen): neue Auswahl, Ueberzaehliges wird verdraengt. */
+    public void setDistanceChunks(int chunks) {
+        if (chunks == lodChunks) return;
+        lodChunks = chunks;
+        lastSelX = Double.NaN;
+    }
+
+    /** Erlaubter Bildfehler eines Voxels in Pixeln (kleiner = mehr Detail). */
+    public void setPixelError(float err) {
+        float e = Math.max(0.25f, err);
+        if (e == pixelError) return;
+        pixelError = e;
+        lastSelX = Double.NaN;
     }
 
     public static LodManager instance() {
