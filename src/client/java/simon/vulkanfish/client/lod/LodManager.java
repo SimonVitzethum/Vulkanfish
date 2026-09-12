@@ -164,6 +164,7 @@ public final class LodManager {
             if (ok) {
                 // bisher ohne Daten gebliebene Chunks jetzt generierbar -> Knoten neu bauen
                 for (Node n : nodes.values()) n.dirty = true;
+                requeueAll = true;
                 LOG.info("[vulkanfish] LOD: GPU-Generierung aktiv – fehlende Chunks entstehen aus Seed + Worldgen der Welt");
             }
         } catch (Throwable t) {
@@ -180,7 +181,10 @@ public final class LodManager {
                 Node n = nodes.get(j.nodeKey());
                 if (n == null || n.buildSerial != j.serial()) {
                     buildsInFlight.decrementAndGet();
-                    if (n != null) n.building = false;
+                    if (n != null) {
+                        n.building = false;
+                        enqueue(n);
+                    }
                     continue;
                 }
                 out.add(j);
@@ -196,10 +200,14 @@ public final class LodManager {
                 buildsInFlight.decrementAndGet();
                 Node n = nodes.get(job.nodeKey());
                 if (n == null || n.buildSerial != job.serial()) {
-                    if (n != null) n.building = false;
+                    if (n != null) {
+                        n.building = false;
+                        enqueue(n);
+                    }
                     continue;
                 }
                 n.building = false;
+                enqueue(n); // waehrend des Baus geaendert -> gleich wieder
                 int[] dir = new int[6];
                 int quads = 0, meshlets = 0;
                 for (int d = 0; d < 6; d++) {
@@ -237,6 +245,7 @@ public final class LodManager {
                     if (ms >= 0) meshletAlloc.free(ms, meshlets);
                     n.ready = false;
                     n.dirty = true;
+                    deferred.add(n.key);
                     warnFull();
                     continue;
                 }
@@ -319,7 +328,6 @@ public final class LodManager {
         boolean drawn;          // Cluster aktiv
         float[] aabb;
         long lastUsedFrame;
-        long nextCheckFrame;
         int buildSerial;
 
         Node(long key, int level, int nx, int nz) {
@@ -358,6 +366,11 @@ public final class LodManager {
     private int minY, height;
     private int camChunkX, camChunkZ, nearRd;
     private final int[] nearMask = new int[NEAR_MASK_SIZE * NEAR_MASK_SIZE / 32];
+    // Summentabelle der Nahfeld-Abdeckung um (satCx, satCz), Radius satR: Knoten-Test in O(1)
+    private int[] nearSat = new int[1];
+    private int satCx, satCz, satR;
+    private boolean nearMaskUploaded;
+    private final long[] selNs = new long[4]; // Messung: Auswahl, Sortierung, Zeichenmenge, Anzahl
     private boolean nearMaskDirty = true;
     private long lastLogMs;
     private int columnsBuilt, nodesBuilt;
@@ -416,6 +429,15 @@ public final class LodManager {
             nearMaskDirty = true;
         }
         if (frame % 10 == 0) nearMaskDirty = true; // geladene Chunks aendern sich laufend
+        boolean coverageChanged = false;
+        if (nearMaskDirty) {
+            nearMaskDirty = false;
+            coverageChanged = buildNearMask();
+            if ((coverageChanged || !nearMaskUploaded) && runner != null) {
+                runner.setLodNearMask(nearMask, camChunkX, camChunkZ);
+                nearMaskUploaded = true;
+            }
+        }
 
         // Fertige Saeulen -> betroffene Knoten neu bauen
         Long ck;
@@ -424,21 +446,63 @@ public final class LodManager {
         // Auswahl nur bei Bewegung (4 Bloecke) oder anderer Aufloesung/Sichtweite neu
         double moved = Double.isNaN(lastSelX) ? 1e9 : Math.abs(camX - lastSelX) + Math.abs(camY - lastSelY) + Math.abs(camZ - lastSelZ);
         if (moved > 4.0 || nearRd != lastSelNear || Math.abs(pixelAngle - lastPixelAngle) > lastPixelAngle * 0.02f
-                || frame % 30 == 0) {
+                || coverageChanged) {
             lastSelX = camX;
             lastSelY = camY;
             lastSelZ = camZ;
             lastSelNear = nearRd;
             lastPixelAngle = pixelAngle;
+            long t0 = System.nanoTime();
             select(camX, camY, camZ, pixelAngle);
+            long t1 = System.nanoTime();
             final double sx = camX, sz = camZ;
-            desired.unstableSort((a, b) -> Double.compare(keyDistance(a, sx, sz), keyDistance(b, sx, sz)));
+            sortByDistance(desired, sx, sz);
+            desiredSet.clear();
+            desiredSet.addAll(desired);
+            rebuildBuildQueue();
+            long t2 = System.nanoTime();
             updateDrawSet();
+            long t3 = System.nanoTime();
+            selNs[0] += t1 - t0;
+            selNs[1] += t2 - t1;
+            selNs[2] += t3 - t2;
+            selNs[3]++;
         }
         scheduleBuilds(camX, camZ);
         processRequests(camX, camZ);
         if (frame % 300 == 0) evict(camX, camZ);
+        sweepChunks(camX, camZ, 2048);
         log();
+    }
+
+    /** Math.hypot ist in Java sehr langsam (Ueberlaufschutz); hier genuegt sqrt. */
+    private static double len2(double dx, double dz) {
+        return Math.sqrt(dx * dx + dz * dz);
+    }
+
+    private long[] sortScratch = new long[0];
+
+    /**
+     * Nach Entfernung sortieren: Entfernung einmal je Knoten, als float-Bits (nicht negativ ->
+     * als Ganzzahl sortierbar) oben, Index unten, dann primitiv sortieren. Der Vergleicher mit
+     * zwei Entfernungen je Vergleich kostete bei ~12 000 Knoten 5-13 ms.
+     */
+    private void sortByDistance(LongArrayList keys, double cx, double cz) {
+        sortByDistance(keys, k -> keyDistance(k, cx, cz));
+    }
+
+    private void sortByDistance(LongArrayList keys, java.util.function.LongToDoubleFunction dist) {
+        int n = keys.size();
+        if (sortScratch.length < n) sortScratch = new long[Math.max(n, sortScratch.length * 2)];
+        long[] tmp = sortScratch;
+        for (int i = 0; i < n; i++) {
+            float d = (float) dist.applyAsDouble(keys.getLong(i));
+            tmp[i] = ((long) Float.floatToIntBits(Math.max(d, 0f)) << 32) | i;
+        }
+        java.util.Arrays.sort(tmp, 0, n);
+        long[] sorted = new long[n];
+        for (int i = 0; i < n; i++) sorted[i] = keys.getLong((int) tmp[i]);
+        for (int i = 0; i < n; i++) keys.set(i, sorted[i]);
     }
 
     /** Stufe, die in dieser Entfernung gezeichnet wird. */
@@ -492,12 +556,7 @@ public final class LodManager {
         int c0x = nx * chunksPer, c0z = nz * chunksPer;
         // Knoten groesser als das Nahfeld kann nicht ganz drin liegen
         if (chunksPer > nearRd * 2 + 1) return false;
-        for (int cz = c0z; cz < c0z + chunksPer; cz++) {
-            for (int cx = c0x; cx < c0x + chunksPer; cx++) {
-                if (!nearCovers(cx, cz)) return false;
-            }
-        }
-        return true;
+        return nearCount(c0x, c0z, c0x + chunksPer - 1, c0z + chunksPer - 1) == chunksPer * chunksPer;
     }
 
     /** Zeichnet das Nahfeld diesen Chunk? Gleiches Kriterium wie Vanillas Section-Sichtbarkeit. */
@@ -528,9 +587,16 @@ public final class LodManager {
 
     // ---------- Zeichnen ohne Loecher bei Stufenwechseln ----------
 
+    private final LongOpenHashSet desiredSet = new LongOpenHashSet();
+    private LongOpenHashSet drawnSet = new LongOpenHashSet(), drawScratch = new LongOpenHashSet();
+
+    private long lastDrawSetFrame = -100;
+
     private void updateDrawSet() {
-        LongOpenHashSet draw = new LongOpenHashSet();
-        LongOpenHashSet desiredSet = new LongOpenHashSet(desired);
+        lastDrawSetFrame = frame;
+        LongOpenHashSet draw = drawScratch;
+        draw.clear();
+        boolean anyFallback = false;
         for (int i = 0; i < desired.size(); i++) {
             long k = desired.getLong(i);
             Node n = nodes.get(k);
@@ -541,33 +607,52 @@ public final class LodManager {
             // Noch nicht fertig: fertige feinere Knoten (vom Heranzoomen) oder ein fertiger Vorfahr
             if (!collectReadyDescendants(keyLevel(k), keyX(k), keyZ(k), draw, 3)) {
                 long anc = readyAncestor(keyLevel(k), keyX(k), keyZ(k));
-                if (anc != 0) draw.add(anc);
+                if (anc != 0) {
+                    draw.add(anc);
+                    anyFallback = true;
+                }
             }
         }
         // Vorfahr gezeichnet -> seine Nachkommen nicht zusaetzlich (sonst Doppelgeometrie)
+        // (Ueberlappung entsteht nur durch Ersatz-Vorfahren; gewuenschte Knoten sind disjunkt)
         LongArrayList remove = new LongArrayList();
-        for (long k : draw) {
-            int l = keyLevel(k);
-            int nx = keyX(k), nz = keyZ(k);
-            for (int a = l + 1; a <= MAX_LEVEL; a++) {
-                nx >>= 1;
-                nz >>= 1;
-                if (draw.contains(nodeKey(a, nx, nz))) {
-                    remove.add(k);
-                    break;
+        if (anyFallback) {
+            for (long k : draw) {
+                int l = keyLevel(k);
+                int nx = keyX(k), nz = keyZ(k);
+                for (int a = l + 1; a <= MAX_LEVEL; a++) {
+                    nx >>= 1;
+                    nz >>= 1;
+                    if (draw.contains(nodeKey(a, nx, nz))) {
+                        remove.add(k);
+                        break;
+                    }
                 }
             }
         }
         for (int i = 0; i < remove.size(); i++) draw.remove(remove.getLong(i));
 
-        for (Node n : nodes.values()) {
-            boolean want = draw.contains(n.key);
-            if (want || desiredSet.contains(n.key)) n.lastUsedFrame = frame;
-            if (want != n.drawn) {
-                n.drawn = want;
-                (want ? clusterShow : clusterHide).add(n.key);
+        // Nur Aenderungen gegenueber dem letzten Stand (statt ueber alle Knoten)
+        for (long k : drawnSet) {
+            if (draw.contains(k)) continue;
+            Node n = nodes.get(k);
+            if (n != null && n.drawn) {
+                n.drawn = false;
+                n.lastUsedFrame = frame;
+                clusterHide.add(k);
             }
         }
+        for (long k : draw) {
+            Node n = nodes.get(k);
+            if (n == null) continue;
+            n.lastUsedFrame = frame;
+            if (!n.drawn) {
+                n.drawn = true;
+                clusterShow.add(k);
+            }
+        }
+        drawScratch = drawnSet;
+        drawnSet = draw;
     }
 
     /** Sind alle Teilflaechen durch fertige feinere Knoten abgedeckt? Dann diese zeichnen. */
@@ -607,20 +692,35 @@ public final class LodManager {
     // ---------- Bauen ----------
 
     private void scheduleBuilds(double camX, double camZ) {
+        if (requeueAll) {
+            requeueAll = false;
+            rebuildBuildQueue();
+        }
+        if (frame % RECHECK_FRAMES == 0 && !deferred.isEmpty()) {
+            // wartende Knoten (Daten fehlten, kein Platz) wieder pruefen
+            buildQueue.addAll(deferred);
+            deferred.clear();
+            queueUnsorted = true;
+        }
+        if (queueUnsorted && frame % 30 == 0) {
+            // Nachzuegler (Chunk-Aenderungen) nach Entfernung einordnen
+            queueUnsorted = false;
+            if (buildHead > 0) {
+                buildQueue.removeElements(0, Math.min(buildHead, buildQueue.size()));
+                buildHead = 0;
+            }
+            final double sx = camX, sz = camZ;
+            sortByDistance(buildQueue, k -> keyDistance(k, sx, sz));
+        }
         int budget = MAX_BUILDS_IN_FLIGHT - buildsInFlight.get();
         long t0 = System.nanoTime();
-        for (int i = 0; i < desired.size() && budget > 0; i++) {
-            long k = desired.getLong(i);
+        while (buildHead < buildQueue.size() && budget > 0) {
+            if ((buildHead & 15) == 0 && System.nanoTime() - t0 > SCHEDULE_BUDGET_NS) break;
+            long k = buildQueue.getLong(buildHead++);
             Node n = nodes.get(k);
-            if (n == null) {
-                n = new Node(k, keyLevel(k), keyX(k), keyZ(k));
-                nodes.put(k, n);
-            }
-            n.lastUsedFrame = frame;
-            if (n.building || !n.dirty || frame < n.nextCheckFrame) continue;
-            if ((i & 15) == 0 && System.nanoTime() - t0 > SCHEDULE_BUDGET_NS) break;
+            if (n == null || n.building || !n.dirty || !desiredSet.contains(k)) continue;
             if (!ensureChunks(n, camX, camZ)) {
-                n.nextCheckFrame = frame + RECHECK_FRAMES; // Daten kommen asynchron; Aenderung setzt dirty
+                deferred.add(k); // Daten kommen asynchron; Ankunft reiht den Knoten wieder ein
                 continue;
             }
             n.building = true;
@@ -657,18 +757,52 @@ public final class LodManager {
                 }
             });
         }
+        if (buildHead >= buildQueue.size()) {
+            buildQueue.clear();
+            buildHead = 0;
+        }
+    }
+
+    // ---------- Bau-Warteschlange: nur Knoten mit Arbeit, statt jeden Frame alle gewuenschten ----------
+    private final LongArrayList buildQueue = new LongArrayList();
+    private final LongArrayList deferred = new LongArrayList();
+    private int buildHead;
+    private boolean requeueAll, queueUnsorted;
+
+    /** Nach der Auswahl: gewuenschte Knoten (nach Entfernung sortiert) mit Arbeit einreihen. */
+    private void rebuildBuildQueue() {
+        buildQueue.clear();
+        buildHead = 0;
+        queueUnsorted = false;
+        for (int i = 0; i < desired.size(); i++) {
+            long k = desired.getLong(i);
+            Node n = nodes.get(k);
+            if (n == null) {
+                n = new Node(k, keyLevel(k), keyX(k), keyZ(k));
+                nodes.put(k, n);
+            }
+            n.lastUsedFrame = frame;
+            if (n.dirty && !n.building) buildQueue.add(k);
+        }
+    }
+
+    private void enqueue(Node n) {
+        if (n.dirty && !n.building && desiredSet.contains(n.key)) {
+            buildQueue.add(n.key);
+            queueUnsorted = true;
+        }
     }
 
     private static double keyDistance(long k, double camX, double camZ) {
         int l = keyLevel(k), size = 32 << l;
         double cx = keyX(k) * (double) size + size * 0.5, cz = keyZ(k) * (double) size + size * 0.5;
-        return Math.hypot(cx - camX, cz - camZ);
+        return len2(cx - camX, cz - camZ);
     }
 
     private static double nodeDistance(Node n, double camX, double camZ) {
         int size = 32 << n.level;
         double cx = n.nx * (double) size + size * 0.5, cz = n.nz * (double) size + size * 0.5;
-        return Math.max(0, Math.hypot(cx - camX, cz - camZ) - size * 0.7);
+        return Math.max(0, len2(cx - camX, cz - camZ) - size * 0.7);
     }
 
     /** Alle Chunks des Knotens (+1 Rand) mit passender Stufe da? Sonst anfordern. */
@@ -708,7 +842,7 @@ public final class LodManager {
                     Node n = nodes.get(nodeKey(l, nx, nz));
                     if (n != null) {
                         n.dirty = true;
-                        n.nextCheckFrame = 0;
+                        enqueue(n);
                     }
                 }
             }
@@ -726,7 +860,7 @@ public final class LodManager {
                 requestHead = 0;
             }
             final double sx = camX, sz = camZ;
-            requestQueue.unstableSort((a, b) -> Double.compare(chunkDist(a, sx, sz), chunkDist(b, sx, sz)));
+            sortByDistance(requestQueue, k -> chunkDist(k, sx, sz));
             requestSortedSize = requestQueue.size();
             if (requestQueue.isEmpty()) return;
         }
@@ -758,7 +892,7 @@ public final class LodManager {
 
     private static double chunkDist(long key, double camX, double camZ) {
         int cx = (int) (key >> 32), cz = (int) key;
-        return Math.hypot(cx * 16 + 8 - camX, cz * 16 + 8 - camZ);
+        return len2(cx * 16 + 8 - camX, cz * 16 + 8 - camZ);
     }
 
     private static LevelChunkSection[] copySections(LevelChunk chunk) {
@@ -909,6 +1043,7 @@ public final class LodManager {
                 if (n != null) {
                     n.building = false;
                     if (b.mesh() == null) n.dirty = true;
+                    if (n.dirty) deferred.add(n.key);
                 }
                 continue;
             }
@@ -918,13 +1053,17 @@ public final class LodManager {
             n.building = false;
             if (!upload(runner, n, b.mesh())) {
                 n.dirty = true; // kein Platz: spaeter erneut
+                deferred.add(n.key);
                 break;
             }
+            enqueue(n);
             budget -= bytes;
             nodesBuilt++;
             anyReady = true;
         }
-        if (anyReady || drawSetDirty) {
+        // Zeichenmenge hoechstens alle 3 Frames nachziehen (im Flug wird fast jeden Frame ein Knoten fertig)
+        if (anyReady) drawSetDirty = true;
+        if (drawSetDirty && frame - lastDrawSetFrame >= 3) {
             drawSetDirty = false;
             updateDrawSet();
         }
@@ -943,11 +1082,6 @@ public final class LodManager {
         }
         clusterShow.clear();
         runner.setLodCounts(clusterAlloc.top());
-        if (nearMaskDirty) {
-            nearMaskDirty = false;
-            buildNearMask();
-            runner.setLodNearMask(nearMask, camChunkX, camChunkZ);
-        }
     }
 
     private boolean upload(NativePassRunner runner, Node n, LodMesher.Mesh m) {
@@ -1030,23 +1164,48 @@ public final class LodManager {
     }
 
     /** Bit pro Chunk: vom Nahfeld gezeichnet -> Fernfeld-Quads dort verwerfen (toroidal 128x128). */
-    private void buildNearMask() {
+    /** @return true, wenn sich die Abdeckung geaendert hat (Auswahl neu). */
+    private boolean buildNearMask() {
+        int[] old = nearMask.clone();
+        int oldCx = satCx, oldCz = satCz;
         java.util.Arrays.fill(nearMask, 0);
-        if (level == null || nearRd <= 0) return;
-        int r = nearRd + 2;
-        for (int cz = camChunkZ - r; cz <= camChunkZ + r; cz++) {
-            for (int cx = camChunkX - r; cx <= camChunkX + r; cx++) {
-                if (!nearCovers(cx, cz)) continue;
-                int bit = (cz & (NEAR_MASK_SIZE - 1)) * NEAR_MASK_SIZE + (cx & (NEAR_MASK_SIZE - 1));
-                nearMask[bit >> 5] |= 1 << (bit & 31);
+        satCx = camChunkX;
+        satCz = camChunkZ;
+        satR = Math.max(0, nearRd + 2);
+        int w = satR * 2 + 1;
+        if (nearSat.length < (w + 1) * (w + 1)) nearSat = new int[(w + 1) * (w + 1)];
+        java.util.Arrays.fill(nearSat, 0);
+        if (level != null && nearRd > 0) {
+            for (int z = 0; z < w; z++) {
+                int cz = satCz - satR + z, row = 0;
+                for (int x = 0; x < w; x++) {
+                    int cx = satCx - satR + x;
+                    boolean cov = nearCovers(cx, cz);
+                    if (cov) {
+                        int bit = (cz & (NEAR_MASK_SIZE - 1)) * NEAR_MASK_SIZE + (cx & (NEAR_MASK_SIZE - 1));
+                        nearMask[bit >> 5] |= 1 << (bit & 31);
+                        row++;
+                    }
+                    nearSat[(z + 1) * (w + 1) + x + 1] = nearSat[z * (w + 1) + x + 1] + row;
+                }
             }
         }
+        return oldCx != satCx || oldCz != satCz || !java.util.Arrays.equals(old, nearMask);
+    }
+
+    /** Anzahl abgedeckter Chunks im Rechteck (Summentabelle, Chunks ausserhalb des Fensters = 0). */
+    private int nearCount(int c0x, int c0z, int c1x, int c1z) {
+        int w = satR * 2 + 1;
+        int x0 = Math.max(c0x - (satCx - satR), 0), z0 = Math.max(c0z - (satCz - satR), 0);
+        int x1 = Math.min(c1x - (satCx - satR), w - 1), z1 = Math.min(c1z - (satCz - satR), w - 1);
+        if (x0 > x1 || z0 > z1) return 0;
+        int W = w + 1;
+        return nearSat[(z1 + 1) * W + x1 + 1] - nearSat[z0 * W + x1 + 1] - nearSat[(z1 + 1) * W + x0] + nearSat[z0 * W + x0];
     }
 
     // ---------- Aufraeumen ----------
 
     private void evict(double camX, double camZ) {
-        double far = farBlocks() + 256;
         // Knoten, die lange weder gewuenscht noch als Ersatz gezeichnet wurden
         LongArrayList dead = new LongArrayList();
         LongOpenHashSet wanted = new LongOpenHashSet(desired);
@@ -1063,17 +1222,35 @@ public final class LodManager {
                 clusterAlloc.free(n.cluster, 1); // Cluster ist bereits genullt (nicht gezeichnet)
             }
         }
-        // Chunk-Daten weit ausserhalb
-        chunks.entrySet().removeIf(en -> {
-            long k = en.getKey();
-            return chunkDist(k, camX, camZ) > far && en.getValue().state != STATE_PENDING;
-        });
-        // Feine Stufen von Chunks, die nur noch grob gezeichnet werden, abwerfen (Speicher)
-        for (var en : chunks.entrySet()) {
+    }
+
+    private java.util.Iterator<java.util.Map.Entry<Long, ChunkEntry>> chunkSweep;
+    private long sweptBytes, sweptBytesLast;
+
+    /**
+     * Chunk-Daten aufraeumen, verteilt ueber die Frames (ein Durchlauf ueber ~200 000 Eintraege
+     * am Stueck kostete 15 ms): weit ausserhalb verwerfen, feine Stufen grob gezeichneter
+     * Chunks abwerfen (Speicher).
+     */
+    private void sweepChunks(double camX, double camZ, int budget) {
+        double far = farBlocks() + 256;
+        if (chunkSweep == null || !chunkSweep.hasNext()) {
+            sweptBytesLast = sweptBytes;
+            sweptBytes = 0;
+            chunkSweep = chunks.entrySet().iterator();
+        }
+        for (int i = 0; i < budget && chunkSweep.hasNext(); i++) {
+            var en = chunkSweep.next();
             ChunkEntry e = en.getValue();
+            double dist = chunkDist(en.getKey(), camX, camZ);
+            if (dist > far && e.state != STATE_PENDING) {
+                chunkSweep.remove();
+                continue;
+            }
             LodColumn c = e.column;
             if (c == null) continue;
-            int need = levelAt(chunkDist(en.getKey(), camX, camZ) - 32, lastPixelAngle);
+            sweptBytes += c.bytes();
+            int need = levelAt(dist - 32, lastPixelAngle);
             if (need > c.minLevel + 1) {
                 e.column = c.trimmed(need - 1); // eine Stufe Reserve fuer kleine Bewegungen
                 e.wantLevel = need - 1;
@@ -1085,8 +1262,15 @@ public final class LodManager {
         genQueue.clear();
         nodes.clear();
         chunks.clear();
+        chunkSweep = null;
+        nearMaskUploaded = false;
         built.clear();
         desired.clear();
+        desiredSet.clear();
+        drawnSet.clear();
+        buildQueue.clear();
+        deferred.clear();
+        buildHead = 0;
         requestQueue.clear();
         requestHead = 0;
         requestSet.clear();
@@ -1107,9 +1291,8 @@ public final class LodManager {
         long now = System.currentTimeMillis();
         if (now - lastLogMs < 10_000) return;
         lastLogMs = now;
-        long bytes = 0;
+        long bytes = sweptBytesLast; // aus dem verteilten Durchlauf (sweepChunks)
         int ready = 0, drawn = 0;
-        for (ChunkEntry e : chunks.values()) if (e.column != null) bytes += e.column.bytes();
         for (Node n : nodes.values()) {
             if (n.ready) ready++;
             if (n.drawn) drawn++;
@@ -1126,6 +1309,11 @@ public final class LodManager {
                 chunks.size(), bytes >> 20, sourceCount[LodColumn.SOURCE_LIVE], sourceCount[LodColumn.SOURCE_BOBBY],
                 sourceCount[LodColumn.SOURCE_SAVED], sourceCount[LodColumn.SOURCE_GENERATED], requestQueue.size() - requestHead,
                 WorkerPool.queued());
+        if (selNs[3] > 0) {
+            LOG.info("[vulkanfish] LOD-Auswahl ({}x): Auswahl {} ms, Sortierung {} ms, Zeichenmenge {} ms", selNs[3],
+                    fmt(selNs[0] / 1e6 / selNs[3]), fmt(selNs[1] / 1e6 / selNs[3]), fmt(selNs[2] / 1e6 / selNs[3]));
+            java.util.Arrays.fill(selNs, 0);
+        }
     }
 
     static final java.util.concurrent.atomic.AtomicLongArray MESH_TIMES = new java.util.concurrent.atomic.AtomicLongArray(2);

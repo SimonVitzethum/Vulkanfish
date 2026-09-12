@@ -19,6 +19,7 @@ import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.ModifyVariable;
+import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import simon.vulkanfish.client.VulkanfishClient;
 
@@ -82,20 +83,17 @@ public class LevelRendererMixin {
     }
 
     /**
-     * Hybrid: Vanilla zeichnet SOLID/CUTOUT nur noch fuer Sections, die (noch)
-     * nicht in unserer GPU-Scene liegen (frisch sichtbar, Scene voll, Fallback).
-     * TRANSLUCENT bleibt immer bei Vanilla.
+     * Hybrid: Vanilla zeichnet nur noch Sections, die (noch) nicht in unserer GPU-Scene liegen
+     * (frisch sichtbar, Scene voll, Fallback). Einmal je Section entschieden (leeres Mesh ->
+     * alle Schichten fallen weg) statt je Section und Schicht: das waren zehntausende
+     * Aufrufe samt Wrapper-Objekten pro Frame.
      */
-    @WrapOperation(method = "prepareChunkRenders",
-            at = @At(value = "INVOKE",
-                    target = "Lnet/minecraft/client/renderer/chunk/SectionMesh;getSectionDraw(Lnet/minecraft/client/renderer/chunk/ChunkSectionLayer;)Lnet/minecraft/client/renderer/chunk/SectionMesh$SectionDraw;"))
-    private SectionMesh.SectionDraw vulkanfish$skipCoveredSections(SectionMesh mesh, ChunkSectionLayer layer,
-                                                                  Operation<SectionMesh.SectionDraw> original,
-                                                                  @Local SectionRenderDispatcher.RenderSection section) {
-        if (VulkanfishClient.RENDERER != null
-                && VulkanfishClient.RENDERER.coversSection(section.getSectionNode())) {
-            return null;
+    @Redirect(method = "prepareChunkRenders", at = @At(value = "INVOKE",
+            target = "Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSection;getSectionMesh()Lnet/minecraft/client/renderer/chunk/SectionMesh;"))
+    private SectionMesh vulkanfish$skipCoveredSections(SectionRenderDispatcher.RenderSection section) {
+        if (VulkanfishClient.RENDERER != null && VulkanfishClient.RENDERER.coversSection(section.getSectionNode())) {
+            return net.minecraft.client.renderer.chunk.CompiledSectionMesh.EMPTY;
         }
-        return original.call(mesh, layer);
+        return section.getSectionMesh();
     }
 }

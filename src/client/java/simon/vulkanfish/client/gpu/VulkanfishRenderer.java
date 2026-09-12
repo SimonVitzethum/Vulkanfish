@@ -458,6 +458,29 @@ public final class VulkanfishRenderer {
     }
 
     private final java.util.List<Long> testFrameNs = new java.util.ArrayList<>();
+    private long spikeLastNs, spikeLastOurs, spikeLastGc;
+    private int spikeCount;
+
+    /** Selbsttest: Frames ueber 12 ms zerlegen (unsere CPU-Teile, GC, Rest = Vanilla/Treiber). */
+    private long spikeProbe(long f) {
+        long now = System.nanoTime();
+        long interval = spikeLastNs != 0L ? now - spikeLastNs : 0L;
+        long ours = cpuNanosStart + cpuNanosTerrain + cpuNanosWater + cpuNanosTaa;
+        long gc = 0;
+        for (var b : java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) gc += Math.max(0, b.getCollectionTime());
+        if (spikeLastNs != 0L) {
+            double frameMs = (now - spikeLastNs) / 1e6;
+            double oursMs = Math.max(0, ours - spikeLastOurs) / 1e6; // Akkumulatoren werden alle 10 s geleert
+            if (frameMs > 12.0 && spikeCount++ < 40) {
+                LOG.info("[vulkanfish] Spitze f{}: {} ms, davon unsere CPU {} ms, GC {} ms", f, String.format("%.1f", frameMs),
+                        String.format("%.1f", oursMs), gc - spikeLastGc);
+            }
+        }
+        spikeLastNs = now;
+        spikeLastOurs = ours;
+        spikeLastGc = gc;
+        return interval;
+    }
     private long testLastNs;
 
     private void lodTest(long f) {
@@ -484,6 +507,7 @@ public final class VulkanfishRenderer {
             if (testLastNs != 0L) testFrameNs.add(now - testLastNs);
         }
         testLastNs = System.nanoTime();
+        if (f >= 4500 && f <= 5300) spikeProbe(f);
         if (f == 5300 && nativeRunner != null) {
             long[] a = testFrameNs.stream().mapToLong(Long::longValue).sorted().toArray();
             double avg = java.util.Arrays.stream(a).average().orElse(0) / 1e6;
@@ -493,6 +517,26 @@ public final class VulkanfishRenderer {
                     String.format("%.2f", p99), String.format("%.2f", nativeRunner.slotWaitNs / 1e6 / Math.max(1, a.length)));
         }
         if (f == 900 || f == 1600 || f == 2300 || f == 5300) pendingScreenshot = f;
+        // Flug: 0,15 Bloecke je Frame nach Osten (~25 Bloecke/s), Frame-Zeiten wie oben
+        if (f > 5400 && f <= 6400 && player != null) {
+            player.setPos(player.getX() + 0.15, player.getY(), player.getZ());
+            if (f == 5401) {
+                testFrameNs.clear();
+                spikeCount = 0;
+                if (nativeRunner != null) nativeRunner.slotWaitNs = 0;
+            }
+            long iv = spikeProbe(f);
+            if (f > 5401 && iv > 0) testFrameNs.add(iv);
+        }
+        if (f == 6400) {
+            long[] a = testFrameNs.stream().mapToLong(Long::longValue).sorted().toArray();
+            LOG.info("[vulkanfish] Selbsttest Flug: Frame-Intervall mittel {} ms, Median {} ms, p99 {} ms, max {} ms",
+                    String.format("%.2f", java.util.Arrays.stream(a).average().orElse(0) / 1e6),
+                    String.format("%.2f", a.length > 0 ? a[a.length / 2] / 1e6 : 0),
+                    String.format("%.2f", a.length > 0 ? a[a.length * 99 / 100] / 1e6 : 0),
+                    String.format("%.2f", a.length > 0 ? a[a.length - 1] / 1e6 : 0));
+            pendingScreenshot = f;
+        }
     }
 
     /** Selbsttest: Beschriftungen aller Widgets (rekursiv) sammeln. */

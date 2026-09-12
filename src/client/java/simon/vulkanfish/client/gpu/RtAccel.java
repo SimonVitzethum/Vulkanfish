@@ -89,6 +89,8 @@ final class RtAccel {
     private int instanceCount;
 
     private final Long2ObjectOpenHashMap<Entry> entries = new Long2ObjectOpenHashMap<>();
+    // Sections mit BLAS (klein, ~Fenstergroesse): TLAS und Freigabe ohne Lauf ueber alle Sections
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet withAs = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private final List<long[]> destroyQueue = new ArrayList<>(); // {as, poolOff, poolLen, timelineValue}
     private final int[] lightData = new int[MAX_LIGHTS * 4];
     private int lightCount;
@@ -216,11 +218,13 @@ final class RtAccel {
     void clear(long retireValue) {
         for (Entry e : entries.values()) retire(e, retireValue);
         entries.clear();
+        withAs.clear();
         lightsDirty = true;
     }
 
     private void retire(Entry e, long retireValue) {
         if (e.as != 0L) destroyQueue.add(new long[]{e.as, e.poolOff, e.poolLen, retireValue});
+        withAs.remove(e.key);
         e.as = 0L;
         e.poolOff = -1;
     }
@@ -245,23 +249,35 @@ final class RtAccel {
         int csy = SectionPos.blockToSectionCoord(camY);
         int csz = SectionPos.blockToSectionCoord(camZ);
 
-        // 2) Kandidaten: im Fenster ohne aktuelles BLAS; weit draussen: freigeben
-        List<Entry> todo = new ArrayList<>();
-        for (Entry e : entries.values()) {
-            int d = cheb(e.key, csx, csy, csz);
-            if (d > WINDOW_SECTIONS + 1) {
-                if (e.as != 0L) {
-                    retire(e, retireValue);
-                    e.stale = true;
-                }
+        // 2) Weit draussen: BLAS freigeben (nur ueber Sections mit BLAS)
+        long[] asKeys = withAs.toLongArray();
+        for (long k : asKeys) {
+            if (cheb(k, csx, csy, csz) <= WINDOW_SECTIONS + 1) continue;
+            Entry e = entries.get(k);
+            if (e == null) {
+                withAs.remove(k);
                 continue;
             }
-            if (d <= WINDOW_SECTIONS && (e.stale || e.as == 0L) && e.solid + e.cutout > 0) todo.add(e);
-            else if (e.stale && e.solid + e.cutout == 0 && e.as != 0L) {
-                retire(e, retireValue); // Section hat keine RT-Geometrie mehr
-                e.stale = false;
-            } else if (e.solid + e.cutout == 0) {
-                e.stale = false;
+            retire(e, retireValue);
+            e.stale = true;
+        }
+        // Kandidaten: im Fenster ohne aktuelles BLAS (direkt nachschlagen statt alle Sections)
+        List<Entry> todo = new ArrayList<>();
+        int w = WINDOW_SECTIONS + 1;
+        for (int dy = -w; dy <= w; dy++) {
+            for (int dz = -w; dz <= w; dz++) {
+                for (int dx = -w; dx <= w; dx++) {
+                    Entry e = entries.get(SectionPos.asLong(csx + dx, csy + dy, csz + dz));
+                    if (e == null) continue;
+                    int d = Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz)));
+                    if (d <= WINDOW_SECTIONS && (e.stale || e.as == 0L) && e.solid + e.cutout > 0) todo.add(e);
+                    else if (e.stale && e.solid + e.cutout == 0 && e.as != 0L) {
+                        retire(e, retireValue); // Section hat keine RT-Geometrie mehr
+                        e.stale = false;
+                    } else if (e.solid + e.cutout == 0) {
+                        e.stale = false;
+                    }
+                }
             }
         }
         todo.sort((a, b) -> Integer.compare(cheb(a.key, csx, csy, csz), cheb(b.key, csx, csy, csz)));
@@ -270,8 +286,9 @@ final class RtAccel {
         // 3) TLAS aus allen BLAS im Fenster
         long base = instanceMapped[slot];
         int n = 0;
-        for (Entry e : entries.values()) {
-            if (e.as == 0L || n >= MAX_INSTANCES || cheb(e.key, csx, csy, csz) > WINDOW_SECTIONS) continue;
+        for (long k : withAs) {
+            Entry e = entries.get(k);
+            if (e == null || e.as == 0L || n >= MAX_INSTANCES || cheb(e.key, csx, csy, csz) > WINDOW_SECTIONS) continue;
             long o = base + (long) n * INSTANCE_BYTES;
             float ox = SectionPos.sectionToBlockCoord(SectionPos.x(e.key)) - 8f;
             float oy = SectionPos.sectionToBlockCoord(SectionPos.y(e.key)) - 8f;
@@ -383,6 +400,7 @@ final class RtAccel {
             // Altes BLAS (vorige Geometrie) nach Ablauf der laufenden Frames freigeben
             retire(e, retireValue);
             e.as = pAs.get(0);
+            withAs.add(e.key);
             e.poolOff = off;
             e.poolLen = units;
             e.asAddress = KHRAccelerationStructure.vkGetAccelerationStructureDeviceAddressKHR(dev,
@@ -470,8 +488,14 @@ final class RtAccel {
         float minY = gridY * CELL_BLOCKS - 15f, maxY = (gridY + GRID_CELLS) * CELL_BLOCKS + 15f;
         float minZ = gridZ * CELL_BLOCKS - 15f, maxZ = (gridZ + GRID_CELLS) * CELL_BLOCKS + 15f;
         List<Entry> near = new ArrayList<>();
-        for (Entry e : entries.values()) {
-            if (e.lights != null && e.lights.length > 0 && cheb(e.key, csx, csy, csz) <= WINDOW_SECTIONS) near.add(e);
+        int w = WINDOW_SECTIONS;
+        for (int dy = -w; dy <= w; dy++) {
+            for (int dz = -w; dz <= w; dz++) {
+                for (int dx = -w; dx <= w; dx++) {
+                    Entry e = entries.get(SectionPos.asLong(csx + dx, csy + dy, csz + dz));
+                    if (e != null && e.lights != null && e.lights.length > 0) near.add(e);
+                }
+            }
         }
         near.sort((a, b) -> Integer.compare(cheb(a.key, csx, csy, csz), cheb(b.key, csx, csy, csz)));
         int n = 0;
@@ -494,7 +518,7 @@ final class RtAccel {
         if (now - lastLogMs < 10_000) return;
         lastLogMs = now;
         LOG.info("[vulkanfish] RT: {} BLAS (Pool {}/{} MiB), TLAS {} Instanzen, {} Lichter, {} Builds gesamt, {} unveraendert behalten",
-                entries.values().stream().filter(e -> e.as != 0L).count(),
+                withAs.size(),
                 poolAlloc.top() * POOL_UNIT >> 20, poolAlloc.capacity() * POOL_UNIT >> 20, instanceCount, lightCount, builtTotal, reused);
     }
 
