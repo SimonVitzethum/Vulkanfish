@@ -60,7 +60,7 @@ public final class LodMaterials {
      *                  die Oberseitenfarbe, statt wie Pflanzen mit ihr gemischt zu werden
      */
     public record Material(int id, BlockState state, int kind, int[] color, boolean[] tinted,
-                           BlockTintSource tint, int emission, int tintType, int constTint, boolean fullCover) {
+                           BlockTintSource tint, int emission, int tintType, int constTint, boolean fullCover, int texId) {
         public boolean isVoxel() {
             return kind != KIND_AIR && kind != KIND_COVER;
         }
@@ -83,9 +83,27 @@ public final class LodMaterials {
     private static final AtomicInteger GENERATION = new AtomicInteger();
     private static final Material AIR;
 
+    /**
+     * Aussehen einer LOD-Flaeche beim Zeichnen: je Seite (oben, Seite, unten) Sprite im Block-Atlas
+     * (u0, v0, u1, v1; leer = keine Textur), dessen mittlere Helligkeit (0..255, Gamma) sowie Farbe
+     * und Toenungsart. Gleiches Aussehen teilt sich eine ID (Quads tragen sie statt einer Farbe);
+     * der Shader moduliert die Durchschnittsfarbe mit der Textur -> gleiche Muster wie das Nahfeld.
+     */
+    public record Appearance(int id, float[] rect, int[] luma, int[] color, int[] tint, int constTint) {
+    }
+
+    public static final int MAX_APPEARANCES = 8192; // 13 Bit im Quad
+    private static final ConcurrentHashMap<List<Object>, Appearance> APPEAR_BY_KEY = new ConcurrentHashMap<>();
+    private static final List<Appearance> APPEARANCES = new ArrayList<>();
+    private static volatile Appearance[] appearTable = new Appearance[0];
+
     static {
         BIOMES.add(null); // 0 = unbekannt
-        AIR = new Material(0, Blocks.AIR.defaultBlockState(), KIND_AIR, new int[3], new boolean[3], null, 0, 0, 0xFFFFFF, false);
+        AIR = new Material(0, Blocks.AIR.defaultBlockState(), KIND_AIR, new int[3], new boolean[3], null, 0, 0, 0xFFFFFF, false, 0);
+        // Aussehen 0: neutrales Grau ohne Textur (Tabelle voll)
+        Appearance none = new Appearance(0, new float[12], new int[3], new int[]{0x808080, 0x808080, 0x808080}, new int[3], 0xFFFFFF);
+        APPEARANCES.add(none);
+        appearTable = new Appearance[]{none};
         BY_ID.add(AIR);
         BY_STATE.put(AIR.state(), AIR);
         table = new Material[]{AIR};
@@ -101,6 +119,12 @@ public final class LodMaterials {
     public static synchronized void reset() {
         TINT_CACHE.clear();
         SPRITE_COLORS.clear();
+        synchronized (APPEARANCES) {
+            // neu in Material-Reihenfolge vergeben -> IDs meist gleich
+            APPEAR_BY_KEY.clear();
+            APPEARANCES.subList(1, APPEARANCES.size()).clear();
+            appearTable = APPEARANCES.toArray(new Appearance[0]);
+        }
         synchronized (BY_ID) {
             for (int i = 1; i < BY_ID.size(); i++) {
                 Material old = BY_ID.get(i);
@@ -202,13 +226,16 @@ public final class LodMaterials {
         int kind = classify(state);
         int[] color = new int[3];
         boolean[] tinted = new boolean[3];
+        TextureAtlasSprite[] sprites = new TextureAtlasSprite[3];
         BlockTintSource tint = null;
         if (kind != KIND_AIR) {
-            tint = averageColors(state, color, tinted);
+            tint = averageColors(state, color, tinted, sprites);
         }
         int[] tt = classifyTint(state, tint);
-        if (kind == KIND_WATER) {
-            // Fluessigkeiten haben kein Blockmodell: graue Wassertextur + Biom-Wasserfarbe (wie der Fluid-Renderer)
+        boolean liquid = kind == KIND_WATER && state.getBlock() instanceof LiquidBlock;
+        if (liquid) {
+            // Fluessigkeiten haben kein Blockmodell: graue Wassertextur + Biom-Wasserfarbe (wie der Fluid-Renderer);
+            // Wasserpflanzen (Seegras, Kelp) behalten ihr eigenes Aussehen (Grund unter ihnen im LOD)
             java.util.Arrays.fill(tinted, true);
             tt = new int[]{TINT_WATER, 0};
         }
@@ -217,9 +244,49 @@ public final class LodMaterials {
             // verschneites Gras/Myzel: die Oberseite ist in Vanilla immer von Schnee bedeckt
             color[FACE_TOP] = snowColor();
             tinted[FACE_TOP] = false;
+            sprites[FACE_TOP] = snowSprite();
         }
+        if (liquid) java.util.Arrays.fill(sprites, null); // eigene Wasser-Schattierung, kein Muster
+        int texId = kind == KIND_AIR ? 0 : appearance(sprites, color, tinted, tt[0], tt[1]);
         return new Material(id, state, kind, color, tinted, tint, Math.min(state.getLightEmission(), 15), tt[0], tt[1],
-                kind == KIND_COVER && coversTop(state));
+                kind == KIND_COVER && coversTop(state), texId);
+    }
+
+    private static int appearance(TextureAtlasSprite[] sprites, int[] color, boolean[] tinted, int tintType, int constTint) {
+        int[] tints = new int[3];
+        for (int f = 0; f < 3; f++) tints[f] = tinted[f] ? tintType : TINT_NONE;
+        List<Object> key = List.of(sprites[0] == null ? "" : sprites[0], sprites[1] == null ? "" : sprites[1],
+                sprites[2] == null ? "" : sprites[2], color[0], color[1], color[2], tints[0], tints[1], tints[2],
+                tintType == TINT_CONST ? constTint : 0);
+        Appearance a = APPEAR_BY_KEY.get(key);
+        if (a != null) return a.id();
+        synchronized (APPEARANCES) {
+            a = APPEAR_BY_KEY.get(key);
+            if (a != null) return a.id();
+            if (APPEARANCES.size() >= MAX_APPEARANCES) return 0;
+            float[] rect = new float[12];
+            int[] luma = new int[3];
+            for (int f = 0; f < 3; f++) {
+                TextureAtlasSprite sp = sprites[f];
+                if (sp == null) continue;
+                int c = spriteColor(sp);
+                if (c < 0) continue;
+                rect[f * 4] = sp.getU0();
+                rect[f * 4 + 1] = sp.getV0();
+                rect[f * 4 + 2] = sp.getU1();
+                rect[f * 4 + 3] = sp.getV1();
+                luma[f] = Math.round(((c >> 16) & 0xFF) * 0.2126f + ((c >> 8) & 0xFF) * 0.7152f + (c & 0xFF) * 0.0722f);
+            }
+            a = new Appearance(APPEARANCES.size(), rect, luma, color.clone(), tints, tintType == TINT_CONST ? constTint : 0xFFFFFF);
+            APPEARANCES.add(a);
+            APPEAR_BY_KEY.put(key, a);
+            appearTable = APPEARANCES.toArray(new Appearance[0]);
+            return a.id();
+        }
+    }
+
+    public static Appearance[] appearances() {
+        return appearTable;
     }
 
     /** Deckt die Form die ganze Blockoberseite ab (Schneeschicht, Teppich, Moosteppich)? */
@@ -231,6 +298,15 @@ public final class LodMaterials {
                     && shape.min(Direction.Axis.Z) < 0.01 && shape.max(Direction.Axis.Z) > 0.99;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    private static TextureAtlasSprite snowSprite() {
+        try {
+            return Minecraft.getInstance().getModelManager().getBlockStateModelSet()
+                    .get(Blocks.SNOW_BLOCK.defaultBlockState()).particleMaterial().sprite();
+        } catch (Throwable t) {
+            return null;
         }
     }
 
@@ -264,12 +340,13 @@ public final class LodMaterials {
     }
 
     /** Durchschnittsfarbe je Seite aus den Modell-Quads; liefert die Toenungsquelle (Tint-Index). */
-    private static BlockTintSource averageColors(BlockState state, int[] color, boolean[] tinted) {
+    private static BlockTintSource averageColors(BlockState state, int[] color, boolean[] tinted, TextureAtlasSprite[] sprites) {
         Minecraft mc = Minecraft.getInstance();
         BlockStateModel model = mc.getModelManager().getBlockStateModelSet().get(state);
         long[][] sum = new long[3][4]; // untoent: r,g,b,n  (Index 3 = Anzahl)
         long[][] sumT = new long[3][4];
         int tintIndex = -1;
+        TextureAtlasSprite[][] first = new TextureAtlasSprite[2][3]; // erstes Sprite je Seite: untoent, toent
         List<BlockStateModelPart> parts = new ArrayList<>();
         try {
             model.collectParts(RandomSource.create(42L), parts);
@@ -277,27 +354,34 @@ public final class LodMaterials {
         }
         for (BlockStateModelPart part : parts) {
             for (Direction dir : Direction.values()) {
-                for (BakedQuad q : part.getQuads(dir)) tintIndex = accumulate(q, sum, sumT, tintIndex);
+                for (BakedQuad q : part.getQuads(dir)) tintIndex = accumulate(q, sum, sumT, tintIndex, first);
             }
-            for (BakedQuad q : part.getQuads(null)) tintIndex = accumulate(q, sum, sumT, tintIndex);
+            for (BakedQuad q : part.getQuads(null)) tintIndex = accumulate(q, sum, sumT, tintIndex, first);
         }
-        int fallback = spriteColor(model.particleMaterial().sprite());
+        TextureAtlasSprite particle = model.particleMaterial().sprite();
+        int fallback = spriteColor(particle);
         for (int f = 0; f < 3; f++) {
             if (sum[f][3] > 0) {
                 color[f] = avg(sum[f]);
+                sprites[f] = first[0][f];
             } else if (sumT[f][3] > 0) {
                 color[f] = avg(sumT[f]);
                 tinted[f] = true;
+                sprites[f] = first[1][f];
             } else {
                 // keine Quads in diese Richtung: andere Seite, sonst Partikel-Textur
-                long[] any = sum[FACE_SIDE][3] > 0 ? sum[FACE_SIDE] : sum[FACE_TOP][3] > 0 ? sum[FACE_TOP] : null;
-                if (any != null) {
-                    color[f] = avg(any);
+                int of = sum[FACE_SIDE][3] > 0 ? FACE_SIDE : sum[FACE_TOP][3] > 0 ? FACE_TOP : -1;
+                if (of >= 0) {
+                    color[f] = avg(sum[of]);
+                    sprites[f] = first[0][of];
                 } else if (sumT[FACE_SIDE][3] > 0 || sumT[FACE_TOP][3] > 0) {
-                    color[f] = avg(sumT[FACE_SIDE][3] > 0 ? sumT[FACE_SIDE] : sumT[FACE_TOP]);
+                    int tf = sumT[FACE_SIDE][3] > 0 ? FACE_SIDE : FACE_TOP;
+                    color[f] = avg(sumT[tf]);
                     tinted[f] = true;
+                    sprites[f] = first[1][tf];
                 } else {
                     color[f] = fallback;
+                    sprites[f] = particle;
                 }
             }
         }
@@ -309,12 +393,13 @@ public final class LodMaterials {
         }
     }
 
-    private static int accumulate(BakedQuad q, long[][] sum, long[][] sumT, int tintIndex) {
+    private static int accumulate(BakedQuad q, long[][] sum, long[][] sumT, int tintIndex, TextureAtlasSprite[][] first) {
         int c = spriteColor(q.materialInfo().sprite());
         if (c < 0) return tintIndex;
         Direction d = q.direction();
         int f = d == Direction.UP ? FACE_TOP : d == Direction.DOWN ? FACE_BOTTOM : FACE_SIDE;
         boolean t = q.materialInfo().isTinted();
+        if (first[t ? 1 : 0][f] == null) first[t ? 1 : 0][f] = q.materialInfo().sprite();
         long[] s = t ? sumT[f] : sum[f];
         s[0] += (c >> 16) & 0xFF;
         s[1] += (c >> 8) & 0xFF;

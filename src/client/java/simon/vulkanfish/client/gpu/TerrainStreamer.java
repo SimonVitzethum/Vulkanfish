@@ -352,11 +352,15 @@ public final class TerrainStreamer {
         return m;
     }
 
+    /**
+     * Reihenfolge: erst nach waagerechtem Abstand der Chunk-Saeule, darin nach Hoehe. So werden alle
+     * Sections einer Saeule zusammen fertig (sonst Wasser ohne Grund darunter, Chunk halb gezeichnet).
+     */
     private static int dist2(long key, int cx, int cy, int cz) {
         int dx = SectionPos.x(key) - cx;
         int dy = SectionPos.y(key) - cy;
         int dz = SectionPos.z(key) - cz;
-        return dx * dx + dy * dy + dz * dz;
+        return (dx * dx + dz * dz) * 1024 + Math.min(dy * dy, 1023);
     }
 
     // ---------- Frame-Aufnahme: fertige Meshes -> GPU ----------

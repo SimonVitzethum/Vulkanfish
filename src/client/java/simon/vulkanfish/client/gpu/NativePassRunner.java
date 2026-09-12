@@ -204,6 +204,7 @@ public final class NativePassRunner {
     private long pipeTrans;
     private long lastAtlasView;
     private long pipeWater;
+    private long lodWaterMeshModule, lodWaterFragModule, pipeLodWater, pipeLodWaterDepth; // Fernfeld-Wasser
     private int waterColorFormat;
     // Exakte Transparenz (Pro-Pixel-Listen, oit.slang)
     private long pipeWaterDepth;     // Tiefen-Vorpass der Wasseroberflaeche (trennt davor/dahinter)
@@ -239,6 +240,10 @@ public final class NativePassRunner {
     private Buf visMeshlets2;   // Phase 2: neu sichtbare Meshlets
     // LOD-Fernfeld (Quads a 8 Byte, eigene Meshlet-/Cluster-Hierarchie, gleiche Cull-Pipeline)
     private Buf lodQuads;
+    private Buf lodVisWater, lodWaterIndirect;
+    // Zeichnen: Aussehen (3 x uint4 je ID) und Biomfarben, unabhaengig vom GPU-Generator (auch CPU-Mesher)
+    private Buf lodTexTable, lodDrawBiome;
+    private int lodTexUploaded, lodDrawBiomeUploaded, lodTexGeneration = -1;
     private Buf lodMeshlets;
     private Buf lodClusters;
     private Buf lodVis1;
@@ -356,6 +361,7 @@ public final class NativePassRunner {
 
     public static final int LOD_BATCH = 8;
     private static final int LOD_TMP_PER_DIR = 24 * 1024;
+    private static final int COMMIT_BYTES = 88; // lod_mesher.slang CommitJob: 8 + 7 + 7 uints
     private static final int LAT = 37;
     private long layoutLodGen, pipeLodGen, layoutLodMesh, pipeLodMesh;
     // GPU-Zeiten der LOD-Durchgaenge (eigene Query-Pool: Commit, F, C, S, COL, DECO, RUNS, Oberkanten, Greedy)
@@ -427,8 +433,8 @@ public final class NativePassRunner {
                     lgJobs[i] = makeBuffer(arena, LOD_BATCH * 32L, stor | uni, host);
                     lgMeshJobs[i] = makeBuffer(arena, LOD_BATCH * 16L, stor | uni, host);
                     lgCounts[i] = makeBuffer(arena, LOD_BATCH * 40L, stor | VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT, host);
-                    lgTmp[i] = makeBuffer(arena, (long) LOD_BATCH * 6 * LOD_TMP_PER_DIR * 8, stor, dev);
-                    lgCommit[i] = makeBuffer(arena, LOD_BATCH * 80L, stor | uni, host);
+                    lgTmp[i] = makeBuffer(arena, (long) LOD_BATCH * 7 * LOD_TMP_PER_DIR * 8, stor, dev); // 6 Seiten + Wasser
+                    lgCommit[i] = makeBuffer(arena, LOD_BATCH * (long) COMMIT_BYTES, stor | uni, host);
                     lgRunHead[i] = makeBuffer(arena, LOD_BATCH * 34L * 34 * 8, stor | uni, host);
                     lgRuns[i] = makeBuffer(arena, 1L << 20, stor | uni, host);
                 }
@@ -511,7 +517,8 @@ public final class NativePassRunner {
                     mb.putInt(i * 16 + f * 4, c | (t << 24));
                 }
                 int kind = m.kind();
-                mb.putInt(i * 16 + 12, (kind & 7) | ((m.emission() & 15) << 4) | (m.fullCover() ? 1 << 8 : 0));
+                mb.putInt(i * 16 + 12, (kind & 7) | ((m.emission() & 15) << 4) | (m.fullCover() ? 1 << 8 : 0)
+                        | ((m.texId() & 0x1FFF) << 16));
                 tb.putInt(i * 4, m.constTint());
             }
             lgUploadedMats = mats.length;
@@ -808,17 +815,17 @@ public final class NativePassRunner {
         MemoryUtil.memIntBuffer(lgCounts[bt.buf].mapped(), counts.length).get(counts);
         var commits = lodClient.lodMeshed(bt.jobs, counts);
         if (commits == null || commits.isEmpty()) return;
-        ByteBuffer cb = MemoryUtil.memByteBuffer(lgCommit[slot].mapped(), LOD_BATCH * 80);
+        ByteBuffer cb = MemoryUtil.memByteBuffer(lgCommit[slot].mapped(), LOD_BATCH * COMMIT_BYTES);
         int meshlets = 0;
         for (int c = 0; c < commits.size(); c++) {
             LodGpuCommit cm = commits.get(c);
-            int o = c * 80;
+            int o = c * COMMIT_BYTES;
             cb.putInt(o, cm.jobIndex()).putInt(o + 4, cm.quadStart()).putInt(o + 8, cm.meshletStart()).putInt(o + 12, cm.cluster())
                     .putInt(o + 16, cm.level()).putInt(o + 20, cm.nx()).putInt(o + 24, cm.nz()).putInt(o + 28, genMinY);
             int rel = 0;
-            for (int d = 0; d < 6; d++) {
+            for (int d = 0; d < 7; d++) { // 6 Seiten + Wasseroberflaeche
                 cb.putInt(o + 32 + d * 4, cm.dirQuads()[d]);
-                cb.putInt(o + 56 + d * 4, rel);
+                cb.putInt(o + 60 + d * 4, rel);
                 rel += (cm.dirQuads()[d] + 31) / 32;
             }
             meshlets += rel;
@@ -1237,10 +1244,16 @@ public final class NativePassRunner {
         // Wasser: Terrain-Bindings 0-3/6 + 4I(Szene) 5SMP 7I(Szenentiefe) 8I(Schatten) 9SMP(Vergleich).
         // Pipeline selbst entsteht lazy im Format des Main-Targets (renderWater).
         // + 12ST(OIT-Kopf) 13S(OIT-Knoten) 14S(OIT-Zaehler) fuer Glas/Eis
+        // + 15S(LOD-Quads) 16S(Nahfeld-Maske) 17S(Biomfarben), push 16 fuers Fernfeld-Wasser
         layoutWater = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, SB}, {3, UB}, {4, SI},
-                {5, SM}, {6, SB}, {7, SI}, {8, SI}, {9, SM}, {10, SI}, {11, SM}, {12, ST}, {13, SB}, {14, SB}}, M | F), 0, 0);
+                {5, SM}, {6, SB}, {7, SI}, {8, SI}, {9, SM}, {10, SI}, {11, SM}, {12, ST}, {13, SB}, {14, SB},
+                {15, SB}, {16, SB}, {17, SB}}, M | F), M | F, 16);
         waterMeshModule = module(arena, loader, "waterMesh");
         waterFragModule = module(arena, loader, "waterFrag");
+        lodWaterMeshModule = module(arena, loader, "lodWaterMesh");
+        lodWaterFragModule = module(arena, loader, "lodWaterFrag");
+        pipeLodWaterDepth = meshPipe(arena, layoutWater, lodWaterMeshModule, module(arena, loader, "lodWaterDepthFrag"), 0, FMT_LDR,
+                VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, true, true);
         // Tiefen-Vorpass (nur Mesh-Stage) + Glas-Aufnahme: ohne Farbziel, formatunabhaengig
         pipeWaterDepth = meshPipe(arena, layoutWater, waterMeshModule, 0L, 0, FMT_LDR,
                 VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, true, true);
@@ -1462,11 +1475,19 @@ public final class NativePassRunner {
             lodVisBits = makeBuffer(arena, meshlets * 4, stor | dst, dev);
             lodIndirect1 = makeBuffer(arena, 16, stor | ind | dst, dev);
             lodIndirect2 = makeBuffer(arena, 16, stor | ind | dst, dev);
+            // Wasseroberflaechen des Fernfelds: eigene Liste fuer den Wasser-Pass
+            lodVisWater = makeBuffer(arena, meshlets * 4, stor, dev);
+            lodWaterIndirect = makeBuffer(arena, 16, stor | ind | dst, dev);
             lodClusterTotal = makeBuffer(arena, 16, stor | dst, dev);
             int n = simon.vulkanfish.client.lod.LodManager.NEAR_MASK_SIZE;
             lodNearMask = makeBuffer(arena, (long) n * n * 4, stor | dst, dev); // je Chunk ein uint (Section-Bits)
+            int host = VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            lodTexTable = makeBuffer(arena, (long) simon.vulkanfish.client.lod.LodMaterials.MAX_APPEARANCES * 48, stor, host);
+            lodDrawBiome = makeBuffer(arena, 256L * 16, stor, host);
             int M = EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT, F = VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
-            layoutLod = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, SB}, {3, UB}, {6, SB}}, M | F), M | F, 16);
+            // 0 Meshlets, 1 Quads, 2 Nahfeld-Maske, 3 Frame, 4 Atlas, 5 Sampler, 6 Liste, 7 Aussehen, 8 Biomfarben
+            layoutLod = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, SB}, {3, UB}, {4, SI}, {5, SM},
+                    {6, SB}, {7, SB}, {8, SB}}, M | F), M | F, 16);
             pipeLod = meshPipe(arena, layoutLod, module(arena, loader, "lodMesh"), module(arena, loader, "lodFrag"),
                     2, FMT_GBUF, VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
             if (pipeLod == 0L) throw new IllegalStateException("LOD-Pipeline fehlgeschlagen");
@@ -1492,6 +1513,44 @@ public final class NativePassRunner {
 
     public boolean lodReady() {
         return lodReady;
+    }
+
+    /** Neue Aussehen/Biome fuer das LOD-Zeichnen hochladen (nur Zuwachs; bei Resource-Reload alles). */
+    private void updateLodDrawTables() {
+        int gen = simon.vulkanfish.client.lod.LodMaterials.generation();
+        if (gen != lodTexGeneration) {
+            lodTexGeneration = gen;
+            lodTexUploaded = 0;
+        }
+        var app = simon.vulkanfish.client.lod.LodMaterials.appearances();
+        if (app.length > lodTexUploaded) {
+            ByteBuffer tb = MemoryUtil.memByteBuffer(lodTexTable.mapped(), simon.vulkanfish.client.lod.LodMaterials.MAX_APPEARANCES * 48);
+            for (int i = lodTexUploaded; i < app.length; i++) {
+                var a = app[i];
+                for (int f = 0; f < 3; f++) {
+                    int o = i * 48 + f * 16;
+                    float[] r = a.rect();
+                    tb.putInt(o, unorm16(r[f * 4]) | (unorm16(r[f * 4 + 1]) << 16));
+                    tb.putInt(o + 4, unorm16(r[f * 4 + 2]) | (unorm16(r[f * 4 + 3]) << 16));
+                    tb.putInt(o + 8, (a.color()[f] & 0xFFFFFF) | (a.tint()[f] << 24));
+                    tb.putInt(o + 12, (a.constTint() & 0xFFFFFF) | ((a.luma()[f] & 0xFF) << 24));
+                }
+            }
+            lodTexUploaded = app.length;
+        }
+        int biomes = simon.vulkanfish.client.lod.LodMaterials.biomeCount();
+        if (biomes > lodDrawBiomeUploaded) {
+            ByteBuffer bb = MemoryUtil.memByteBuffer(lodDrawBiome.mapped(), 256 * 16);
+            for (int i = Math.max(0, lodDrawBiomeUploaded); i < biomes && i < 256; i++) {
+                int[] c = simon.vulkanfish.client.lod.LodMaterials.biomeColors(i);
+                for (int k = 0; k < 4; k++) bb.putInt(i * 16 + k * 4, c[k]);
+            }
+            lodDrawBiomeUploaded = biomes;
+        }
+    }
+
+    private static int unorm16(float v) {
+        return Math.round(Math.max(0f, Math.min(1f, v)) * 65535f);
     }
 
     /** Belegte LOD-Cluster-Slots (Dispatch-Umfang des Fernfeld-Culls). */
@@ -1936,6 +1995,8 @@ public final class NativePassRunner {
                 // Eine alte Pipeline bleibt in 'pipelines' und wird erst beim Shutdown zerstoert.
                 pipeWater = meshPipe(arena, layoutWater, waterMeshModule, waterFragModule, 1, format,
                         VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
+                pipeLodWater = meshPipe(arena, layoutWater, lodWaterMeshModule, lodWaterFragModule, 1, format,
+                        VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
                 // schreibt die Tiefe der naechsten Glasschicht (wie Vanillas transluzentes Terrain):
                 // Risse, Partikel, Regen danach werden von Glas/Eis richtig verdeckt
                 pipeEntityShade = meshPipe(arena, layoutEntityShade, oitFsMeshModule, entityShadeFragModule, 1, format,
@@ -1993,6 +2054,14 @@ public final class NativePassRunner {
                     W.st(12, oitHead.view()), W.sb(13, oitNodes), W.sb(14, oitCounter)};
             W[] transBindings = waterBindings.clone();
             transBindings[6] = W.sb(6, visTrans);
+            boolean lodWater = lodReady && lodClusterCount > 0 && pipeLodWater != 0L && pipeLodWaterDepth != 0L;
+            W[] lodWaterBindings = lodWater ? new W[]{W.sb(0, lodMeshlets), W.ub(3, uniforms[slot]),
+                    W.si(4, sceneCopy.view()), W.sm(5, linearSampler), W.sb(6, lodVisWater),
+                    W.si(7, sceneDepth.view()), W.si(8, shadowMap.view()), W.sm(9, shadowSampler),
+                    W.si(10, lastAtlasView), W.sm(11, atlasSampler),
+                    W.sb(15, lodQuads), W.sb(16, lodNearMask), W.sb(17, lodDrawBiome)} : null;
+            ByteBuffer lodWaterPc = arena.malloc(16);
+            lodWaterPc.putInt(0, lodMaskCamX).putInt(4, lodMaskCamZ).putInt(8, lodMaskData != null ? 1 : 0).putInt(12, lodMaskMinSY);
 
             // 1) Nur Tiefe: Glas/Eis-Fragmente in die Pro-Pixel-Listen (gegen Szene ohne Wasser),
             //    danach die Wasseroberflaeche als Tiefe (trennt Glas davor/dahinter)
@@ -2011,6 +2080,12 @@ public final class NativePassRunner {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeWaterDepth);
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutWater, waterBindings);
             EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, waterIndirect.buffer(), 0L, 1, 12);
+            if (lodWater) {
+                VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLodWaterDepth);
+                push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutWater, lodWaterBindings);
+                VK10.vkCmdPushConstants(cmd, layoutWater, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, lodWaterPc);
+                EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodWaterIndirect.buffer(), 0L, 1, 12);
+            }
             KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
             fullBarrier(arena, cmd);
             stamp(cmd, slot * TS_PER_FRAME + TS_TERRAIN + 5);
@@ -2038,6 +2113,13 @@ public final class NativePassRunner {
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeWater);
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutWater, waterBindings);
             EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, waterIndirect.buffer(), 0L, 1, 12);
+            if (lodWater) {
+                // Fernfeld-Wasser mit derselben Schattierung (Brechung des LOD-Grundes, SSR, Wellen)
+                VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLodWater);
+                push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutWater, lodWaterBindings);
+                VK10.vkCmdPushConstants(cmd, layoutWater, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, lodWaterPc);
+                EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodWaterIndirect.buffer(), 0L, 1, 12);
+            }
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeOitComposite);
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutOitComposite, W.si(0, oitFront.view()),
                     W.si(1, oitFrontDepth.view()));
@@ -2299,6 +2381,7 @@ public final class NativePassRunner {
         if (lodReady) {
             VK10.vkCmdUpdateBuffer(cmd, lodIndirect1.buffer(), 0, arena.ints(0, 1, 1));
             VK10.vkCmdUpdateBuffer(cmd, lodIndirect2.buffer(), 0, arena.ints(0, 1, 1));
+            VK10.vkCmdUpdateBuffer(cmd, lodWaterIndirect.buffer(), 0, arena.ints(0, 1, 1));
             VK10.vkCmdUpdateBuffer(cmd, lodClusterTotal.buffer(), 0, arena.ints(lodClusterCount));
             if (lodMaskPending && lodMaskData != null) {
                 lodMaskPending = false;
@@ -2356,7 +2439,7 @@ public final class NativePassRunner {
                 W.sb(0, lodClusters), W.sb(1, lodMeshlets), W.ub(2, ubo),
                 W.si(3, hiz.view()), W.sm(4, linearSampler),
                 W.sb(5, lodClusterTotal), W.sb(6, visible), W.sb(7, visMeshletCount), W.sb(8, indirect),
-                W.sb(9, visWater), W.sb(10, waterIndirect), W.sb(11, visTrans), W.sb(12, transIndirect),
+                W.sb(9, lodVisWater), W.sb(10, lodWaterIndirect), W.sb(11, visTrans), W.sb(12, transIndirect),
                 W.sb(13, lodVisBits), W.sb(14, lodNearMask));
         VK10.vkCmdPushConstants(cmd, layoutCull, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 // nearMode: Bit 0 an, darueber minSectionY + 2048
@@ -2441,9 +2524,11 @@ public final class NativePassRunner {
         EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, indirect.buffer(), 0L, 1, 12);
         if (lodReady && lodClusterCount > 0) {
             // Fernfeld in denselben G-Buffer (gleiche Tiefe -> Hi-Z und Deferred wie das Nahfeld)
+            updateLodDrawTables();
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLod);
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutLod,
-                    W.sb(0, lodMeshlets), W.sb(1, lodQuads), W.sb(2, lodNearMask), W.ub(3, uniforms[slot]), W.sb(6, lodList));
+                    W.sb(0, lodMeshlets), W.sb(1, lodQuads), W.sb(2, lodNearMask), W.ub(3, uniforms[slot]),
+                    W.si(4, atlasView), W.sm(5, atlasSampler), W.sb(6, lodList), W.sb(7, lodTexTable), W.sb(8, lodDrawBiome));
             ByteBuffer pc = arena.malloc(16);
             pc.putInt(0, lodMaskCamX).putInt(4, lodMaskCamZ).putInt(8, lodMaskData != null ? 1 : 0).putInt(12, lodMaskMinSY);
             VK10.vkCmdPushConstants(cmd, layoutLod, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, pc);

@@ -6,11 +6,11 @@
 
 [[vk::binding(0, 0)]] StructuredBuffer<uint2> gGrid;
 [[vk::binding(1, 0)]] StructuredBuffer<uint4> gMat;        // top, side, bottom (rgb | Toenung << 24), info
-[[vk::binding(2, 0)]] StructuredBuffer<uint> gMatTint;     // feste Toenung je Material
+[[vk::binding(2, 0)]] StructuredBuffer<uint> gMatTint;     // feste Toenung je Material (Farbe rechnet jetzt der Draw-Shader)
 [[vk::binding(3, 0)]] StructuredBuffer<uint4> gBiomeCol;   // Gras, Laub, Trockenlaub, Wasser
 [[vk::binding(4, 0)]] RWStructuredBuffer<int> gTop;        // je Job 34x34 oberster verdeckender Voxel
-[[vk::binding(5, 0)]] RWStructuredBuffer<uint> gCount;     // je Job: 6 Seiten, Ueberlauf, yMin, yMax, frei
-[[vk::binding(6, 0)]] RWStructuredBuffer<uint2> gTmpQuads; // je Job 6 Bereiche a TMP_PER_DIR
+[[vk::binding(5, 0)]] RWStructuredBuffer<uint> gCount;     // je Job: 6 Seiten, Ueberlauf, yMin, yMax, Wasser
+[[vk::binding(6, 0)]] RWStructuredBuffer<uint2> gTmpQuads; // je Job 7 Bereiche a TMP_PER_DIR (6 Seiten + Wasseroberflaeche)
 struct MeshJob
 {
     int level;
@@ -27,8 +27,8 @@ struct CommitJob
     uint meshletStart; // Pool
     uint cluster;
     int level, nx, nz, minY;
-    uint dirQuads[6];  // Anzahl je Seite
-    uint dirMeshletStart[6]; // relativ
+    uint dirQuads[7];  // Anzahl je Seite, [6] = Wasseroberflaeche (eigene Meshlets fuer den Wasser-Pass)
+    uint dirMeshletStart[7]; // relativ
 };
 [[vk::binding(8, 0)]] StructuredBuffer<CommitJob> gCommit;
 [[vk::binding(9, 0)]] RWStructuredBuffer<uint2> gPoolQuads;
@@ -56,6 +56,8 @@ struct MeshParams
 [[vk::push_constant]] ConstantBuffer<MeshParams> gM;
 
 static const uint W = 34;
+static const uint NB = 7;            // Quad-Gruppen je Job: 6 Seiten + Wasseroberflaeche
+static const uint WATER_BIT = 0x80000000u; // Meshlet-Kennung wie im Nahfeld (Wasser-Pass statt G-Buffer)
 static const uint TILE = 64;
 static const uint KIND_AIR = 0, KIND_SOLID = 1, KIND_LEAVES = 2, KIND_COVER = 3, KIND_WATER = 4, KIND_LAVA = 5, KIND_GLASS = 6;
 static const int3 DIRS[6] = { int3(1, 0, 0), int3(-1, 0, 0), int3(0, 1, 0), int3(0, -1, 0), int3(0, 0, 1), int3(0, 0, -1) };
@@ -65,33 +67,40 @@ uint gidx(uint job, int gx, int y, int gz) { return job * gM.gridPerJob + (uint(
 uint kindOf(uint mat) { return gMat[mat].w & 7u; }
 bool occludes(uint k) { return k == KIND_SOLID || k == KIND_LEAVES || k == KIND_LAVA || k == KIND_GLASS; }
 
-uint mulRgb(uint a, uint b)
+// Wasservoxel ab (x, y, z) nach oben (bis 32)
+int waterAbove(uint job, int x, int y, int z, uint h)
 {
-    uint r = ((a >> 16) & 255u) * ((b >> 16) & 255u) / 255u;
-    uint g = ((a >> 8) & 255u) * ((b >> 8) & 255u) / 255u;
-    uint bl = (a & 255u) * (b & 255u) / 255u;
-    return (r << 16) | (g << 8) | bl;
+    int n = 0;
+    while (y + n < int(h) && n < 32)
+    {
+        uint wm = gGrid[gidx(job, x, y + n, z)].x & 0xFFFFu;
+        if (wm == 0 || kindOf(wm) != KIND_WATER) break;
+        n++;
+    }
+    return n;
 }
 
-// Seitenfarbe inkl. Biom-Toenung (LodMaterials.faceColor)
-uint faceColor(uint mat, uint face, uint biome)
+// Himmelslicht unter Ueberhang/Baumkrone wie Vanilla: 15 minus Abstand (Bloecke) zur naechsten
+// Spalte, die auf dieser Hoehe offen ist (Licht faellt seitlich ein); Hoehlen werden so dunkel
+uint coveredSky(uint job, int cx, int cz, int y, int level)
 {
-    uint4 m = gMat[mat];
-    uint c = face == 0 ? m.x : face == 1 ? m.y : m.z;
-    uint tint = c >> 24;
-    c &= 0xFFFFFFu;
-    if (tint == 0) return c;
-    uint4 bc = gBiomeCol[biome];
-    uint t = tint == 1 ? bc.x : tint == 2 ? bc.y : tint == 3 ? bc.z : tint == 4 ? bc.w : gMatTint[mat];
-    return mulRgb(c, t & 0xFFFFFFu);
-}
-
-uint mixRgb(uint a, uint b)
-{
-    uint r = (((a >> 16) & 255u) + ((b >> 16) & 255u)) >> 1;
-    uint g = (((a >> 8) & 255u) + ((b >> 8) & 255u)) >> 1;
-    uint bl = ((a & 255u) + (b & 255u)) >> 1;
-    return (r << 16) | (g << 8) | bl;
+    int scale = 1 << uint(level);
+    for (int r = 1; r * scale < 15 && r <= 7; r++)
+    {
+        for (int d = -r; d <= r; d++)
+        {
+            int2 cand[4] = { int2(cx + d, cz - r), int2(cx + d, cz + r), int2(cx - r, cz + d), int2(cx + r, cz + d) };
+            for (uint k = 0; k < 4; k++)
+            {
+                int2 c = cand[k];
+                if (c.x < 0 || c.y < 0 || c.x >= int(W) || c.y >= int(W))
+                    continue;
+                if (gTop[job * W * W + uint(c.y) * W + uint(c.x)] < y)
+                    return uint(15 - r * scale);
+            }
+        }
+    }
+    return 1u;
 }
 
 // 0 = keine Flaeche, sonst Schluessel (wie LodMesher.faceKey, Gueltigkeitsbit 1 in bit 31 der Rueckgabe separat)
@@ -114,7 +123,11 @@ uint faceKey(uint job, int x, int y, int z, uint dir, uint h, out bool valid)
     {
         nm = gGrid[gidx(job, nx, ny, nz)].x & 0xFFFFu;
         uint nk = nm == 0 ? KIND_AIR : kindOf(nm);
+        // Grund unter Wasser ist sichtbar, soweit das Wasser flach genug ist, um ihn zu sehen (der
+        // Wasser-Pass bricht ihn wie im Nahfeld): Oberseiten bis 24, Stufen bis 12 Bloecke Tiefe
         if (nk == KIND_AIR || nk == KIND_COVER) visible = true;
+        else if (nk == KIND_WATER && k != KIND_WATER && dir != 3)
+            visible = waterAbove(job, nx, ny, nz, h) * (1 << uint(gMJobs[job].level)) <= (dir == 2 ? 24 : 12);
         else
         {
             visible = false;
@@ -125,35 +138,35 @@ uint faceKey(uint job, int x, int y, int z, uint dir, uint h, out bool valid)
     if (!visible) return 0;
     if (k == KIND_WATER && dir != 2 && ny < int(h) && nm != 0 && kindOf(nm) != KIND_COVER) return 0;
     uint face = dir == 2 ? 0u : dir == 3 ? 2u : 1u;
-    uint biome = (v.x >> 16) & 255u;
-    uint rgb = faceColor(m, face, biome);
-    if (dir == 2 && v.y != 0)
-    {
-        // Bodendecker: Schneeschicht/Teppich (info bit 8) ersetzt die Oberseite, Pflanzen mischen
-        uint cov = v.y & 0xFFFFu;
-        uint cc = faceColor(cov, 0, biome);
-        rgb = ((gMat[cov].w >> 8) & 1u) != 0 ? cc : mixRgb(rgb, cc);
-    }
+    // Aussehen statt Farbe (Farbe, Toenung, Textur rechnet der Draw-Shader). Schnee/Teppich (info
+    // Bit 8) ersetzt die Oberseite; Pflanzen zeigt nur das Nahfeld
+    uint look = m;
+    if (dir == 2 && v.y != 0 && ((gMat[v.y & 0xFFFFu].w >> 8) & 1u) != 0)
+        look = v.y & 0xFFFFu;
+    // Grund unter Wasserpflanzen (Seegras, Kelp: Art Wasser, aber nicht wassergetoent): ihr Aussehen,
+    // so wie der Grund durchs Nahwasser gruen erscheint
+    else if (dir == 2 && k != KIND_WATER && nm != 0 && kindOf(nm) == KIND_WATER && (gMat[nm].x >> 24) != 4u)
+        look = nm;
+    uint4 lm = gMat[look];
+    uint faceWord = face == 0 ? lm.x : face == 1 ? lm.y : lm.z;
+    // ungetoent: Biomgrenzen trennen nicht; Wasser behaelt das Biom (Wasserfarbe im Wasser-Pass)
+    uint biome = (faceWord >> 24) != 0 || k == KIND_WATER ? (v.x >> 16) & 255u : 0u;
+    uint texId = (lm.w >> 16) & 0x1FFFu;
     uint sky;
     if (ny >= int(h)) sky = 15;
     else
     {
         int cx = clamp(nx, 0, int(W) - 1), cz = clamp(nz, 0, int(W) - 1);
-        sky = ny > gTop[job * W * W + uint(cz) * W + uint(cx)] ? 15u : 3u;
+        sky = ny > gTop[job * W * W + uint(cz) * W + uint(cx)] ? 15u : coveredSky(job, cx, cz, ny, gMJobs[job].level);
+        if (nm != 0 && kindOf(nm) == KIND_WATER && k != KIND_WATER)
+        {
+            // unter Wasser: Vanilla daempft Himmelslicht um 1 je Block Wasser (tiefer Grund ist dunkel)
+            sky = uint(max(int(sky) - waterAbove(job, cx, ny, cz, h) * (1 << uint(gMJobs[job].level)), 0));
+        }
     }
     uint emi = (gMat[m].w >> 4) & 15u;
-    if (k == KIND_WATER && dir == 2)
-    {
-        // Wasseroberflaeche: statt Leuchtkraft die Tiefe bis zum Grund (1..15 -> c*c/4 Bloecke,
-        // 0 = unbekannt/tief) fuer die Wasserfarbe im Deferred-Pass
-        int bed = gTop[job * W * W + uint(gz) * W + uint(gx)];
-        float depth = bed < 0 ? 1e6 : float(y - bed) * float(1u << uint(gMJobs[job].level));
-        emi = uint(clamp(ceil(sqrt(depth * 4.0)), 1.0, 15.0));
-        if (bed < 0) emi = 0;
-    }
-    uint r7 = (rgb >> 17) & 0x7Fu, g7 = (rgb >> 9) & 0x7Fu, b7 = (rgb >> 1) & 0x7Fu;
     valid = true;
-    return r7 | (g7 << 7) | (b7 << 14) | (sky << 21) | (emi << 25) | ((k & 7u) << 29);
+    return texId | (biome << 13) | (sky << 21) | (emi << 25) | ((k & 7u) << 29);
 }
 
 groupshared uint sKey[32 * TILE];
@@ -272,12 +285,22 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
                     else if (axis == 1) { py = slice; px = u; pz = v; }
                     else { pz = slice; px = u; py = v0 + v; }
                     uint2 q = uint2((px & 31u) | ((pz & 31u) << 5) | ((py & 511u) << 10) | (dir << 19) | ((w - 1) << 22) | ((hh - 1) << 27), key);
+                    if (dir == 2 && ((key >> 29) & 7u) == KIND_WATER)
+                    {
+                        // Wasseroberflaeche: eigene Gruppe (wenige, grosse Quads -> Atomic je Quad genuegt)
+                        uint slot;
+                        InterlockedAdd(gCount[job * 10 + 9], 1, slot);
+                        if (slot < gM.tmpPerDir) gTmpQuads[(job * NB + 6) * gM.tmpPerDir + slot] = q;
+                        else gCount[job * 10 + 6] = 1;
+                        u += w;
+                        continue;
+                    }
                     if (n < 1024) sQuads[n] = q;
                     else
                     {
                         uint slot;
                         InterlockedAdd(gCount[job * 10 + dir], 1, slot);
-                        if (slot < gM.tmpPerDir) gTmpQuads[(job * 6 + dir) * gM.tmpPerDir + slot] = q;
+                        if (slot < gM.tmpPerDir) gTmpQuads[(job * NB + dir) * gM.tmpPerDir + slot] = q;
                         else gCount[job * 10 + 6] = 1;
                     }
                     n++;
@@ -295,7 +318,7 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         for (uint k = lt; k < cnt; k += 64)
         {
             uint slot = basePos + k;
-            if (slot < gM.tmpPerDir) gTmpQuads[(job * 6 + dir) * gM.tmpPerDir + slot] = sQuads[k];
+            if (slot < gM.tmpPerDir) gTmpQuads[(job * NB + dir) * gM.tmpPerDir + slot] = sQuads[k];
             else gCount[job * 10 + 6] = 1;
         }
         return;
@@ -309,23 +332,24 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         for (uint c = 0; c < gM.commitCount; c++)
         {
             CommitJob job = gCommit[c];
-            uint nm = job.dirMeshletStart[5] + (job.dirQuads[5] + 31) / 32;
+            uint nm = job.dirMeshletStart[6] + (job.dirQuads[6] + 31) / 32;
             if (i < acc + nm) { cj = c; local = i - acc; break; }
             acc += nm;
         }
         if (cj == 0xFFFFFFFFu) return;
         CommitJob job = gCommit[cj];
-        uint dir = 0;
-        for (uint d = 0; d < 6; d++)
+        uint bucket = 0;
+        for (uint d = 0; d < NB; d++)
         {
             uint nm = (job.dirQuads[d] + 31) / 32;
-            if (local >= job.dirMeshletStart[d] && local < job.dirMeshletStart[d] + nm) { dir = d; break; }
+            if (local >= job.dirMeshletStart[d] && local < job.dirMeshletStart[d] + nm) { bucket = d; break; }
         }
-        uint inDir = local - job.dirMeshletStart[dir];
+        uint dir = bucket == 6 ? 2u : bucket; // Wasseroberflaechen zeigen nach oben
+        uint inDir = local - job.dirMeshletStart[bucket];
         uint q0 = inDir * 32;
-        uint n = min(32u, job.dirQuads[dir] - q0);
+        uint n = min(32u, job.dirQuads[bucket] - q0);
         uint dstQuad = job.quadStart;
-        for (uint d = 0; d < dir; d++) dstQuad += job.dirQuads[d];
+        for (uint d = 0; d < bucket; d++) dstQuad += job.dirQuads[d];
         dstQuad += q0;
         int s = 1 << job.level;
         float3 origin = float3(float(job.nx * 32 * s), float(job.minY), float(job.nz * 32 * s));
@@ -334,7 +358,7 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         int3 dvec = DIRS[dir];
         for (uint k = 0; k < n; k++)
         {
-            uint2 q = gTmpQuads[(job.tmpJob * 6 + dir) * gM.tmpPerDir + q0 + k];
+            uint2 q = gTmpQuads[(job.tmpJob * NB + bucket) * gM.tmpPerDir + q0 + k];
             gPoolQuads[dstQuad + k] = q;
             uint px = q.x & 31u, pz = (q.x >> 5) & 31u, py = (q.x >> 10) & 511u;
             uint su = ((q.x >> 22) & 31u) + 1, sv = ((q.x >> 27) & 31u) + 1;
@@ -354,7 +378,7 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         h.vertexCount = n;
         h.indexStart = uint(job.level);
         h.triCount = n * 2;
-        h.clusterIdx = job.cluster;
+        h.clusterIdx = job.cluster | (bucket == 6 ? WATER_BIT : 0u);
         h.originX = job.nx * 32 * s;
         h.originY = job.minY;
         h.originZ = job.nz * 32 * s;

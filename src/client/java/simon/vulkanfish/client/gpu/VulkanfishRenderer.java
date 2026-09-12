@@ -496,6 +496,9 @@ public final class VulkanfishRenderer {
     private void lodTest(long f) {
         var player = Minecraft.getInstance().player;
         String dim = System.getProperty("vulkanfish.lodDim");
+        // Sichtweite des Nahfelds fuer den Test (-Dvulkanfish.testRenderDistance=12): LOD-Uebergang naeher
+        Integer rd = Integer.getInteger("vulkanfish.testRenderDistance");
+        if (f == 200 && rd != null) Minecraft.getInstance().options.renderDistance().set(rd);
         if (f == 300 && dim != null) {
             selfTestCommand("gamemode spectator @p");
             // Nether: unter der Decke; End: ueber den aeusseren Inseln
@@ -517,8 +520,10 @@ public final class VulkanfishRenderer {
         // springen und langsam weiterfliegen -> muss das Fernfeld nachziehen (Stufen, Farben, Loecher)
         if (Boolean.getBoolean("vulkanfish.lodMove") && player != null) {
             if (f == 2400) selfTestCommand("tp @p 2534 120 -69 -90 3");
-            if (f == 2438) NativePassRunner.debugView = Integer.getInteger("vulkanfish.lodMoveDebug", 0);
-            if (f == 2445) NativePassRunner.debugView = 0;
+            // Debug-Ansicht fuer einen Screenshot: -Dvulkanfish.lodMoveDebug=<Ansicht> (-Dvulkanfish.lodMoveDebugFrame, Standard 2440)
+            int dbgF = Integer.getInteger("vulkanfish.lodMoveDebugFrame", 2440);
+            if (f == dbgF - 2) NativePassRunner.debugView = Integer.getInteger("vulkanfish.lodMoveDebug", 0);
+            if (f == dbgF + 5) NativePassRunner.debugView = 0;
             if (f >= 2400) {
                 // Blick nach Osten (+X), Flug vorwaerts: neues Fernfeld kommt von vorn
                 if (f > 2700) player.setPos(player.getX() + 0.35, player.getY(), player.getZ()); // ~55 Bl./s

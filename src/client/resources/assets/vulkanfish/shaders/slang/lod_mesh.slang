@@ -9,7 +9,12 @@
 [[vk::binding(1, 0)]] StructuredBuffer<uint2> gQuads;
 [[vk::binding(2, 0)]] StructuredBuffer<uint> gNearMask;          // je Chunk (& 127, toroidal) Section-Bits ab minSectionY
 [[vk::binding(3, 0)]] ConstantBuffer<FrameUniforms> gFrame;
+[[vk::binding(4, 0)]] Texture2D<float4> gAtlas;                  // Vanillas Block-Atlas (wie das Nahfeld)
+[[vk::binding(5, 0)]] SamplerState gAtlasSamp;
 [[vk::binding(6, 0)]] StructuredBuffer<uint> gVisibleMeshlets;
+// je Aussehen 3 Seiten (oben, Seite, unten): uv0, uv1 (unorm16), Farbe | Toenung << 24, feste Toenung | Helligkeit << 24
+[[vk::binding(7, 0)]] StructuredBuffer<uint4> gLook;
+[[vk::binding(8, 0)]] StructuredBuffer<uint4> gBiomeCol;         // Gras, Laub, Trockenlaub, Wasser
 
 struct LodPush
 {
@@ -31,12 +36,34 @@ struct LodVertOut
     nointerpolation float2 light;  // Emission, Himmel (0..1)
     nointerpolation uint mat;      // Material | Emission << 4 (wie das Nahfeld)
     float3 inner : TEXCOORD5;      // Punkt im Voxel hinter der Flaeche (Abdeckungstest je Pixel)
+    float2 uvw : TEXCOORD6;        // Texturkoordinate in Bloecken (je Block ein Sprite, wie Vanilla)
+    nointerpolation float4 rect : TEXCOORD7; // Sprite im Atlas (u0, v0, u1, v1), leer = keine Textur
+    nointerpolation float spriteLuma : TEXCOORD8;
 };
 
 struct LodPrimOut
 {
     bool cull : SV_CullPrimitive;
 };
+
+uint mulRgb(uint a, uint b)
+{
+    uint r = ((a >> 16) & 255u) * ((b >> 16) & 255u) / 255u;
+    uint g = ((a >> 8) & 255u) * ((b >> 8) & 255u) / 255u;
+    uint bl = (a & 255u) * (b & 255u) / 255u;
+    return (r << 16) | (g << 8) | bl;
+}
+
+// Durchschnittsfarbe der Seite inkl. Biom-Toenung (wie LodMaterials.faceColor)
+uint lookColor(uint4 face, uint biome)
+{
+    uint c = face.z & 0xFFFFFFu, tint = face.z >> 24;
+    if (tint == 0)
+        return c;
+    uint4 bc = gBiomeCol[biome];
+    uint t = tint == 1 ? bc.x : tint == 2 ? bc.y : tint == 3 ? bc.z : tint == 4 ? bc.w : face.w;
+    return mulRgb(c, t & 0xFFFFFFu);
+}
 
 static const float3 FACE_N[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0),
                                   float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
@@ -122,8 +149,12 @@ void lodMesh(
     du *= scale;
     dv *= scale;
 
-    uint rgb = q.y & 0x1FFFFF;
-    float3 color = float3(float(rgb & 0x7F), float((rgb >> 7) & 0x7F), float((rgb >> 14) & 0x7F)) / 127.0;
+    uint texId = q.y & 0x1FFFu, biome = (q.y >> 13) & 0xFFu;
+    uint fsel = face == 2 ? 0u : face == 3 ? 2u : 1u;
+    uint4 look = gLook[texId * 3 + fsel];
+    uint rgb = lookColor(look, biome);
+    float3 color = float3(float((rgb >> 16) & 255u), float((rgb >> 8) & 255u), float(rgb & 255u)) / 255.0;
+    float4 rect = float4(float(look.x & 0xFFFFu), float(look.x >> 16), float(look.y & 0xFFFFu), float(look.y >> 16)) / 65535.0;
     float sky = float((q.y >> 21) & 0xF) / 15.0;
     uint emission = (q.y >> 25) & 0xF;
     uint kind = (q.y >> 29) & 0x7;
@@ -137,9 +168,17 @@ void lodMesh(
         uint vi = lt * 4 + c;
         verts[vi].pos = mul(f.viewProj, float4(corners[c], 1.0));
         verts[vi].inner = corners[c] + back;
+        // UV wie Vanillas Blockflaechen: Seiten mit der Texturoberkante oben, Osten/Norden gespiegelt
+        float3 w = corners[c];
+        float2 uv = face == 0 ? float2(-w.z, -w.y) : face == 1 ? float2(w.z, -w.y)
+                  : face == 2 ? float2(w.x, w.z) : face == 3 ? float2(w.x, -w.z)
+                  : face == 4 ? float2(w.x, -w.y) : float2(-w.x, -w.y);
+        verts[vi].uvw = uv;
+        verts[vi].rect = rect;
+        verts[vi].spriteLuma = float(look.w >> 24) / 255.0;
         verts[vi].color = color;
         verts[vi].normal = n;
-        verts[vi].light = float2(kind == LOD_KIND_WATER ? 0.0 : float(emission) / 15.0, sky); // Wasser: Bits = Tiefe
+        verts[vi].light = float2(float(emission) / 15.0, sky);
         verts[vi].mat = mat | (emission << 4);
     }
     uint b = lt * 4;
@@ -161,6 +200,9 @@ struct LodFragIn
     nointerpolation float2 light;
     nointerpolation uint mat;
     float3 inner : TEXCOORD5;
+    float2 uvw : TEXCOORD6;
+    nointerpolation float4 rect : TEXCOORD7;
+    nointerpolation float spriteLuma : TEXCOORD8;
 };
 
 struct LodGBufferOut
@@ -172,12 +214,27 @@ struct LodGBufferOut
 [shader("fragment")]
 LodGBufferOut lodFrag(LodFragIn input)
 {
+    // Blocktextur als Muster um die exakte Durchschnittsfarbe (Helligkeitsverhaeltnis): nah am
+    // Nahfeld dieselbe Koernung, in der Ferne waehlt die Mip-Stufe von selbst den Mittelwert
+    float3 color = input.color;
+    float2 size = input.rect.zw - input.rect.xy;
+    // Gradienten der durchgehenden Koordinate (frac springt an Blockgrenzen -> sonst Mip-Naehte);
+    // ausserhalb der Verzweigung (Ableitungen brauchen alle Nachbarpixel)
+    float2 dx = ddx(input.uvw) * size, dy = ddy(input.uvw) * size;
+    if (size.x > 0.0 && input.spriteLuma > 0.01)
+    {
+        float2 f = frac(input.uvw);
+        float4 t = gAtlas.SampleGrad(gAtlasSamp, input.rect.xy + f * size, dx, dy);
+        float l = dot(t.rgb, float3(0.2126, 0.7152, 0.0722));
+        l = lerp(input.spriteLuma * 0.55, l, saturate(t.a * 2.0 - 0.5)); // Loecher (Laub): dunkler Innenraum
+        color *= clamp(l / input.spriteLuma, 0.0, 2.5);
+    }
     // Pixel in einer vom Nahfeld gezeichneten Section: dort gilt das Nahfeld (keine Doppelflaechen,
-    // keine Loecher an Chunk-Grenzen, die ein Quad nur teilweise ueberdeckt)
+    // keine Loecher an Chunk-Grenzen, die ein Quad nur teilweise ueberdeckt). Nach den Ableitungen.
     if (nearCoveredPoint(input.inner))
         discard;
     LodGBufferOut o;
-    o.albedoMat = float4(input.color, float(input.mat) / 255.0);
+    o.albedoMat = float4(saturate(color), float(input.mat) / 255.0);
     o.normalLight = float4(octEncode(input.normal), input.light.x, input.light.y);
     return o;
 }

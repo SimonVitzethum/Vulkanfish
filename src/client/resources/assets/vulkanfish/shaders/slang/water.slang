@@ -176,6 +176,119 @@ bool traceReflection(FrameUniforms f, float3 wp, float3 R, out float3 color, out
 [shader("fragment")]
 float4 waterFrag(WaterVertOut input) : SV_Target0
 {
+    return shadeWaterSurface(input);
+}
+
+// ---------- Fernfeld-Wasser: LOD-Quads mit derselben Wasser-Schattierung ----------
+// Wasseroberflaechen des LOD liegen in eigenen Meshlets (Wasser-Bit) und kommen ueber eine eigene
+// Cull-Liste hierher: gleiche Brechung (LOD-Grund liegt im G-Buffer), Spiegelung, Wellen, Absorption.
+[[vk::binding(15, 0)]] StructuredBuffer<uint2> gLodQuads;
+[[vk::binding(16, 0)]] StructuredBuffer<uint> gLodNearMask;    // je Chunk gezeichnete Nahfeld-Sections
+[[vk::binding(17, 0)]] StructuredBuffer<uint4> gLodBiomeCol;   // Gras, Laub, Trockenlaub, Wasser
+struct LodWaterPush
+{
+    int2 camChunk;
+    int maskValid;
+    int minSectionY;
+};
+[[vk::push_constant]] ConstantBuffer<LodWaterPush> gLodW;
+
+uint lodNearBits(int2 c)
+{
+    if (gLodW.maskValid == 0 || any(abs(c - gLodW.camChunk) >= 64))
+        return 0u;
+    return gLodNearMask[uint((c.y & 127) * 128 + (c.x & 127))];
+}
+
+bool lodNearCoveredPoint(float3 p)
+{
+    uint b = lodNearBits(int2(floor(p.xz / 16.0)));
+    int s = int(floor(p.y / 16.0)) - gLodW.minSectionY;
+    return s >= 0 && s < 32 && ((b >> uint(s)) & 1u) != 0;
+}
+
+struct LodWaterPrim
+{
+    bool cull : SV_CullPrimitive;
+};
+
+[shader("mesh")]
+[NumThreads(32, 1, 1)]
+[outputtopology("triangle")]
+void lodWaterMesh(
+    in uint3 gid : SV_GroupID,
+    in uint3 ltid : SV_GroupThreadID,
+    out vertices WaterVertOut verts[128],
+    out indices uint3 tris[64],
+    out primitives LodWaterPrim prims[64])
+{
+    uint lt = ltid.x;
+    MeshletHeader mh = gMeshlets[gVisibleMeshlets[gid.x]];
+    FrameUniforms f = gFrame;
+    uint qCount = min(mh.vertexCount, 32);
+    SetMeshOutputCounts(qCount * 4, qCount * 2);
+    if (lt >= qCount)
+        return;
+    uint2 q = gLodQuads[mh.vertexStart + lt];
+    float scale = float(1u << mh.indexStart);
+    uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
+    float su = float(((q.x >> 22) & 31) + 1), sv = float(((q.x >> 27) & 31) + 1);
+    // Oberseite; Vanillas Quellwasser steht 8/9 Block hoch -> gleiche Hoehe wie das Nahwasser
+    float3 p0 = float3(mh.originX, mh.originY, mh.originZ) + float3(px, py + 1, pz) * scale - float3(0.0, 1.0 / 9.0, 0.0);
+    float3 du = float3(su * scale, 0.0, 0.0), dv = float3(0.0, 0.0, sv * scale);
+    uint biome = (q.y >> 13) & 0xFFu;
+    uint wc = gLodBiomeCol[biome].w;
+    float4 tint = float4(float((wc >> 16) & 255u), float((wc >> 8) & 255u), float(wc & 255u), 0.0) / 255.0;
+    float sky = float((q.y >> 21) & 0xF) / 15.0;
+    float3 corners[4] = { p0, p0 + dv, p0 + du + dv, p0 + du };
+    for (uint c = 0; c < 4; c++)
+    {
+        uint vi = lt * 4 + c;
+        verts[vi].pos = mul(f.viewProj, float4(corners[c], 1.0));
+        verts[vi].worldPos = corners[c];
+        verts[vi].faceNormal = float3(0.0, 1.0, 0.0);
+        verts[vi].tint = tint; // Alpha 0: keine Grenzflaeche zu Eis/Glas
+        verts[vi].light = float2(0.0, sky);
+    }
+    uint b = lt * 4;
+    tris[lt * 2] = uint3(b, b + 1, b + 2);
+    tris[lt * 2 + 1] = uint3(b, b + 2, b + 3);
+    // ganz in gezeichneten Nahfeld-Sections -> das Nahwasser gilt (Rest je Pixel im Fragment)
+    bool cull = ((q.y >> 29) & 7u) != 4u;
+    if (!cull && gLodW.maskValid != 0)
+    {
+        float3 mn = p0 - float3(0.0, 0.5, 0.0), mx = p0 + du + dv - float3(0.0, 0.5, 0.0);
+        int2 c0 = int2(floor((mn.xz + 0.01) / 16.0)), c1 = int2(floor((mx.xz - 0.01) / 16.0));
+        int sy = int(floor(mn.y / 16.0)) - gLodW.minSectionY;
+        bool covered = all(c1 - c0 <= 3) && sy >= 0 && sy < 32;
+        for (int z = c0.y; covered && z <= c1.y; z++)
+            for (int x = c0.x; covered && x <= c1.x; x++)
+                covered = ((lodNearBits(int2(x, z)) >> uint(sy)) & 1u) != 0;
+        cull = covered;
+    }
+    prims[lt * 2].cull = cull;
+    prims[lt * 2 + 1].cull = cull;
+}
+
+[shader("fragment")]
+float4 lodWaterFrag(WaterVertOut input) : SV_Target0
+{
+    float4 c = shadeWaterSurface(input);
+    if (lodNearCoveredPoint(input.worldPos - float3(0.0, 0.5, 0.0)))
+        discard; // Nahwasser zeichnet diese Section
+    return c;
+}
+
+// Tiefen-Vorpass des Fernfeld-Wassers: nur die Abdeckung pruefen
+[shader("fragment")]
+void lodWaterDepthFrag(WaterVertOut input)
+{
+    if (lodNearCoveredPoint(input.worldPos - float3(0.0, 0.5, 0.0)))
+        discard;
+}
+
+float4 shadeWaterSurface(WaterVertOut input)
+{
     FrameUniforms f = gFrame;
     if (f.debugView == 5)
         return float4(1.0, 0.0, 1.0, 1.0); // Debug: Wasserflaechen magenta

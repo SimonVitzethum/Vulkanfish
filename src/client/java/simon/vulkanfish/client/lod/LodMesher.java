@@ -26,9 +26,10 @@ public final class LodMesher {
     }
 
     /** Ergebnis in knotenlokalen Quads; Meshlet-Bounds/Ebenen in Weltkoordinaten. */
+    /** meshletWater: Wasseroberflaeche (eigene Meshlets, zeichnet der Wasser-Pass). */
     public record Mesh(int level, int nodeX, int nodeZ, int quadCount, int[] quads, int meshletCount,
                        int[] meshletQuadStart, int[] meshletQuadCount, float[] meshletBounds, float[] meshletPlanes,
-                       float[] aabb) {
+                       float[] aabb, boolean[] meshletWater) {
     }
 
     private short[] mat = new short[0];
@@ -41,7 +42,10 @@ public final class LodMesher {
     private int yLo, yHi; // belegter Hoehenbereich des Knotens (inkl. Rand), ausserhalb gibt es keine Flaechen
     private final int[][] dirQuadStart = new int[6][];
 
+    private int curLevel;
+
     public Mesh mesh(int level, int nodeX, int nodeZ, int minY, int height, ColumnSource source) {
+        curLevel = level;
         int h = height >> level;
         int cells = W * W * h;
         if (mat.length < cells) {
@@ -56,15 +60,16 @@ public final class LodMesher {
         yLo = Integer.MAX_VALUE;
         yHi = -1;
         fill(level, nodeX, nodeZ, h, source);
-        if (yHi < 0) return buildMeshlets(level, nodeX, nodeZ, minY, h, new int[6]); // leer
+        if (yHi < 0) return buildMeshlets(level, nodeX, nodeZ, minY, h, new int[7]); // leer
 
         quadCount = 0;
-        int[] dirCount = new int[6];
+        int[] dirCount = new int[7];
         for (int dir = 0; dir < 6; dir++) {
             int before = quadCount;
             meshDirection(dir, h);
             dirCount[dir] = quadCount - before;
         }
+        splitWater(dirCount);
         return buildMeshlets(level, nodeX, nodeZ, minY, h, dirCount);
     }
 
@@ -156,8 +161,11 @@ public final class LodMesher {
             visible = true;
         } else {
             int n = mat[idx(nx, ny, nz)];
+            // Grund unter Wasser, soweit flach genug zum Sehen (wie lod_mesher.slang)
             if (n == 0) {
                 visible = true;
+            } else if (dir != 3 && self.kind() != LodMaterials.KIND_WATER && LodMaterials.byId(n).kind() == LodMaterials.KIND_WATER) {
+                visible = waterAbove(nx, ny, nz, h) * (1 << curLevel) <= (dir == 2 ? 24 : 12);
             } else {
                 visible = false;
                 // Schuerze gegen Risse an Knotengrenzen (Nachbar evtl. andere Stufe)
@@ -172,32 +180,33 @@ public final class LodMesher {
             if (n != 0) return 0;
         }
         int face = dir == 2 ? LodMaterials.FACE_TOP : dir == 3 ? LodMaterials.FACE_BOTTOM : LodMaterials.FACE_SIDE;
-        int biome = bio[idx(gx, y, gz)] & 0xFF;
-        int rgb = LodMaterials.faceColor(self, face, biome);
+        // Aussehen statt Farbe (Farbe, Toenung, Textur rechnet der Draw-Shader); Schnee/Teppich deckt
+        // die Oberseite ganz, Pflanzen bleiben dem Nahfeld
+        LodMaterials.Material look = self;
         if (dir == 2) {
             int c = cov[idx(gx, y, gz)];
-            if (c != 0) {
-                LodMaterials.Material cm = LodMaterials.byId(c);
-                int cc = LodMaterials.faceColor(cm, LodMaterials.FACE_TOP, biome);
-                rgb = cm.fullCover() ? cc : mix(rgb, cc); // Schnee/Teppich deckt ganz, Pflanzen teilweise
+            if (c != 0 && LodMaterials.byId(c).fullCover()) look = LodMaterials.byId(c);
+            else if (self.kind() != LodMaterials.KIND_WATER && ny < h) {
+                // Grund unter Wasserpflanzen (Seegras, Kelp): ihr Aussehen (wie lod_mesher.slang)
+                LodMaterials.Material above = LodMaterials.byId(mat[idx(nx, ny, nz)]);
+                if (above.kind() == LodMaterials.KIND_WATER && above.tintType() != LodMaterials.TINT_WATER) look = above;
             }
         }
+        // ungetoent: Biomgrenzen trennen nicht; Wasser behaelt das Biom (Wasserfarbe im Wasser-Pass)
+        int biome = look.tinted()[face] || self.kind() == LodMaterials.KIND_WATER ? bio[idx(gx, y, gz)] & 0xFF : 0;
         int sky;
         if (ny >= h) sky = 15;
         else {
             int cx = Math.max(0, Math.min(W - 1, nx)), cz = Math.max(0, Math.min(W - 1, nz));
-            sky = ny > top[cz * W + cx] ? 15 : 3;
+            sky = ny > top[cz * W + cx] ? 15 : coveredSky(cx, cz, ny);
+            if (self.kind() != LodMaterials.KIND_WATER && LodMaterials.byId(mat[idx(cx, ny, cz)]).kind() == LodMaterials.KIND_WATER) {
+                // unter Wasser: Himmelslicht -1 je Block Wasser (wie lod_mesher.slang)
+                sky = Math.max(sky - waterAbove(cx, ny, cz, h) * (1 << curLevel), 0);
+            }
         }
-        int r7 = (rgb >> 17) & 0x7F, g7 = (rgb >> 9) & 0x7F, b7 = (rgb >> 1) & 0x7F;
-        int packed = r7 | (g7 << 7) | (b7 << 14) | (sky << 21) | (self.emission() << 25) | ((self.kind() & 7) << 29);
+        int texId = look.texId(), emission = self.emission();
+        int packed = (texId & 0x1FFF) | (biome << 13) | (sky << 21) | (emission << 25) | ((self.kind() & 7) << 29);
         return (packed & 0xFFFFFFFFL) | (1L << 40);
-    }
-
-    private static int mix(int a, int b) {
-        int r = (((a >> 16) & 0xFF) + ((b >> 16) & 0xFF)) >> 1;
-        int g = (((a >> 8) & 0xFF) + ((b >> 8) & 0xFF)) >> 1;
-        int bl = ((a & 0xFF) + (b & 0xFF)) >> 1;
-        return (r << 16) | (g << 8) | bl;
     }
 
     private void greedy(long[] m, int uCount, int vCount, int vLo, int dir, int s) {
@@ -232,6 +241,55 @@ public final class LodMesher {
         }
     }
 
+    /** Himmelslicht unter Ueberhang: 15 minus Abstand zur naechsten auf dieser Hoehe offenen Spalte (wie lod_mesher.slang). */
+    private int coveredSky(int cx, int cz, int y) {
+        int scale = 1 << curLevel;
+        for (int r = 1; r * scale < 15 && r <= 7; r++) {
+            for (int d = -r; d <= r; d++) {
+                if (open(cx + d, cz - r, y) || open(cx + d, cz + r, y) || open(cx - r, cz + d, y) || open(cx + r, cz + d, y)) {
+                    return 15 - r * scale;
+                }
+            }
+        }
+        return 1;
+    }
+
+    private int waterAbove(int x, int y, int z, int h) {
+        int n = 0;
+        while (y + n < h && n < 32 && mat[idx(x, y + n, z)] != 0
+                && LodMaterials.byId(mat[idx(x, y + n, z)]).kind() == LodMaterials.KIND_WATER) n++;
+        return n;
+    }
+
+    private boolean open(int x, int z, int y) {
+        return x >= 0 && z >= 0 && x < W && z < W && top[z * W + x] < y;
+    }
+
+    /** Wasseroberflaechen (Oberseiten, Art Wasser) als siebte Gruppe ans Ende (wie lod_mesher.slang). */
+    private void splitWater(int[] dirCount) {
+        int s2 = dirCount[0] + dirCount[1], e2 = s2 + dirCount[2];
+        int[] water = new int[dirCount[2] * 2];
+        int nw = 0, keep = s2;
+        for (int i = s2; i < e2; i++) {
+            int a = quads[i * 2], b = quads[i * 2 + 1];
+            if (((b >>> 29) & 7) == LodMaterials.KIND_WATER) {
+                water[nw * 2] = a;
+                water[nw * 2 + 1] = b;
+                nw++;
+            } else {
+                quads[keep * 2] = a;
+                quads[keep * 2 + 1] = b;
+                keep++;
+            }
+        }
+        if (nw == 0) return;
+        // Seiten 3..5 nachruecken, Wasser anhaengen
+        System.arraycopy(quads, e2 * 2, quads, keep * 2, (quadCount - e2) * 2);
+        System.arraycopy(water, 0, quads, (quadCount - nw) * 2, nw * 2);
+        dirCount[2] -= nw;
+        dirCount[6] = nw;
+    }
+
     private void emit(int x, int y, int z, int dir, int su, int sv, int packed) {
         if ((quadCount + 1) * 2 > quads.length) quads = Arrays.copyOf(quads, quads.length * 2);
         quads[quadCount * 2] = (x & 31) | ((z & 31) << 5) | ((y & 511) << 10) | (dir << 19) | ((su - 1) << 22) | ((sv - 1) << 27);
@@ -243,15 +301,17 @@ public final class LodMesher {
         int scale = 1 << level;
         float ox = (float) (nodeX * 32) * scale, oz = (float) (nodeZ * 32) * scale, oy = minY;
         int meshlets = 0;
-        for (int d = 0; d < 6; d++) meshlets += (dirCount[d] + QUADS_PER_MESHLET - 1) / QUADS_PER_MESHLET;
+        for (int d = 0; d < 7; d++) meshlets += (dirCount[d] + QUADS_PER_MESHLET - 1) / QUADS_PER_MESHLET;
+        boolean[] water = new boolean[meshlets];
         int[] mStart = new int[meshlets];
         int[] mCount = new int[meshlets];
         float[] bounds = new float[meshlets * 4];
         float[] planes = new float[meshlets * 4];
         float[] aabb = {Float.MAX_VALUE, Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE};
         int mi = 0, q = 0;
-        for (int d = 0; d < 6; d++) {
-            int end = q + dirCount[d];
+        for (int b = 0; b < 7; b++) {
+            int d = b == 6 ? 2 : b; // Gruppe 6 = Wasseroberflaechen (nach oben)
+            int end = q + dirCount[b];
             for (int start = q; start < end; start += QUADS_PER_MESHLET) {
                 int n = Math.min(QUADS_PER_MESHLET, end - start);
                 float minX = Float.MAX_VALUE, minYw = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
@@ -285,6 +345,7 @@ public final class LodMesher {
                 }
                 mStart[mi] = start;
                 mCount[mi] = n;
+                water[mi] = b == 6;
                 float hx = (maxX - minX) * 0.5f, hy = (maxYw - minYw) * 0.5f, hz = (maxZ - minZ) * 0.5f;
                 bounds[mi * 4] = minX + hx;
                 bounds[mi * 4 + 1] = minYw + hy;
@@ -301,6 +362,6 @@ public final class LodMesher {
             q = end;
         }
         return new Mesh(level, nodeX, nodeZ, quadCount, Arrays.copyOf(quads, quadCount * 2), meshlets,
-                mStart, mCount, bounds, planes, aabb);
+                mStart, mCount, bounds, planes, aabb, water);
     }
 }

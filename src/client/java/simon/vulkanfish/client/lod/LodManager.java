@@ -151,10 +151,10 @@ public final class LodManager {
                 }
                 n.building = false;
                 enqueue(n); // waehrend des Baus geaendert -> gleich wieder
-                int[] dir = new int[6];
+                int[] dir = new int[7]; // 6 Seiten + Wasseroberflaeche (Zaehler 9)
                 int quads = 0, meshlets = 0;
-                for (int d = 0; d < 6; d++) {
-                    dir[d] = Math.min(counts[i * 10 + d], 24 * 1024);
+                for (int d = 0; d < 7; d++) {
+                    dir[d] = Math.min(counts[i * 10 + (d < 6 ? d : 9)], 24 * 1024);
                     quads += dir[d];
                     meshlets += (dir[d] + 31) / 32;
                 }
@@ -1101,7 +1101,7 @@ public final class LodManager {
             mb.putInt(o + 4, m.meshletQuadCount()[i]);   // Quads
             mb.putInt(o + 8, n.level);                   // Stufe
             mb.putInt(o + 12, m.meshletQuadCount()[i] * 2);
-            mb.putInt(o + 16, n.cluster);
+            mb.putInt(o + 16, n.cluster | (m.meshletWater()[i] ? 0x80000000 : 0)); // Wasser: Wasser-Pass
             mb.putInt(o + 20, ox).putInt(o + 24, minY).putInt(o + 28, oz);
             float[] bd = m.meshletBounds();
             mb.putFloat(o + 32, bd[i * 4]).putFloat(o + 36, bd[i * 4 + 1]).putFloat(o + 40, bd[i * 4 + 2]).putFloat(o + 44, bd[i * 4 + 3]);

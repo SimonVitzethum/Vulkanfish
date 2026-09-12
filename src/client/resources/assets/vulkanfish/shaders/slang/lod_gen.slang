@@ -27,7 +27,7 @@ struct GenJob
 [[vk::binding(13, 0)]] RWStructuredBuffer<int4> gColumn;    // je Job 34x34: oberster fester Voxel, Biom, Flags
 [[vk::binding(14, 0)]] RWStructuredBuffer<uint2> gGrid;     // je Job 34*H*34
 [[vk::binding(15, 0)]] StructuredBuffer<int> gBiomeTable;   // 256 x BT_FIELDS (LodBiomeTable.FIELDS)
-static const int BT_FIELDS = 12; // low, high, wet, steep, filler, leaves, log, density, temp, snow, ice, flags
+static const int BT_FIELDS = 13; // low, high, wet, steep, filler, leaves, log, density, temp, snow, ice, flags, seegras
 [[vk::binding(16, 0)]] StructuredBuffer<double> gClimate;   // je Punkt 14 double
 [[vk::binding(17, 0)]] StructuredBuffer<int> gClimateBiome;
 [[vk::binding(18, 0)]] StructuredBuffer<uint2> gRunHead;    // je Saeule: Start, Anzahl
@@ -494,6 +494,16 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
                     }
                 }
             }
+        }
+        else if (me.x >= 0 && me.z == 1 && me.x + 1 < int(hv))
+        {
+            // Meeresboden: Seegras (Anteil je Biom) direkt ueber dem Grund
+            uint chance = (uint(gBiomeTable[tb + 11]) >> 8) & 255u;
+            uint idx = gridIndex(job, gx, uint(me.x + 1), gz);
+            uint2 cell = gGrid[idx];
+            if (chance > 0 && (cell.x & 0xFFFFu) == gP.waterMat
+                && (hash3(blockX0(j) + int(gx) * s, 0x5ea9, blockZ0(j) + int(gz) * s) & 255u) < chance)
+                gGrid[idx] = uint2(uint(gBiomeTable[tb + 12]) | (cell.x & 0xFFFF0000u), 0);
         }
         // Vereisung (Vanillas Freeze-Feature): oberster Voxel nach den Baeumen; Temperatur des Bioms,
         // oberhalb Meeresspiegel+17 je Block um 0,05/40 kaelter, unter 0,15 -> Eis auf Wasser, sonst Schnee

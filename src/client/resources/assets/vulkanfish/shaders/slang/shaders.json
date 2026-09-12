@@ -76,6 +76,24 @@
     },
     {
       "file": "water.slang",
+      "entry": "lodWaterMesh",
+      "stage": "mesh",
+      "spv": "lod_water_mesh.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "lodWaterFrag",
+      "stage": "fragment",
+      "spv": "lod_water_frag.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "lodWaterDepthFrag",
+      "stage": "fragment",
+      "spv": "lod_water_depth_frag.spv"
+    },
+    {
+      "file": "water.slang",
       "entry": "translucentMesh",
       "stage": "mesh",
       "spv": "translucent_mesh.spv"

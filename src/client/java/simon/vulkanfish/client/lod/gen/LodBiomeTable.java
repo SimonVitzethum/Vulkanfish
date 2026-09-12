@@ -45,8 +45,9 @@ import simon.vulkanfish.client.mixin.worldgen.MultiNoiseBiomeSourceInvoker;
 public final class LodBiomeTable {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
     // topLow, topHigh, wet, steep, filler, leaves, log, density(x1000),
-    // Grundtemperatur(x1000), Schneedecke, Eis, Flags (bit0: gefrierend wie Frozen Ocean)
-    public static final int FIELDS = 12;
+    // Grundtemperatur(x1000), Schneedecke, Eis, Flags (bit0: gefrierend wie Frozen Ocean,
+    // bit8-15: Seegras-Anteil des Meeresbodens 0..255), Seegras
+    public static final int FIELDS = 13;
 
     /** Pro Biom-ID (LodMaterials.biomeId): Material-IDs + Baumdichte. */
     public final int[] table = new int[256 * FIELDS];
@@ -137,7 +138,13 @@ public final class LodBiomeTable {
         table[base + 8] = Math.round(biome.value().getBaseTemperature() * 1000f);
         table[base + 9] = LodMaterials.of(Blocks.SNOW.defaultBlockState()).id();
         table[base + 10] = LodMaterials.of(Blocks.ICE.defaultBlockState()).id();
-        table[base + 11] = frozen ? 1 : 0;
+        // Meeresboden-Bewuchs (Vanillas Seegras-Features der Ozeane): im Nahwasser sieht der Grund
+        // dadurch gruen aus, generierte Ozeane sollen genauso wirken
+        String path = biome.unwrapKey().map(k -> k.identifier().getPath()).orElse("");
+        float grass = !path.contains("ocean") || frozen ? 0f : path.contains("warm") || path.contains("lukewarm") ? 0.35f
+                : path.contains("cold") ? 0.15f : path.startsWith("deep") ? 0.25f : 0.3f;
+        table[base + 11] = (frozen ? 1 : 0) | (Math.round(grass * 255f) << 8);
+        table[base + 12] = LodMaterials.of(Blocks.SEAGRASS.defaultBlockState()).id();
     }
 
     /** Musterchunk (flach, optional Wasser darueber / Hang) durch Vanillas Oberflaeche, haeufigster oberster Block. */
