@@ -197,7 +197,11 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
     if (depth <= 0.0)
     {
         // Himmel: Overworld eigener, sonst Vanillas (Nether-Nebel, End-Himmel)
-        float3 sky = f.dimension == 0 ? skyRadiance(f, dir, true) : toLinear(gBackground.Load(int3(px, 0)).rgb);
+        // Nether: Nebelfarbe (wie der Randnebel, keine sichtbare Kante an Luecken);
+        // End: Vanillas Himmel. Beide sind fertige Farbe -> belichtungsneutral (sonst hellt die
+        // hohe Auto-Belichtung dunkler Dimensionen sie stark auf)
+        float3 sky = f.dimension == 0 ? skyRadiance(f, dir, true)
+                   : (f.dimension == 1 ? toLinear(f.fogColor) : toLinear(gBackground.Load(int3(px, 0)).rgb)) / max(f.exposure, 1e-3);
         if (f.fogType != 0)
             sky = applyFog(f, sky, dir, 64.0, sky);
         gOut[px] = float4(sky, 1.0);
@@ -276,7 +280,8 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
     }
 
     float dist = length(wp - f.camPos);
-    float3 skyCol = f.dimension == 0 ? skyRadiance(f, dir, false) : toLinear(f.fogColor);
+    // Nether/End: Randnebel in Vanillas Nebelfarbe, belichtungsneutral wie der Hintergrund
+    float3 skyCol = f.dimension == 0 ? skyRadiance(f, dir, false) : toLinear(f.fogColor) / max(f.exposure, 1e-3);
     c = applyFog(f, c, dir, dist, skyCol);
     gOut[px] = float4(c, 1.0);
 }

@@ -485,14 +485,21 @@ public final class VulkanfishRenderer {
 
     private void lodTest(long f) {
         var player = Minecraft.getInstance().player;
-        if (f == 300) {
+        String dim = System.getProperty("vulkanfish.lodDim");
+        if (f == 300 && dim != null) {
+            selfTestCommand("gamemode spectator @p");
+            // Nether: unter der Decke; End: ueber den aeusseren Inseln
+            selfTestCommand("execute in minecraft:" + dim + " run tp @p " + (dim.equals("the_nether") ? "0 90 0 0 5" : "1200 110 0 0 20"));
+            FrameDataCapture.testSunAngle = 25.0f;
+        }
+        if (f == 300 && dim == null) {
             selfTestCommand("gamemode spectator @p");
             selfTestCommand("tp @p 34 190 -69 0 12");
             FrameDataCapture.testSunAngle = 25.0f;
         }
         if (f >= 300 && player != null) {
             float yaw = f < 1700 ? 0.0f : 90.0f;
-            lockView(player, yaw, 12.0f);
+            lockView(player, yaw, dim == null ? 12.0f : dim.equals("the_nether") ? 5.0f : 20.0f);
         }
         if (f == 1500 && nativeRunner != null) nativeRunner.passTimings();
         if (f == 1650 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit LOD-Blick: {}", nativeRunner.passTimings());
