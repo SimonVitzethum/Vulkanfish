@@ -70,72 +70,6 @@ public final class LodManager {
     private final BobbySource bobby;
     private simon.vulkanfish.client.lod.gen.WorldgenSource worldgen;
     private NativePassRunner runner;
-    // GPU-Generator: Chunks ohne echte Daten (nach Entfernung), CPU-Nacharbeit mit Gegendruck
-    private final java.util.concurrent.PriorityBlockingQueue<long[]> genQueue =
-            new java.util.concurrent.PriorityBlockingQueue<>(1024, (a, b) -> Long.compare(a[1], b[1]));
-    private final AtomicInteger genCpuInFlight = new AtomicInteger();
-    private static final int MAX_GEN_CPU_IN_FLIGHT = 384;
-    private volatile ThreadLocal<simon.vulkanfish.client.lod.gen.GeneratedChunkBuilder> genBuilders;
-    private final NativePassRunner.GenClient genClient = new NativePassRunner.GenClient() {
-        @Override
-        public int[] nextGenBatch(int max) {
-            int room = MAX_GEN_CPU_IN_FLIGHT - genCpuInFlight.get();
-            int n = Math.min(max, room);
-            if (n <= 0 || genQueue.isEmpty()) return null;
-            int[] out = new int[n * 2];
-            int c = 0;
-            long[] job;
-            while (c < n && (job = genQueue.poll()) != null) {
-                ChunkEntry e = chunks.get(job[0]);
-                if (e == null || e.column != null && e.column.source > LodColumn.SOURCE_GENERATED) continue;
-                out[c * 2] = (int) (job[0] >> 32);
-                out[c * 2 + 1] = (int) job[0];
-                c++;
-            }
-            genCpuInFlight.addAndGet(c);
-            return c == 0 ? null : java.util.Arrays.copyOf(out, c * 2);
-        }
-
-        @Override
-        public void deliverGen(int cx, int cz, int[] words, int wordOffset) {
-            int[] mine = java.util.Arrays.copyOfRange(words, wordOffset, wordOffset + 16 * height);
-            var src = worldgen;
-            var builders = genBuilders;
-            WorkerPool.submit(WorkerPool.PRIO_LOD, () -> {
-                try {
-                    ChunkEntry e = chunks.get(chunkKey(cx, cz));
-                    if (e == null || src == null || builders == null) return;
-                    LevelChunkSection[] sections = builders.get().build(cx, cz, mine, 0);
-                    LodColumn old = e.column;
-                    if (old != null && old.source > LodColumn.SOURCE_GENERATED) return;
-                    LodColumnBuilder b = columnBuilders.get();
-                    long t0 = System.nanoTime();
-                    b.fillFromSections(sections, height, simon.vulkanfish.client.lod.gen.GeneratedChunkBuilder.PLACEHOLDER,
-                            src.settings.defaultBlock());
-                    long t1 = System.nanoTime();
-                    e.column = b.build(cx, cz, LodColumn.SOURCE_GENERATED, Math.min(e.wantLevel, MAX_LEVEL), minY);
-                    long t2 = System.nanoTime();
-                    COLUMN_TIMES.addAndGet(0, t1 - t0);
-                    COLUMN_TIMES.addAndGet(1, t2 - t1);
-                    COLUMN_TIMES.incrementAndGet(2);
-                    e.state = STATE_READY;
-                    synchronized (sourceCount) {
-                        sourceCount[LodColumn.SOURCE_GENERATED]++;
-                        columnsBuilt++;
-                    }
-                    updatedChunks.add(chunkKey(cx, cz));
-                } catch (Throwable t) {
-                    if (!genWarned) {
-                        genWarned = true;
-                        LOG.warn("[vulkanfish] LOD: generierter Chunk {},{} fehlgeschlagen", cx, cz, t);
-                    }
-                } finally {
-                    genCpuInFlight.decrementAndGet();
-                }
-            });
-        }
-    };
-    private volatile boolean genWarned;
 
     public void setRunner(NativePassRunner r) {
         runner = r;
@@ -154,7 +88,7 @@ public final class LodManager {
             biomeTable = fut.join();
             var src = worldgen;
             if (src == null || runner == null) return;
-            boolean ok = runner.setupGenerator(src.program, minY, height, src.settings.seaLevel(), null)
+            boolean ok = runner.setupGenerator(src.program, minY, height, src.settings.seaLevel())
                     && runner.setupLodGpu(src.program, biomeTable.table,
                     biomeTable.tree != null ? biomeTable.tree : simon.vulkanfish.client.lod.gen.ClimateTree.build(biomeTable.climate, biomeTable.climateBiome),
                     biomeTable.fallbackBiome, LodMaterials.of(src.settings.defaultBlock()).id(),
@@ -407,7 +341,6 @@ public final class LodManager {
             minY = lvl.getMinY();
             height = lvl.getHeight();
             worldgen = simon.vulkanfish.client.lod.gen.WorldgenSource.forClientLevel(lvl);
-            genQueue.clear();
             gpuGen = false;
             biomeTable = null;
             if (runner != null) runner.stopGenerator();
@@ -1259,7 +1192,6 @@ public final class LodManager {
     }
 
     private void resetAll() {
-        genQueue.clear();
         nodes.clear();
         chunks.clear();
         chunkSweep = null;
@@ -1297,10 +1229,8 @@ public final class LodManager {
             if (n.ready) ready++;
             if (n.drawn) drawn++;
         }
-        var gt = simon.vulkanfish.client.lod.gen.GeneratedChunkBuilder.TIMES;
-        long gn = Math.max(1, gt.get(4)), cn = Math.max(1, COLUMN_TIMES.get(2));
-        LOG.info("[vulkanfish] LOD-CPU je Chunk (ms): gen Bloecke {} Heightmap {} Biome {} Oberflaeche {} (n={}); Saeule Einlesen {} Bauen {} (n={}); Knoten-Meshing {} (n={})",
-                fmt(gt.get(0) / 1e6 / gn), fmt(gt.get(1) / 1e6 / gn), fmt(gt.get(2) / 1e6 / gn), fmt(gt.get(3) / 1e6 / gn), gt.get(4),
+        long cn = Math.max(1, COLUMN_TIMES.get(2));
+        LOG.info("[vulkanfish] LOD-CPU je Chunk (ms): Saeule Einlesen {} Bauen {} (n={}); Knoten-Meshing {} (n={})",
                 fmt(COLUMN_TIMES.get(0) / 1e6 / cn), fmt(COLUMN_TIMES.get(1) / 1e6 / cn), COLUMN_TIMES.get(2),
                 fmt(MESH_TIMES.get(0) / 1e6 / Math.max(1, MESH_TIMES.get(1))), MESH_TIMES.get(1));
         LOG.info("[vulkanfish] LOD: {} Knoten gewuenscht, {} fertig, {} gezeichnet; Quads {}/{} M, Meshlets {}/{} K; "

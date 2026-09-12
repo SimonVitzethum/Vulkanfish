@@ -91,7 +91,7 @@ public final class LodBiomeTable {
         int fallback = biomes.isEmpty() ? 0 : LodMaterials.biomeId(biomes.getFirst());
         LodBiomeTable t = new LodBiomeTable(climate, ids, multi, fallback);
         long t0 = System.nanoTime();
-        PalettedContainerFactory containers = PalettedContainerFactory.create(src.level.registryAccess());
+        PalettedContainerFactory containers = PalettedContainerFactory.create(src.registries);
         int n = 0;
         for (Holder<Biome> b : biomes) {
             int id = LodMaterials.biomeId(b);
@@ -115,7 +115,7 @@ public final class LodBiomeTable {
         int sea = src.settings.seaLevel();
         int stoneId = LodMaterials.of(src.settings.defaultBlock()).id();
         int low = mostCommonTop(src, containers, biome, salt * 4, sea + 4, -1, false);
-        int high = mostCommonTop(src, containers, biome, salt * 4 + 1, Math.min(sea + 70, src.level.getMaxY() - 40), -1, false);
+        int high = mostCommonTop(src, containers, biome, salt * 4 + 1, Math.min(sea + 70, src.heights.getMaxY() - 40), -1, false);
         int wet = mostCommonTop(src, containers, biome, salt * 4 + 2, sea - 12, sea, false);
         int steep = mostCommonTop(src, containers, biome, salt * 4 + 3, sea + 20, -1, true);
         int filler = fillerOf(src, containers, biome, salt, sea + 4);
@@ -165,8 +165,8 @@ public final class LodBiomeTable {
                                            int topY, int waterTop, boolean slope) {
         // weit draussen, damit nichts mit echten Positionen kollidiert (Rauschen der Oberflaeche variiert trotzdem)
         ChunkPos pos = new ChunkPos(100_000 + salt * 3, -100_000 + salt * 5);
-        ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY, src.level, containers, null);
-        int minY = src.level.getMinY();
+        ProtoChunk chunk = new ProtoChunk(pos, UpgradeData.EMPTY, src.heights, containers, null);
+        int minY = src.heights.getMinY();
         BlockState stone = src.settings.defaultBlock(), water = src.settings.defaultFluid();
         LevelChunkSection[] sections = chunk.getSections();
         for (int x = 0; x < 16; x++) {
@@ -180,13 +180,13 @@ public final class LodBiomeTable {
         var sampler = src.randomState.sampler();
         chunk.fillBiomesFromNoise((qx, qy, qz, s) -> biome, sampler);
         chunk.setPersistedStatus(ChunkStatus.NOISE);
-        BiomeManager bm = new BiomeManager((qx, qy, qz) -> biome, BiomeManager.obfuscateSeed(src.level.getSeed()));
+        BiomeManager bm = new BiomeManager((qx, qy, qz) -> biome, BiomeManager.obfuscateSeed(src.seed));
         int sea = src.settings.seaLevel();
         Aquifer.FluidStatus seaStatus = new Aquifer.FluidStatus(sea, water);
         NoiseChunk nc = chunk.getOrCreateNoiseChunk(c -> NoiseChunk.forChunk(c, src.randomState, Beardifier.EMPTY, src.settings,
                 (x, y, z) -> seaStatus, Blender.empty()));
         src.randomState.surfaceSystem().buildSurface(src.randomState, bm, src.settings.useLegacyRandomSource(),
-                new WorldGenerationContext(src.generator, src.level), chunk, nc, src.settings.surfaceRule(), null);
+                new WorldGenerationContext(src.generator, src.heights), chunk, nc, src.settings.surfaceRule(), null);
         return chunk;
     }
 

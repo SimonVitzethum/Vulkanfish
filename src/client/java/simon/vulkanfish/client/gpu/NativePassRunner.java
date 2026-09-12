@@ -252,46 +252,23 @@ public final class NativePassRunner {
     private boolean lodClustersCleared;
     private simon.vulkanfish.client.lod.LodManager lod;
 
-    // ---- GPU-Worldgen (Dichte fuer das LOD, siehe worldgen.slang) ----
-    /** Abnehmer der GPU-Dichte: liefert Chunk-Auftraege, bekommt die 2-Bit-Bloecke zurueck. */
-    public interface GenClient {
-        /** Chunk-Koordinaten (x0, z0, x1, z1, ...) fuer diesen Frame, hoechstens max Chunks. */
-        int[] nextGenBatch(int max);
-
-        /** Ergebnis eines Chunks: words[wordOffset ..] = [y][z] je 16 Bloecke a 2 Bit. */
-        void deliverGen(int chunkX, int chunkZ, int[] words, int wordOffset);
-    }
-
-    public static final int GEN_BATCH = 32;
-    private long layoutGen;
-    private long pipeGen;
+    // ---- GPU-Worldgen: Dichteprogramm + Noise-Tabellen der Welt (fuer lod_gen.slang) ----
     private Buf genProg, genConst, genPerm, genOffs, genOct, genNormal, genNormalFactor, genBlendD, genBlendOct;
-    private Buf genFlat, genInterp;
-    private final Buf[] genJobs = new Buf[FRAMES];
-    private final Buf[] genOut = new Buf[FRAMES];
-    private final int[][] genBatch = new int[FRAMES][];
     private int[] genProgOffset = new int[3];
     private int genFlatSlots, genInterpSlots, genResultReg, genMinY, genHeight, genSea, genLava;
-    private GenClient genClient;
     private boolean genReady;
 
     /**
      * Programm + Noise-Tabellen einer Welt hochladen (Render-Thread). height/minY der Dimension,
      * lavaLevel = min(-54, Meeresspiegel) wie Vanillas globale Fluessigkeitsregel.
      */
-    public boolean setupGenerator(simon.vulkanfish.client.lod.gen.DensityProgram p, int minY, int height, int seaLevel, GenClient client) {
+    public boolean setupGenerator(simon.vulkanfish.client.lod.gen.DensityProgram p, int minY, int height, int seaLevel) {
         genReady = false;
-        genClient = null;
-        if (pipeGen == 0L || p.regCount[0] > 32 || p.regCount[1] > 32 || p.regCount[2] > 32) return false;
+        if (pipeLodGen == 0L || p.regCount[0] > 32 || p.regCount[1] > 32 || p.regCount[2] > 32) return false;
         try (Arena arena = new Arena()) {
             waitAll();
-            for (Buf b : new Buf[]{genProg, genConst, genPerm, genOffs, genOct, genNormal, genNormalFactor, genBlendD, genBlendOct, genFlat, genInterp}) {
+            for (Buf b : new Buf[]{genProg, genConst, genPerm, genOffs, genOct, genNormal, genNormalFactor, genBlendD, genBlendOct}) {
                 if (b != null) destroyBuffer(b);
-            }
-            for (int i = 0; i < FRAMES; i++) {
-                if (genJobs[i] != null) destroyBuffer(genJobs[i]);
-                if (genOut[i] != null) destroyBuffer(genOut[i]);
-                genBatch[i] = null;
             }
             int stor = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
             int host = VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -352,19 +329,8 @@ public final class NativePassRunner {
             genHeight = height;
             genSea = seaLevel;
             genLava = Math.min(-54, seaLevel);
-            int corners = 5 * (height / 8 + 1) * 5;
-            int dev = VK10.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-            genFlat = makeBuffer(arena, (long) GEN_BATCH * 25 * genFlatSlots * 4, stor, dev);
-            genInterp = makeBuffer(arena, (long) GEN_BATCH * corners * genInterpSlots * 4, stor, dev);
-            for (int i = 0; i < FRAMES; i++) {
-                genJobs[i] = makeBuffer(arena, GEN_BATCH * 8L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
-                // Readback: host-sichtbar mit Cache (GPU schreibt, CPU liest)
-                genOut[i] = makeBuffer(arena, (long) GEN_BATCH * 16 * height * 4, stor | VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT, host);
-            }
-            genClient = client;
             genReady = true;
-            LOG.info("[vulkanfish] GPU-Worldgen bereit: {} Worte Programm, {} Improved-Noises, {} Chunks pro Frame",
-                    words, p.improved.size(), GEN_BATCH);
+            LOG.info("[vulkanfish] GPU-Worldgen bereit: {} Worte Programm, {} Improved-Noises", words, p.improved.size());
             return true;
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] GPU-Worldgen-Setup fehlgeschlagen", t);
@@ -881,47 +847,6 @@ public final class NativePassRunner {
 
     public void stopGenerator() {
         genReady = false;
-        genClient = null;
-    }
-
-    /** Ergebnisse des Slots (GPU fertig) abliefern, dann den naechsten Auftrag aufnehmen. */
-    private void recordGen(Arena arena, VkCommandBuffer cmd, int slot) {
-        GenClient client = genClient;
-        int[] done = genBatch[slot];
-        genBatch[slot] = null;
-        if (done != null && client != null) {
-            int perChunk = 16 * genHeight;
-            int[] words = new int[done.length / 2 * perChunk];
-            MemoryUtil.memIntBuffer(genOut[slot].mapped(), words.length).get(words);
-            for (int i = 0; i < done.length / 2; i++) client.deliverGen(done[i * 2], done[i * 2 + 1], words, i * perChunk);
-        }
-        if (!genReady || client == null) return;
-        int[] jobs = client.nextGenBatch(GEN_BATCH);
-        if (jobs == null || jobs.length < 2) return;
-        int count = Math.min(GEN_BATCH, jobs.length / 2);
-        ByteBuffer jb = MemoryUtil.memByteBuffer(genJobs[slot].mapped(), count * 8);
-        for (int i = 0; i < count * 2; i++) jb.putInt(i * 4, jobs[i]);
-        genBatch[slot] = java.util.Arrays.copyOf(jobs, count * 2);
-        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeGen);
-        push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutGen,
-                W.sb(0, genProg), W.sb(1, genConst), W.sb(2, genPerm), W.sb(3, genOffs), W.sb(4, genOct),
-                W.sb(5, genNormal), W.sb(6, genNormalFactor), W.sb(7, genBlendD), W.sb(8, genBlendOct),
-                W.sb(9, genJobs[slot]), W.sb(10, genFlat), W.sb(11, genInterp), W.sb(12, genOut[slot]));
-        int corners = 5 * (genHeight / 8 + 1) * 5;
-        int[] threads = {count * 25, count * corners, count * 16 * genHeight};
-        for (int st = 0; st < 3; st++) {
-            ByteBuffer pc = arena.malloc(48);
-            pc.putInt(0, st).putInt(4, genProgOffset[st]).putInt(8, count).putInt(12, genFlatSlots)
-                    .putInt(16, genInterpSlots).putInt(20, genMinY).putInt(24, genHeight).putInt(28, genSea)
-                    .putInt(32, genLava).putInt(36, genResultReg).putInt(40, 0).putInt(44, 0);
-            VK10.vkCmdPushConstants(cmd, layoutGen, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
-            VK10.vkCmdDispatch(cmd, (threads[st] + 63) / 64, 1, 1);
-            barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                    VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_SHADER_READ_BIT | VK10.VK_ACCESS_SHADER_WRITE_BIT);
-        }
-        // Ergebnis fuer die CPU sichtbar (nach dem Timeline-Signal gelesen)
-        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_HOST_BIT,
-                VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_HOST_READ_BIT);
     }
 
     public void setLod(simon.vulkanfish.client.lod.LodManager manager) {
@@ -1534,10 +1459,6 @@ public final class NativePassRunner {
             if (pipeLod == 0L) throw new IllegalStateException("LOD-Pipeline fehlgeschlagen");
             if (MeshShaderSupport.float64Enabled()) {
                 int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
-                int[][] gb = new int[13][];
-                for (int i = 0; i < 13; i++) gb[i] = new int[]{i, SB};
-                layoutGen = pipelineLayout(arena, setLayout(arena, gb, C), C, 48);
-                pipeGen = computePipe(arena, layoutGen, module(arena, loader, "worldgenMain"));
                 int[][] lb = new int[24][];
                 for (int i = 0; i < 24; i++) lb[i] = new int[]{i, SB};
                 layoutLodGen = pipelineLayout(arena, setLayout(arena, lb, C), C, 128);
@@ -1913,7 +1834,6 @@ public final class NativePassRunner {
             recordUploads(arena, cmd, slot);
             stamp(cmd, q0 + 1);
             if (rt != null) recordRt(arena, cmd, slot, d);
-            if (pipeGen != 0L) recordGen(arena, cmd, slot);
             if (pipeLodGen != 0L) recordLodGpu(arena, cmd, slot);
             stamp(cmd, q0 + 2);
             if (!visBitsCleared) {

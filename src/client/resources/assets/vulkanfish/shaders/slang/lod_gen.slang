@@ -9,7 +9,6 @@
 //   DECO steile Haenge + vereinfachte Baeume (Dichte/Laub/Stamm je Biom)
 //   RUNS echte Daten (Laeufe von der CPU) ueberschreiben ihre Saeulen
 // Ergebnis: Knotengitter [34][H][34] uint2 (Material | Biom << 16, Bodendecker) fuer lod_mesher.
-#define WG_FAST 1
 #include "worldgen_core.slang"
 
 struct GenJob

@@ -216,12 +216,6 @@
       "spv": "lod_frag.spv"
     },
     {
-      "file": "worldgen.slang",
-      "entry": "worldgenMain",
-      "stage": "compute",
-      "spv": "worldgen.spv"
-    },
-    {
       "file": "lod_gen.slang",
       "entry": "lodGenMain",
       "stage": "compute",

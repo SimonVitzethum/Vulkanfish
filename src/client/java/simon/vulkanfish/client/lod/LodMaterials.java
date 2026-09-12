@@ -71,7 +71,8 @@ public final class LodMaterials {
     private static final List<Material> BY_ID = new ArrayList<>();
     // Lesezugriff pro Block aus vielen Worker-Threads: unveraenderliche Kopie, ohne Lock lesbar
     private static volatile Material[] table = new Material[0];
-    private static final ConcurrentHashMap<Holder<Biome>, Integer> BIOME_IDS = new ConcurrentHashMap<>();
+    // nach Registry-Schluessel (Client-Registry und Vanilla-Lookup liefern verschiedene Holder desselben Bioms)
+    private static final ConcurrentHashMap<Object, Integer> BIOME_IDS = new ConcurrentHashMap<>();
     private static final List<Holder<Biome>> BIOMES = new ArrayList<>();
     private static final ConcurrentHashMap<Integer, Integer> TINT_CACHE = new ConcurrentHashMap<>();
     private static final ConcurrentHashMap<TextureAtlasSprite, Integer> SPRITE_COLORS = new ConcurrentHashMap<>();
@@ -126,15 +127,16 @@ public final class LodMaterials {
 
     public static int biomeId(Holder<Biome> biome) {
         if (biome == null) return 0;
-        Integer id = BIOME_IDS.get(biome);
+        Object key = biome.unwrapKey().map(k -> (Object) k).orElse(biome);
+        Integer id = BIOME_IDS.get(key);
         if (id != null) return id;
         synchronized (BIOMES) {
-            id = BIOME_IDS.get(biome);
+            id = BIOME_IDS.get(key);
             if (id != null) return id;
             if (BIOMES.size() >= 256) return 0; // mehr als 255 Biome: Rest ungetoent
             id = BIOMES.size();
             BIOMES.add(biome);
-            BIOME_IDS.put(biome, id);
+            BIOME_IDS.put(key, id);
             return id;
         }
     }

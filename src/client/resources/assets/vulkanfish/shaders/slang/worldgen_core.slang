@@ -1,5 +1,5 @@
-// worldgen_core.slang – Interpreter der Density-Programme (DensityProgram.java), gemeinsam fuer
-// die Chunk-Generierung (worldgen.slang) und die LOD-Generierung (lod_gen.slang). Der Includer
+// worldgen_core.slang – Interpreter der Density-Programme (DensityProgram.java) fuer die
+// LOD-Generierung (lod_gen.slang). Noise in float mit Knoten-Anker (NoiseTerms.java). Der Includer
 // definiert die Adressierung der Stufen-Zwischenwerte: ctxLoadFlat, ctxLoadInterp, ctxStore
 // und den Typ Ctx (mit Feld block = Weltkoordinate des Punkts).
 #ifndef VULKANFISH_WORLDGEN_CORE
@@ -45,95 +45,7 @@ float grad(uint h, float x, float y, float z)
 
 float smooth(float t) { return t * t * t * (t * (t * 6.0 - 15.0) + 10.0); }
 
-double wrapD(double x)
-{
-    return x - floor(x / 33554432.0 + 0.5) * 33554432.0;
-}
-
-// ImprovedNoise.noise(x, y, z, yScale, yFudge) – Gitter in double, Interpolation in float
-float improved(uint n, double xIn, double yIn, double zIn, double yScale, double yFudge)
-{
-    double x = xIn + gOffs[n * 3], y = yIn + gOffs[n * 3 + 1], z = zIn + gOffs[n * 3 + 2];
-    double xfd = floor(x), yfd = floor(y), zfd = floor(z);
-    int xf = int(xfd), yf = int(yfd), zf = int(zfd);
-    float xr = float(x - xfd), yr = float(y - yfd), zr = float(z - zfd);
-    float yy = yr;
-    if (yScale != 0.0)
-    {
-        double yrd = y - yfd;
-        double fudgeLimit = (yFudge >= 0.0 && yFudge < yrd) ? yFudge : yrd;
-        double yrFudge = floor(fudgeLimit / yScale + 1.0000000116860974e-7) * yScale;
-        yy = float(yrd - yrFudge);
-    }
-    uint x0 = perm(n, xf), x1 = perm(n, xf + 1);
-    uint xy00 = perm(n, int(x0) + yf), xy01 = perm(n, int(x0) + yf + 1);
-    uint xy10 = perm(n, int(x1) + yf), xy11 = perm(n, int(x1) + yf + 1);
-    float d000 = grad(perm(n, int(xy00) + zf), xr, yy, zr);
-    float d100 = grad(perm(n, int(xy10) + zf), xr - 1.0, yy, zr);
-    float d010 = grad(perm(n, int(xy01) + zf), xr, yy - 1.0, zr);
-    float d110 = grad(perm(n, int(xy11) + zf), xr - 1.0, yy - 1.0, zr);
-    float d001 = grad(perm(n, int(xy00) + zf + 1), xr, yy, zr - 1.0);
-    float d101 = grad(perm(n, int(xy10) + zf + 1), xr - 1.0, yy, zr - 1.0);
-    float d011 = grad(perm(n, int(xy01) + zf + 1), xr, yy - 1.0, zr - 1.0);
-    float d111 = grad(perm(n, int(xy11) + zf + 1), xr - 1.0, yy - 1.0, zr - 1.0);
-    float xa = smooth(xr), ya = smooth(yr), za = smooth(zr);
-    return lerp(lerp(lerp(d000, d100, xa), lerp(d010, d110, xa), ya), lerp(lerp(d001, d101, xa), lerp(d011, d111, xa), ya), za);
-}
-
-float perlin(uint start, uint count, double x, double y, double z)
-{
-    float v = 0.0;
-    for (uint i = start; i < start + count; i++)
-    {
-        Octave o = gOct[i];
-        v += o.valueFactor * improved(o.improved, wrapD(x * o.inputFactor), wrapD(y * o.inputFactor), wrapD(z * o.inputFactor), 0.0, 0.0);
-    }
-    return v;
-}
-
-float normalNoise(uint idx, double x, double y, double z)
-{
-    uint4 n = gNormal[idx];
-    const double f = 1.0181268882175227;
-    float a = perlin(n.x, n.y, x, y, z);
-    float b = perlin(n.z, n.w, x * f, y * f, z * f);
-    return float(double(a + b) * gNormalFactor[idx]);
-}
-
-float blendedNoise(uint idx, int bx, int by, int bz)
-{
-    double xzMul = gBlendD[idx * 8], yMul = gBlendD[idx * 8 + 1];
-    double xzFac = gBlendD[idx * 8 + 2], yFac = gBlendD[idx * 8 + 3], smear = gBlendD[idx * 8 + 4];
-    double limitX = double(bx) * xzMul, limitY = double(by) * yMul, limitZ = double(bz) * xzMul;
-    double mainX = limitX / xzFac, mainY = limitY / yFac, mainZ = limitZ / xzFac;
-    double limitSmear = yMul * smear, mainSmear = limitSmear / yFac;
-    float blendMin = 0.0, blendMax = 0.0, mainV = 0.0;
-    double pw = 1.0;
-    for (uint i = 0; i < 8; i++)
-    {
-        int n = gBlendOct[idx * 40 + 32 + i];
-        if (n >= 0)
-            mainV += improved(uint(n), wrapD(mainX * pw), wrapD(mainY * pw), wrapD(mainZ * pw), mainSmear * pw, mainY * pw) / float(pw);
-        pw *= 0.5;
-    }
-    float factor = (mainV / 10.0 + 1.0) / 2.0;
-    bool isMax = factor >= 1.0, isMin = factor <= 0.0;
-    pw = 1.0;
-    for (uint i = 0; i < 16; i++)
-    {
-        double wx = wrapD(limitX * pw), wy = wrapD(limitY * pw), wz = wrapD(limitZ * pw);
-        double ysp = limitSmear * pw;
-        int mn = gBlendOct[idx * 40 + i], mx = gBlendOct[idx * 40 + 16 + i];
-        if (!isMax && mn >= 0) blendMin += improved(uint(mn), wx, wy, wz, ysp, limitY * pw) / float(pw);
-        if (!isMin && mx >= 0) blendMax += improved(uint(mx), wx, wy, wz, ysp, limitY * pw) / float(pw);
-        pw *= 0.5;
-    }
-    float t = saturate(factor);
-    return lerp(blendMin / 512.0, blendMax / 512.0, t) / 128.0;
-}
-
-#ifdef WG_FAST
-// ---------- LOD: Noise ohne double (NoiseTerms.java) ----------
+// ---------- Noise ohne double (NoiseTerms.java) ----------
 // Der Includer liefert wgLocal(c) = Punkt relativ zum Knotenursprung (y absolut) und
 // wgJobTerm0(c) = erster Eintrag des Knotens in gJobTerm.
 struct NoiseTerm
@@ -242,7 +154,6 @@ float blendedNoiseF(uint idx, uint t0, uint jt0, int3 d)
     float t = saturate(factor);
     return lerp(blendMin / 512.0, blendMax / 512.0, t) / 128.0;
 }
-#endif
 
 float mapOp(uint type, float v)
 {
@@ -295,7 +206,6 @@ void wgExec(inout Ctx c, uint progOffset, uint stage, inout float r[MAX_REGS])
             pc += 6;
             break;
         }
-#ifdef WG_FAST
         case OP_NOISE: r[d] = normalNoiseF(gProg[pc + 2], gTermBase[pc], wgJobTerm0(c), wgLocal(c), float3(0.0)); pc += 5; break;
         case OP_SNOISE:
             r[d] = normalNoiseF(gProg[pc + 2], gTermBase[pc], wgJobTerm0(c), wgLocal(c), float3(r[gProg[pc + 3]], r[gProg[pc + 4]], r[gProg[pc + 5]]));
@@ -305,27 +215,6 @@ void wgExec(inout Ctx c, uint progOffset, uint stage, inout float r[MAX_REGS])
         case OP_SHIFTB:
         case OP_SHIFT: r[d] = normalNoiseF(gProg[pc + 2], gTermBase[pc], wgJobTerm0(c), wgLocal(c), float3(0.0)) * 4.0; pc += 3; break;
         case OP_BLENDED: r[d] = blendedNoiseF(gProg[pc + 2], gTermBase[pc], wgJobTerm0(c), wgLocal(c)); pc += 3; break;
-#else
-        case OP_NOISE:
-        {
-            double xz = double(gConst[gProg[pc + 3]]), ys = double(gConst[gProg[pc + 4]]);
-            r[d] = normalNoise(gProg[pc + 2], double(b.x) * xz, double(b.y) * ys, double(b.z) * xz);
-            pc += 5;
-            break;
-        }
-        case OP_SNOISE:
-        {
-            double xz = double(gConst[gProg[pc + 6]]), ys = double(gConst[gProg[pc + 7]]);
-            r[d] = normalNoise(gProg[pc + 2], double(b.x) * xz + double(r[gProg[pc + 3]]),
-                               double(b.y) * ys + double(r[gProg[pc + 4]]), double(b.z) * xz + double(r[gProg[pc + 5]]));
-            pc += 8;
-            break;
-        }
-        case OP_SHIFTA: r[d] = normalNoise(gProg[pc + 2], double(b.x) * 0.25, 0.0, double(b.z) * 0.25) * 4.0; pc += 3; break;
-        case OP_SHIFTB: r[d] = normalNoise(gProg[pc + 2], double(b.z) * 0.25, double(b.x) * 0.25, 0.0) * 4.0; pc += 3; break;
-        case OP_SHIFT: r[d] = normalNoise(gProg[pc + 2], double(b.x) * 0.25, double(b.y) * 0.25, double(b.z) * 0.25) * 4.0; pc += 3; break;
-        case OP_BLENDED: r[d] = blendedNoise(gProg[pc + 2], b.x, b.y, b.z); pc += 3; break;
-#endif
         case OP_RANGE:
         {
             float v = r[gProg[pc + 2]];

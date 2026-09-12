@@ -19,6 +19,8 @@ public final class VulkanfishSettings {
 
     /** Fullbright in Prozent (0 = aus). */
     private static volatile int fullbright;
+    /** Bekannte Seeds je Serveradresse (Mehrspieler-LOD-Generierung). */
+    private static final java.util.Map<String, Long> SEEDS = new java.util.concurrent.ConcurrentHashMap<>();
 
     static {
         load();
@@ -46,12 +48,38 @@ public final class VulkanfishSettings {
         save();
     }
 
+    /** Seed fuer eine Serveradresse (Kleinschreibung, ohne Standardport), sonst null. */
+    public static Long seedFor(String serverAddress) {
+        return SEEDS.get(serverKey(serverAddress));
+    }
+
+    public static void setSeed(String serverAddress, Long seed) {
+        if (seed == null) SEEDS.remove(serverKey(serverAddress));
+        else SEEDS.put(serverKey(serverAddress), seed);
+        save();
+    }
+
+    /** Properties-Schluessel: ':' ist dort ein Trenner -> Port mit '_' abtrennen. */
+    private static String serverKey(String address) {
+        String a = address == null ? "" : address.trim().toLowerCase(java.util.Locale.ROOT);
+        if (a.endsWith(":25565")) a = a.substring(0, a.length() - 6);
+        return a.replace(':', '_');
+    }
+
     private static void load() {
         if (!Files.exists(FILE)) return;
         Properties p = new Properties();
         try (Reader r = Files.newBufferedReader(FILE)) {
             p.load(r);
             fullbright = Math.max(0, Math.min(100, Integer.parseInt(p.getProperty("fullbright", "0").trim())));
+            for (String name : p.stringPropertyNames()) {
+                if (!name.startsWith("seed.")) continue;
+                try {
+                    SEEDS.put(name.substring(5), Long.parseLong(p.getProperty(name).trim()));
+                } catch (NumberFormatException e) {
+                    LOG.warn("[vulkanfish] Seed fuer {} ungueltig: {}", name.substring(5), p.getProperty(name));
+                }
+            }
         } catch (IOException | NumberFormatException e) {
             LOG.warn("[vulkanfish] {} nicht lesbar: {}", FILE, e.toString());
         }
@@ -60,6 +88,7 @@ public final class VulkanfishSettings {
     private static void save() {
         Properties p = new Properties();
         p.setProperty("fullbright", Integer.toString(fullbright));
+        SEEDS.forEach((server, seed) -> p.setProperty("seed." + server, Long.toString(seed)));
         try {
             Files.createDirectories(FILE.getParent());
             try (Writer w = Files.newBufferedWriter(FILE)) {
