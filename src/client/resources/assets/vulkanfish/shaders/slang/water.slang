@@ -216,7 +216,9 @@ float4 waterFrag(WaterVertOut input) : SV_Target0
     // ---------- Wasserkoerper: Brechung + Absorption ----------
     float sceneD = gSceneDepth.Load(int3(px, 0));
     float3 scenePos = reconstruct(f, suv, sceneD);
-    float thickness = sceneD <= 0.0 ? 64.0 : max(distance(scenePos, wp), 0.0);
+    // Nichts dahinter (Grund noch nicht gemesht, Fernfeld dort ausgeblendet): wie tiefes Wasser,
+    // nicht der Himmel durchs Wasser – sonst graue Flaechen beim Laden/Bewegen
+    float thickness = sceneD <= 0.0 ? 1000.0 : max(distance(scenePos, wp), 0.0);
     if (f.debugView == 6)
         return float4(toGamma(float3(saturate(thickness / 8.0))), 1.0); // Debug: Wassertiefe 0..8 Bloecke
     float2 ruv = suv + N.xz * 0.035 * saturate(thickness * 0.5) / (1.0 + dist * 0.05);
@@ -292,8 +294,13 @@ float4 waterFrag(WaterVertOut input) : SV_Target0
     }
     else if (f.dimension == 0)
     {
+        // Dunst wie applyFog (Terrain/LOD), sonst hebt sich das Nahwasser vom Fernfeld ab
+        float3 skyHdr = skyRadiance(f, V, false);
+        float3 skyV = display(skyHdr, f);
+        float haze = min(1.0 - exp(-dist * (0.0005 + f.rainFactor * 0.004)), 0.6) * (1.0 - f.caveFactor);
+        color = lerp(color, display(skyHdr * 0.8, f), haze);
         float t = saturate((dist / max(f.renderDistance, 16.0) - 0.8) / 0.2);
-        color = lerp(color, display(skyRadiance(f, V, false), f), t * t * (3.0 - 2.0 * t));
+        color = lerp(color, skyV, t * t * (3.0 - 2.0 * t));
     }
     return float4(toGamma(color), 1.0);
 }

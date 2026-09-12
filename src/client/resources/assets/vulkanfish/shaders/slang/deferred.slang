@@ -279,6 +279,35 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
         c += albedo * smoothstep(0.22, 0.45, sat) * 1.6;
     }
 
+    // Fernfeld-Wasser (nur das LOD schreibt Wasser in den G-Buffer; Nahwasser hat einen eigenen
+    // Pass): wie water.slang ohne Brechung – dunkler Wasserkoerper in Biomfarbe, Himmelsspiegelung
+    // nach Fresnel und Sonnenglanz, statt wie ein matter Block beleuchtet
+    if (mat == MAT_WATER && f.dimension == 0)
+    {
+        float3 tintLin = albedo / max(max(albedo.r, max(albedo.g, albedo.b)), 0.05);
+        float3 scatterTint = normalize(tintLin + float3(0.05, 0.45, 0.30));
+        float cosV = saturate(dot(-dir, n));
+        // Streulicht des Wasserkoerpers wie water.slang; der Grund (Tiefe aus dem LOD-Mesher,
+        // Emissions-Bits: c -> c*c/4 Bloecke, 0 = tief) scheint mit derselben Absorption durch.
+        // Grundfarbe unbekannt -> heller Sand/Kies als Naeherung.
+        float code = float(packed >> 4);
+        float depth = code < 0.5 ? 1000.0 : code * code * 0.25;
+        float3 absorb = (1.0 - tintLin) * 0.10 + float3(0.020, 0.012, 0.008);
+        float3 trans = exp(-absorb * depth / max(cosV, 0.25));
+        float3 lightDown = ambient + directColor(f) * lightFade * shadow * saturate(L.y);
+        float3 bed = float3(0.42, 0.38, 0.28) * lightDown * exp(-absorb * depth);
+        float3 scatter = scatterTint * 0.50 * (ambient + directColor(f) * lightFade * shadow * 0.35 + blockLight * 0.5);
+        float3 body = bed * trans + scatter * (1.0 - trans);
+        float3 R = reflect(dir, n);
+        R.y = abs(R.y);
+        float3 refl = skyRadiance(f, R, true) * (skyL * skyL);
+        float fresnel = 0.07 + 0.93 * pow(1.0 - cosV, 4.0);
+        c = lerp(body, refl, fresnel);
+        float nh = saturate(dot(n, normalize(L - dir)));
+        float spec = (pow(nh, 900.0) * 3.0 + pow(nh, 120.0) * 0.1) * saturate(fresnel * 4.0);
+        c += directColor(f) * spec * shadow * lightFade * (1.0 - f.rainFactor);
+    }
+
     float dist = length(wp - f.camPos);
     // Nether/End: Randnebel in Vanillas Nebelfarbe, belichtungsneutral wie der Hintergrund
     float3 skyCol = f.dimension == 0 ? skyRadiance(f, dir, false) : toLinear(f.fogColor) / max(f.exposure, 1e-3);

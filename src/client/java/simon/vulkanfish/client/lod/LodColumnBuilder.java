@@ -175,6 +175,10 @@ public final class LodColumnBuilder {
         return tail + 1;
     }
 
+    private static boolean occ(int id) {
+        return id != 0 && LodMaterials.byId(id).occludes();
+    }
+
     private static boolean passable(int id) {
         if (id == 0) return true;
         int k = LodMaterials.byId(id).kind();
@@ -256,9 +260,10 @@ public final class LodColumnBuilder {
                     int mat = vy >= 0 ? vMat[col + vy] : 0;
                     int biome = vy >= 0 ? vBiome[col + vy] : 0;
                     int cover = vy >= 0 ? vCover[col + vy] : 0;
-                    boolean hidden = mat != 0 && !border && vy + 1 < hv && vy > 0 && vMat[col + vy + 1] != 0
-                            && vMat[col + vy - 1] != 0 && vMat[col - hv + vy] != 0 && vMat[col + hv + vy] != 0
-                            && vMat[col - n * hv + vy] != 0 && vMat[col + n * hv + vy] != 0;
+                    // Nachbarn muessen verdecken (Wasser nicht: sonst wird der Meeresboden zu Wasser)
+                    boolean hidden = mat != 0 && !border && vy + 1 < hv && vy > 0 && occ(vMat[col + vy + 1])
+                            && occ(vMat[col + vy - 1]) && occ(vMat[col - hv + vy]) && occ(vMat[col + hv + vy])
+                            && occ(vMat[col - n * hv + vy]) && occ(vMat[col + n * hv + vy]);
                     boolean same = mat != 0 && curLen > 0 && cover == 0
                             && (hidden && curMat > 0 || mat == curMat && biome == curBiome);
                     if (same) {

@@ -44,7 +44,9 @@ import simon.vulkanfish.client.mixin.worldgen.MultiNoiseBiomeSourceInvoker;
  */
 public final class LodBiomeTable {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
-    public static final int FIELDS = 8; // topLow, topHigh, wet, steep, filler, leaves, log, density(x1000)
+    // topLow, topHigh, wet, steep, filler, leaves, log, density(x1000),
+    // Grundtemperatur(x1000), Schneedecke, Eis, Flags (bit0: gefrierend wie Frozen Ocean)
+    public static final int FIELDS = 12;
 
     /** Pro Biom-ID (LodMaterials.biomeId): Material-IDs + Baumdichte. */
     public final int[] table = new int[256 * FIELDS];
@@ -129,6 +131,13 @@ public final class LodBiomeTable {
         table[base + 5] = tree[0];
         table[base + 6] = tree[1];
         table[base + 7] = tree[2];
+        // Vereisung wie Vanillas Freeze-Feature (Schnee auf Land, Eis auf Wasser), das nicht zu den
+        // Oberflaechenregeln gehoert und in der vereinfachten Generierung sonst fehlt
+        boolean frozen = biome.unwrapKey().map(k -> k.identifier().getPath().contains("frozen")).orElse(false);
+        table[base + 8] = Math.round(biome.value().getBaseTemperature() * 1000f);
+        table[base + 9] = LodMaterials.of(Blocks.SNOW.defaultBlockState()).id();
+        table[base + 10] = LodMaterials.of(Blocks.ICE.defaultBlockState()).id();
+        table[base + 11] = frozen ? 1 : 0;
     }
 
     /** Musterchunk (flach, optional Wasser darueber / Hang) durch Vanillas Oberflaeche, haeufigster oberster Block. */

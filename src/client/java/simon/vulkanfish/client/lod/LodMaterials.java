@@ -55,8 +55,12 @@ public final class LodMaterials {
     public static final int FACE_BOTTOM = 2;
 
     /** Eintrag der Tabelle; Farben als 0xRRGGBB (Gamma, wie die Texturen). */
+    /**
+     * @param fullCover Bodendecker, der die ganze Oberseite bedeckt (Schneeschicht, Teppich): ersetzt
+     *                  die Oberseitenfarbe, statt wie Pflanzen mit ihr gemischt zu werden
+     */
     public record Material(int id, BlockState state, int kind, int[] color, boolean[] tinted,
-                           BlockTintSource tint, int emission, int tintType, int constTint) {
+                           BlockTintSource tint, int emission, int tintType, int constTint, boolean fullCover) {
         public boolean isVoxel() {
             return kind != KIND_AIR && kind != KIND_COVER;
         }
@@ -81,7 +85,7 @@ public final class LodMaterials {
 
     static {
         BIOMES.add(null); // 0 = unbekannt
-        AIR = new Material(0, Blocks.AIR.defaultBlockState(), KIND_AIR, new int[3], new boolean[3], null, 0, 0, 0xFFFFFF);
+        AIR = new Material(0, Blocks.AIR.defaultBlockState(), KIND_AIR, new int[3], new boolean[3], null, 0, 0, 0xFFFFFF, false);
         BY_ID.add(AIR);
         BY_STATE.put(AIR.state(), AIR);
         table = new Material[]{AIR};
@@ -90,17 +94,22 @@ public final class LodMaterials {
     private LodMaterials() {
     }
 
-    /** Nach Resource-Reload: Farben neu bestimmen (IDs bleiben, Tabelle wird neu gefuellt). */
+    /**
+     * Nach Resource-Reload: Farben neu bestimmen. Die IDs bleiben (gebaute Saeulen und die
+     * GPU-Tabelle verweisen darauf); die GPU laedt die Tabelle ueber generation() neu hoch.
+     */
     public static synchronized void reset() {
-        BY_STATE.clear();
-        synchronized (BY_ID) {
-            BY_ID.clear();
-            BY_ID.add(AIR);
-            table = BY_ID.toArray(new Material[0]);
-        }
-        BY_STATE.put(AIR.state(), AIR);
         TINT_CACHE.clear();
         SPRITE_COLORS.clear();
+        synchronized (BY_ID) {
+            for (int i = 1; i < BY_ID.size(); i++) {
+                Material old = BY_ID.get(i);
+                Material m = build(old.id(), old.state());
+                BY_ID.set(i, m);
+                BY_STATE.put(m.state(), m);
+            }
+            table = BY_ID.toArray(new Material[0]);
+        }
         GENERATION.incrementAndGet();
     }
 
@@ -144,6 +153,7 @@ public final class LodMaterials {
     /** Endfarbe einer Seite inkl. Biom-Toenung (0xRRGGBB). */
     public static int faceColor(Material m, int face, int biomeId) {
         int c = m.color()[face];
+        if (m.tinted()[face] && m.tintType() == TINT_WATER) return multiply(c, biomeColors(biomeId)[3]);
         if (!m.tinted()[face] || m.tint() == null) return c;
         int key = (m.id() << 8) | (biomeId & 0xFF);
         Integer tint = TINT_CACHE.get(key);
@@ -180,6 +190,15 @@ public final class LodMaterials {
             id = BY_ID.size();
         }
         if (id > 0xFFFF) return AIR;
+        Material m = build(id, state);
+        synchronized (BY_ID) {
+            BY_ID.add(m);
+            table = BY_ID.toArray(new Material[0]);
+        }
+        return m;
+    }
+
+    private static Material build(int id, BlockState state) {
         int kind = classify(state);
         int[] color = new int[3];
         boolean[] tinted = new boolean[3];
@@ -188,12 +207,41 @@ public final class LodMaterials {
             tint = averageColors(state, color, tinted);
         }
         int[] tt = classifyTint(state, tint);
-        Material m = new Material(id, state, kind, color, tinted, tint, Math.min(state.getLightEmission(), 15), tt[0], tt[1]);
-        synchronized (BY_ID) {
-            BY_ID.add(m);
-            table = BY_ID.toArray(new Material[0]);
+        if (kind == KIND_WATER) {
+            // Fluessigkeiten haben kein Blockmodell: graue Wassertextur + Biom-Wasserfarbe (wie der Fluid-Renderer)
+            java.util.Arrays.fill(tinted, true);
+            tt = new int[]{TINT_WATER, 0};
         }
-        return m;
+        if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.SNOWY)
+                && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.SNOWY)) {
+            // verschneites Gras/Myzel: die Oberseite ist in Vanilla immer von Schnee bedeckt
+            color[FACE_TOP] = snowColor();
+            tinted[FACE_TOP] = false;
+        }
+        return new Material(id, state, kind, color, tinted, tint, Math.min(state.getLightEmission(), 15), tt[0], tt[1],
+                kind == KIND_COVER && coversTop(state));
+    }
+
+    /** Deckt die Form die ganze Blockoberseite ab (Schneeschicht, Teppich, Moosteppich)? */
+    private static boolean coversTop(BlockState state) {
+        try {
+            VoxelShape shape = state.getShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+            if (shape.isEmpty()) return false;
+            return shape.min(Direction.Axis.X) < 0.01 && shape.max(Direction.Axis.X) > 0.99
+                    && shape.min(Direction.Axis.Z) < 0.01 && shape.max(Direction.Axis.Z) > 0.99;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static int snowColor() {
+        try {
+            int c = spriteColor(Minecraft.getInstance().getModelManager().getBlockStateModelSet()
+                    .get(Blocks.SNOW_BLOCK.defaultBlockState()).particleMaterial().sprite());
+            return c >= 0 ? c : 0xF0F8F8;
+        } catch (Throwable t) {
+            return 0xF0F8F8;
+        }
     }
 
     private static int classify(BlockState state) {
@@ -290,12 +338,12 @@ public final class LodMaterials {
                 long r = 0, g = 0, b = 0, a = 0;
                 for (int y = 0; y < h; y++) {
                     for (int x = 0; x < w; x++) {
-                        int p = img.getPixel(x, y); // ABGR
+                        int p = img.getPixel(x, y); // ARGB
                         int al = (p >>> 24) & 0xFF;
                         if (al < 16) continue;
-                        r += (long) (p & 0xFF) * al;
+                        r += (long) ((p >> 16) & 0xFF) * al;
                         g += (long) ((p >> 8) & 0xFF) * al;
-                        b += (long) ((p >> 16) & 0xFF) * al;
+                        b += (long) (p & 0xFF) * al;
                         a += al;
                     }
                 }

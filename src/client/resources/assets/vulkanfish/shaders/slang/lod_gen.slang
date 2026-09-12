@@ -26,7 +26,8 @@ struct GenJob
 [[vk::binding(12, 0)]] RWStructuredBuffer<uint> gSamples;   // Bits je Job
 [[vk::binding(13, 0)]] RWStructuredBuffer<int4> gColumn;    // je Job 34x34: oberster fester Voxel, Biom, Flags
 [[vk::binding(14, 0)]] RWStructuredBuffer<uint2> gGrid;     // je Job 34*H*34
-[[vk::binding(15, 0)]] StructuredBuffer<int> gBiomeTable;   // 256 x 8: low, high, wet, steep, filler, leaves, log, density
+[[vk::binding(15, 0)]] StructuredBuffer<int> gBiomeTable;   // 256 x BT_FIELDS (LodBiomeTable.FIELDS)
+static const int BT_FIELDS = 12; // low, high, wet, steep, filler, leaves, log, density, temp, snow, ice, flags
 [[vk::binding(16, 0)]] StructuredBuffer<double> gClimate;   // je Punkt 14 double
 [[vk::binding(17, 0)]] StructuredBuffer<int> gClimateBiome;
 [[vk::binding(18, 0)]] StructuredBuffer<uint2> gRunHead;    // je Saeule: Start, Anzahl
@@ -406,7 +407,7 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
         {
             int surfY = gP.minY + top * s;
             bool wet = water > top;
-            int tb = int(biome) * 8;
+            int tb = int(biome) * BT_FIELDS;
             uint topMat = uint(wet ? gBiomeTable[tb + 2] : (surfY > gP.seaLevel + 50 ? gBiomeTable[tb + 1] : gBiomeTable[tb]));
             gGrid[gridIndex(job, gx, uint(top), gz)] = uint2(topMat | (biome << 16), 0);
             // Fuellmaterial (Erde unter Gras) bis 3 Bloecke tief
@@ -435,62 +436,83 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
         GenJob j = gJobs[job];
         if ((j.flags & 1u) == 0) return;
         int4 me = gColumn[job * GRID_W * GRID_W + col];
-        if (me.x < 0 || me.z == 1) return;
         int s = stepOf(j.level);
         uint hv = gP.height >> uint(j.level);
-        // steil: Hoehenunterschied zu den Nachbarn >= 4 Bloecke
-        int maxDiff = 0;
-        for (int d = 0; d < 4; d++)
+        int tb = me.y * BT_FIELDS;
+        if (me.x >= 0 && me.z != 1) // Hang + Baeume nur an Land; Vereisung auch auf Wasser
         {
-            int nx = int(gx) + (d == 0 ? 1 : d == 1 ? -1 : 0), nz = int(gz) + (d == 2 ? 1 : d == 3 ? -1 : 0);
-            if (nx < 0 || nz < 0 || nx >= int(GRID_W) || nz >= int(GRID_W)) continue;
-            int4 o = gColumn[job * GRID_W * GRID_W + uint(nz) * GRID_W + uint(nx)];
-            if (o.x >= 0) maxDiff = max(maxDiff, abs(o.x - me.x));
-        }
-        int tb = me.y * 8;
-        if (maxDiff * s >= 4)
-            gGrid[gridIndex(job, gx, uint(me.x), gz)] = uint2(uint(gBiomeTable[tb + 3]) | (uint(me.y) << 16), 0);
-        // Baeume: Weltraster 4x4 Bloecke, je Zelle hoechstens ein Baum an gehashter Stelle
-        int bx0 = blockX0(j) + int(gx) * s, bz0 = blockZ0(j) + int(gz) * s;
-        int reach = 2; // Kronenradius (Bloecke)
-        int cx0 = floorDivI(bx0 - reach, 4), cx1 = floorDivI(bx0 + s - 1 + reach, 4);
-        int cz0 = floorDivI(bz0 - reach, 4), cz1 = floorDivI(bz0 + s - 1 + reach, 4);
-        for (int cz = cz0; cz <= cz1; cz++)
-        {
-            for (int cx = cx0; cx <= cx1; cx++)
+            // steil: Hoehenunterschied zu den Nachbarn >= 4 Bloecke
+            int maxDiff = 0;
+            for (int d = 0; d < 4; d++)
             {
-                uint h = hash3(cx, 0x5eed, cz);
-                int tx = cx * 4 + int(h & 3u), tz = cz * 4 + int((h >> 2) & 3u);
-                // Saeule des Stamms im Knotengitter
-                int tgx = floorDivI(tx - blockX0(j), s), tgz = floorDivI(tz - blockZ0(j), s);
-                if (tgx < 0 || tgz < 0 || tgx >= int(GRID_W) || tgz >= int(GRID_W)) continue;
-                int4 base = gColumn[job * GRID_W * GRID_W + uint(tgz) * GRID_W + uint(tgx)];
-                if (base.x < 0 || base.z == 1) continue;
-                int tbb = base.y * 8;
-                int dens = gBiomeTable[tbb + 7];
-                if (dens <= 0 || int((h >> 8) % 1000u) >= dens * 16) continue; // Dichte je Baumzelle (16 Saeulen)
-                int trunk = 4 + int((h >> 20) % 3u);
-                int groundY = gP.minY + base.x * s + s; // erster Luftblock
-                int crownY = groundY + trunk;
-                uint leaves = uint(gBiomeTable[tbb + 5]) | (uint(base.y) << 16);
-                uint logM = uint(gBiomeTable[tbb + 6]) | (uint(base.y) << 16);
-                // Voxel dieser Saeule, die Stamm oder Krone schneiden
-                for (int vy = me.x + 1; vy < int(hv); vy++)
+                int nx = int(gx) + (d == 0 ? 1 : d == 1 ? -1 : 0), nz = int(gz) + (d == 2 ? 1 : d == 3 ? -1 : 0);
+                if (nx < 0 || nz < 0 || nx >= int(GRID_W) || nz >= int(GRID_W)) continue;
+                int4 o = gColumn[job * GRID_W * GRID_W + uint(nz) * GRID_W + uint(nx)];
+                if (o.x >= 0) maxDiff = max(maxDiff, abs(o.x - me.x));
+            }
+            if (maxDiff * s >= 4)
+                gGrid[gridIndex(job, gx, uint(me.x), gz)] = uint2(uint(gBiomeTable[tb + 3]) | (uint(me.y) << 16), 0);
+            // Baeume: Weltraster 4x4 Bloecke, je Zelle hoechstens ein Baum an gehashter Stelle
+            int bx0 = blockX0(j) + int(gx) * s, bz0 = blockZ0(j) + int(gz) * s;
+            int reach = 2; // Kronenradius (Bloecke)
+            int cx0 = floorDivI(bx0 - reach, 4), cx1 = floorDivI(bx0 + s - 1 + reach, 4);
+            int cz0 = floorDivI(bz0 - reach, 4), cz1 = floorDivI(bz0 + s - 1 + reach, 4);
+            for (int cz = cz0; cz <= cz1; cz++)
+            {
+                for (int cx = cx0; cx <= cx1; cx++)
                 {
-                    int y0 = gP.minY + vy * s, y1 = y0 + s - 1;
-                    if (y0 > crownY + 1) break;
-                    bool isTrunkCol = tx >= bx0 && tx < bx0 + s && tz >= bz0 && tz < bz0 + s;
-                    bool trunkHere = isTrunkCol && y1 >= groundY && y0 < crownY;
-                    // Krone: Abstand der Saeule zum Stamm <= Radius, Hoehe crownY-2 .. crownY+1
-                    int dx = max(0, max(bx0 - tx, tx - (bx0 + s - 1))), dz = max(0, max(bz0 - tz, tz - (bz0 + s - 1)));
-                    int rad = (y1 >= crownY) ? 1 : 2;
-                    bool leafHere = y1 >= crownY - 2 && y0 <= crownY + 1 && dx * dx + dz * dz <= rad * rad + 1;
-                    uint idx = gridIndex(job, gx, uint(vy), gz);
-                    if (gGrid[idx].x != 0) continue;
-                    if (trunkHere) gGrid[idx] = uint2(logM, 0);
-                    else if (leafHere) gGrid[idx] = uint2(leaves, 0);
+                    uint h = hash3(cx, 0x5eed, cz);
+                    int tx = cx * 4 + int(h & 3u), tz = cz * 4 + int((h >> 2) & 3u);
+                    // Saeule des Stamms im Knotengitter
+                    int tgx = floorDivI(tx - blockX0(j), s), tgz = floorDivI(tz - blockZ0(j), s);
+                    if (tgx < 0 || tgz < 0 || tgx >= int(GRID_W) || tgz >= int(GRID_W)) continue;
+                    int4 base = gColumn[job * GRID_W * GRID_W + uint(tgz) * GRID_W + uint(tgx)];
+                    if (base.x < 0 || base.z == 1) continue;
+                    int tbb = base.y * BT_FIELDS;
+                    int dens = gBiomeTable[tbb + 7];
+                    if (dens <= 0 || int((h >> 8) % 1000u) >= dens * 16) continue; // Dichte je Baumzelle (16 Saeulen)
+                    int trunk = 4 + int((h >> 20) % 3u);
+                    int groundY = gP.minY + base.x * s + s; // erster Luftblock
+                    int crownY = groundY + trunk;
+                    uint leaves = uint(gBiomeTable[tbb + 5]) | (uint(base.y) << 16);
+                    uint logM = uint(gBiomeTable[tbb + 6]) | (uint(base.y) << 16);
+                    // Voxel dieser Saeule, die Stamm oder Krone schneiden
+                    for (int vy = me.x + 1; vy < int(hv); vy++)
+                    {
+                        int y0 = gP.minY + vy * s, y1 = y0 + s - 1;
+                        if (y0 > crownY + 1) break;
+                        bool isTrunkCol = tx >= bx0 && tx < bx0 + s && tz >= bz0 && tz < bz0 + s;
+                        bool trunkHere = isTrunkCol && y1 >= groundY && y0 < crownY;
+                        // Krone: Abstand der Saeule zum Stamm <= Radius, Hoehe crownY-2 .. crownY+1
+                        int dx = max(0, max(bx0 - tx, tx - (bx0 + s - 1))), dz = max(0, max(bz0 - tz, tz - (bz0 + s - 1)));
+                        int rad = (y1 >= crownY) ? 1 : 2;
+                        bool leafHere = y1 >= crownY - 2 && y0 <= crownY + 1 && dx * dx + dz * dz <= rad * rad + 1;
+                        uint idx = gridIndex(job, gx, uint(vy), gz);
+                        if (gGrid[idx].x != 0) continue;
+                        if (trunkHere) gGrid[idx] = uint2(logM, 0);
+                        else if (leafHere) gGrid[idx] = uint2(leaves, 0);
+                    }
                 }
             }
+        }
+        // Vereisung (Vanillas Freeze-Feature): oberster Voxel nach den Baeumen; Temperatur des Bioms,
+        // oberhalb Meeresspiegel+17 je Block um 0,05/40 kaelter, unter 0,15 -> Eis auf Wasser, sonst Schnee
+        for (int vy = int(hv) - 1; vy >= 0; vy--)
+        {
+            uint idx = gridIndex(job, gx, uint(vy), gz);
+            uint2 cell = gGrid[idx];
+            uint m = cell.x & 0xFFFFu;
+            if (m == 0) continue;
+            int y = gP.minY + vy * s + s - 1;
+            float temp = float(gBiomeTable[tb + 8]) / 1000.0;
+            if ((gBiomeTable[tb + 11] & 1) != 0) temp = min(temp, 0.0);
+            temp -= float(max(0, y - (gP.seaLevel + 17))) * 0.05 / 40.0;
+            if (temp < 0.15)
+            {
+                if (m == gP.waterMat) gGrid[idx] = uint2(uint(gBiomeTable[tb + 10]) | (cell.x & 0xFFFF0000u), 0);
+                else if (m != gP.lavaMat && cell.y == 0) gGrid[idx] = uint2(cell.x, uint(gBiomeTable[tb + 9]));
+            }
+            break;
         }
         return;
     }

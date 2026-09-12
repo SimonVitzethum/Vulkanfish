@@ -177,8 +177,9 @@ public final class LodMesher {
         if (dir == 2) {
             int c = cov[idx(gx, y, gz)];
             if (c != 0) {
-                int cc = LodMaterials.faceColor(LodMaterials.byId(c), LodMaterials.FACE_TOP, biome);
-                rgb = mix(rgb, cc);
+                LodMaterials.Material cm = LodMaterials.byId(c);
+                int cc = LodMaterials.faceColor(cm, LodMaterials.FACE_TOP, biome);
+                rgb = cm.fullCover() ? cc : mix(rgb, cc); // Schnee/Teppich deckt ganz, Pflanzen teilweise
             }
         }
         int sky;
