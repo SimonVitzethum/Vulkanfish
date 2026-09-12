@@ -181,54 +181,86 @@ public final class LodColumnBuilder {
         return k == LodMaterials.KIND_COVER || k == LodMaterials.KIND_WATER || k == LodMaterials.KIND_LAVA;
     }
 
+    private int[] vMat = new int[0], vBiome = new int[0], vCover = new int[0];
+
+    /**
+     * Stufe l: erst das Voxelgitter (Material, Biom, Bodendecker je Voxel), dann Laeufe. Ein
+     * Voxel, dessen sechs Nachbarn fest sind, ist unsichtbar – er setzt den Lauf darueber fort,
+     * egal welches Material er hat (Stein/Tiefenschiefer/Erze/Kies im Inneren waren sonst je ein
+     * eigener Lauf). Randsaeulen des Chunks gelten als sichtbar (Nachbar-Chunk unbekannt).
+     * Verlustfrei fuers Bild: von solchen Voxeln wird nie eine Flaeche gezeichnet.
+     */
     private void buildLevel(int l, int[][] colStartOut, long[][] runsOut) {
         int s = 1 << l;
         int n = 16 >> l;
         int hv = height >> l;
+        int cells = n * n * hv;
+        if (vMat.length < cells) {
+            vMat = new int[cells];
+            vBiome = new int[cells];
+            vCover = new int[cells];
+        }
+        // 1) Voxel: oberster voxelbildender Block im 2^l-Wuerfel, Bodendecker traegt nach unten weiter
+        for (int cz = 0; cz < n; cz++) {
+            for (int cx = 0; cx < n; cx++) {
+                int col = (cz * n + cx) * hv;
+                int pendingCover = 0;
+                for (int vy = hv - 1; vy >= 0; vy--) {
+                    int mat = 0, biome = 0, cover = 0, topBlockY = -1;
+                    int y0 = vy << l;
+                    int coverY = -1;
+                    search:
+                    for (int y = y0 + s - 1; y >= y0; y--) {
+                        int rowBase = y << 8;
+                        for (int z = cz * s; z < cz * s + s; z++) {
+                            int zBase = rowBase | (z << 4);
+                            for (int x = cx * s; x < cx * s + s; x++) {
+                                int id = mats[zBase | x];
+                                if (id == 0) continue;
+                                LodMaterials.Material m = LodMaterials.byId(id);
+                                if (m.isVoxel()) {
+                                    mat = id;
+                                    topBlockY = y;
+                                    biome = biomes[((y >> 2) << 4) | ((z >> 2) << 2) | (x >> 2)] & 0xFF;
+                                    break search;
+                                } else if (m.kind() == LodMaterials.KIND_COVER && coverY < 0) {
+                                    coverY = y;
+                                    cover = id;
+                                }
+                            }
+                        }
+                    }
+                    if (mat == 0) {
+                        if (cover != 0) pendingCover = cover;
+                    } else {
+                        if (cover == 0 || coverY < topBlockY) cover = pendingCover;
+                        pendingCover = 0;
+                    }
+                    vMat[col + vy] = mat;
+                    vBiome[col + vy] = biome;
+                    vCover[col + vy] = mat != 0 ? cover : 0;
+                }
+            }
+        }
+        // 2) Laeufe von oben nach unten; unsichtbare Voxel setzen den laufenden Lauf fort
         int[] colStart = new int[n * n + 1];
         int count = 0;
         for (int cz = 0; cz < n; cz++) {
             for (int cx = 0; cx < n; cx++) {
+                int col = (cz * n + cx) * hv;
                 colStart[cz * n + cx] = count;
                 int runStart = count;
-                // von oben nach unten: Bodendecker eines reinen Decker-Voxels geht an den Voxel darunter
-                int pendingCover = 0;
+                boolean border = cx == 0 || cz == 0 || cx == n - 1 || cz == n - 1;
                 int curMat = -1, curBiome = 0, curCover = 0, curTop = -1, curLen = 0;
                 for (int vy = hv - 1; vy >= -1; vy--) {
-                    int mat = 0, biome = 0, cover = 0, topBlockY = -1;
-                    if (vy >= 0) {
-                        int y0 = vy << l;
-                        int coverY = -1;
-                        search:
-                        for (int y = y0 + s - 1; y >= y0; y--) {
-                            int rowBase = y << 8;
-                            for (int z = cx * 0 + cz * s; z < cz * s + s; z++) {
-                                int zBase = rowBase | (z << 4);
-                                for (int x = cx * s; x < cx * s + s; x++) {
-                                    int id = mats[zBase | x];
-                                    if (id == 0) continue;
-                                    LodMaterials.Material m = LodMaterials.byId(id);
-                                    if (m.isVoxel()) {
-                                        mat = id;
-                                        topBlockY = y;
-                                        biome = biomes[((y >> 2) << 4) | ((z >> 2) << 2) | (x >> 2)] & 0xFF;
-                                        break search;
-                                    } else if (m.kind() == LodMaterials.KIND_COVER && coverY < 0) {
-                                        coverY = y;
-                                        cover = id;
-                                    }
-                                }
-                            }
-                        }
-                        if (mat == 0) {
-                            if (cover != 0) pendingCover = cover; // traegt nach unten weiter
-                        } else {
-                            if (cover == 0 || coverY < topBlockY) cover = pendingCover;
-                            pendingCover = 0;
-                        }
-                    }
-                    // Lauf fortsetzen oder abschliessen (Laeufe von unten nach oben speichern -> umdrehen)
-                    boolean same = mat != 0 && mat == curMat && biome == curBiome && cover == 0 && curLen > 0;
+                    int mat = vy >= 0 ? vMat[col + vy] : 0;
+                    int biome = vy >= 0 ? vBiome[col + vy] : 0;
+                    int cover = vy >= 0 ? vCover[col + vy] : 0;
+                    boolean hidden = mat != 0 && !border && vy + 1 < hv && vy > 0 && vMat[col + vy + 1] != 0
+                            && vMat[col + vy - 1] != 0 && vMat[col - hv + vy] != 0 && vMat[col + hv + vy] != 0
+                            && vMat[col - n * hv + vy] != 0 && vMat[col + n * hv + vy] != 0;
+                    boolean same = mat != 0 && curLen > 0 && cover == 0
+                            && (hidden && curMat > 0 || mat == curMat && biome == curBiome);
                     if (same) {
                         curLen++;
                         curTop = vy;
