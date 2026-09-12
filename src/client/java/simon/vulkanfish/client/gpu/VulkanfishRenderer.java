@@ -512,6 +512,13 @@ public final class VulkanfishRenderer {
         }
         if (f == 1500 && nativeRunner != null) nativeRunner.passTimings();
         if (f == 1650 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit LOD-Blick: {}", nativeRunner.passTimings());
+        // Bobby-Cache fuellen: an entfernte Orte springen (Chunks laden, beim Verlassen cacht Bobby sie)
+        if (Boolean.getBoolean("vulkanfish.bobbyWarm")) {
+            if (f == 1700) selfTestCommand("tp @p 1634 190 -69");
+            if (f == 2000) selfTestCommand("tp @p 1634 190 1531");
+            if (f == 2300) selfTestCommand("tp @p 34 190 1531");
+            if (f == 2600) selfTestCommand("tp @p 34 190 -69");
+        }
         // Endzustand (Fernfeld fertig): GPU-Zeiten + FPS ueber 300 Frames
         if (f == 5000 && nativeRunner != null) {
             nativeRunner.passTimings();
