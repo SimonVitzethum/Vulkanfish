@@ -102,6 +102,51 @@ public final class TerrainStreamer {
 
     private final NativePassRunner runnerRef;
 
+    // ---- Nahfeld-Abdeckung fuers LOD: je Chunk ein Bit je Section (ab minSectionY), gesetzt wenn
+    // das Nahfeld sie vollstaendig zeichnet (Geometrie auf der GPU bzw. Vanilla bei Ueberlauf) oder
+    // sie sichtbar und leer ist. Nie gesehene Sections (ausserhalb des Frustums, verdeckt, noch nicht
+    // von Vanillas Sichtbarkeitssuche erreicht) bleiben offen: dort zeichnet das LOD weiter.
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap coveredBits = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+    private final it.unimi.dsi.fastutil.longs.LongOpenHashSet airVisible = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private int coverageVersion;
+
+    // ... und je Chunk die gewuenschten (sichtbaren, nicht leeren) Sections
+    private final it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap trackedBits = new it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap();
+
+    private void setCovered(long sectionKey, boolean covered) {
+        if (setBit(coveredBits, sectionKey, covered)) coverageVersion++;
+    }
+
+    private boolean setBit(it.unimi.dsi.fastutil.longs.Long2LongOpenHashMap map, long sectionKey, boolean on) {
+        if (level == null) return false;
+        int bit = SectionPos.y(sectionKey) - level.getMinSectionY();
+        if (bit < 0 || bit >= 64) return false;
+        long ck = ((long) SectionPos.x(sectionKey) << 32) | (SectionPos.z(sectionKey) & 0xFFFFFFFFL);
+        long old = map.get(ck);
+        long now = on ? old | (1L << bit) : old & ~(1L << bit);
+        if (now == old) return false;
+        if (now == 0) map.remove(ck);
+        else map.put(ck, now);
+        return true;
+    }
+
+    /** Nahfeld zeichnet alle bisher gesehenen Sections des Chunks (und mindestens eine)? */
+    public boolean chunkComplete(int cx, int cz) {
+        long ck = ((long) cx << 32) | (cz & 0xFFFFFFFFL);
+        long covered = coveredBits.get(ck);
+        return covered != 0 && (trackedBits.get(ck) & ~covered) == 0;
+    }
+
+    /** Vom Nahfeld vollstaendig gezeichnete Sections des Chunks (Bit = Section ueber minSectionY). */
+    public long coveredSections(int cx, int cz) {
+        return coveredBits.get(((long) cx << 32) | (cz & 0xFFFFFFFFL));
+    }
+
+    /** Aendert sich bei jeder Abdeckungsaenderung (LOD baut seine Nahfeld-Maske dann neu). */
+    public int coverageVersion() {
+        return coverageVersion;
+    }
+
     public TerrainStreamer(NativePassRunner runner) {
         this.runnerRef = runner;
         vertAlloc = new RangeAllocator(runner.maxVerts());
@@ -139,7 +184,11 @@ public final class TerrainStreamer {
         while ((dirty = DIRTY.poll()) != null) {
             dirtyReceived++;
             Section s = sections.get((long) dirty);
-            if (s == null) continue; // noch nie sichtbar -> kommt ueber syncVisible()
+            if (s == null) {
+                // leere sichtbare Section bekommt Bloecke: bis zum Meshen wieder offen (LOD zeigt sie)
+                if (airVisible.remove((long) dirty)) setCovered(dirty, false);
+                continue; // noch nie sichtbar -> kommt ueber syncVisible()
+            }
             dirtyTracked++;
             s.version++;
             s.needsMesh = true;
@@ -181,15 +230,26 @@ public final class TerrainStreamer {
         }
         for (int i = 0; i < remove.size(); i++) {
             Section s = sections.remove(remove.getLong(i));
+            setCovered(remove.getLong(i), false);
+            setBit(trackedBits, remove.getLong(i), false);
             releaseSection(s);
             runnerRef.rtSectionRemoved(remove.getLong(i));
+        }
+        var ait = airVisible.iterator();
+        while (ait.hasNext()) {
+            long key = ait.nextLong();
+            if (!inRadius(key, camSX, camSZ, radius)
+                    || level.getChunkSource().getChunk(SectionPos.x(key), SectionPos.z(key), ChunkStatus.FULL, false) == null) {
+                ait.remove();
+                setCovered(key, false);
+            }
         }
         if (capacityFreed) {
             capacityFreed = false;
             for (var e : sections.long2ObjectEntrySet()) {
                 Section s = e.getValue();
                 if (s.overflow && !s.pending) {
-                    s.overflow = false;
+                    s.overflow = false; // Vanilla zeichnet sie bis zum neuen Mesh weiter -> bleibt abgedeckt
                     s.needsMesh = true;
                     wantMesh.add(e.getLongKey());
                 }
@@ -204,14 +264,25 @@ public final class TerrainStreamer {
         int maxSY = level.getMaxSectionY();
         for (int i = 0; i < visible.size(); i++) {
             long key = visible.get(i).getSectionNode();
-            if (sections.containsKey(key) || !inRadius(key, camSX, camSZ, radius)) continue;
+            if (sections.containsKey(key) || airVisible.contains(key) || !inRadius(key, camSX, camSZ, radius)) continue;
             int sy = SectionPos.y(key);
             if (sy < minSY || sy > maxSY) continue;
-            LevelChunk chunk = level.getChunkSource().getChunk(SectionPos.x(key), SectionPos.z(key), ChunkStatus.FULL, false);
+            int cx = SectionPos.x(key), cz = SectionPos.z(key);
+            LevelChunk chunk = level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false);
             if (chunk == null) continue;
+            // Wie Vanilla erst mit geladenen Nachbarn meshen: sonst entstehen an Chunk-Grenzen
+            // Wasser-Seitenflaechen/Kanten gegen "Luft" (bis dahin zeigt das LOD die Section)
+            var src = level.getChunkSource();
+            if (src.getChunk(cx + 1, cz, ChunkStatus.FULL, false) == null || src.getChunk(cx - 1, cz, ChunkStatus.FULL, false) == null
+                    || src.getChunk(cx, cz + 1, ChunkStatus.FULL, false) == null || src.getChunk(cx, cz - 1, ChunkStatus.FULL, false) == null) continue;
             LevelChunkSection section = chunk.getSection(sy - minSY);
-            if (section.hasOnlyAir()) continue;
+            if (section.hasOnlyAir()) {
+                airVisible.add(key); // nichts zu zeichnen: fuers LOD abgedeckt
+                setCovered(key, true);
+                continue;
+            }
             sections.put(key, new Section());
+            setBit(trackedBits, key, true);
             wantMesh.add(key);
         }
     }
@@ -339,6 +410,7 @@ public final class TerrainStreamer {
     }
 
     private void apply(NativePassRunner runner, SectionMesher.MeshResult r, Section s) {
+        setCovered(r.key(), true); // danach ist sie gezeichnet (oder Vanilla zeichnet sie bei Ueberlauf)
         releaseRanges(runner, s);
         quadTotal -= s.quads;
         s.quads = 0;
@@ -492,6 +564,10 @@ public final class TerrainStreamer {
         quadTotal = 0;
         meshedSections = 0;
         overflowWarned = false;
+        coveredBits.clear();
+        trackedBits.clear();
+        airVisible.clear();
+        coverageVersion++;
         lastCameraSection = Long.MIN_VALUE;
     }
 

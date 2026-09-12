@@ -488,7 +488,15 @@ public final class NativePassRunner {
     }
 
     /** Neue Materialien/Biome in die GPU-Tabellen schreiben (nur Zuwachs). */
+    private int lgMatGeneration = -1;
+
     private void updateLodTables() {
+        int gen = simon.vulkanfish.client.lod.LodMaterials.generation();
+        if (gen != lgMatGeneration) {
+            // Farben neu bestimmt (Resource-Reload): ganze Tabelle neu hochladen
+            lgMatGeneration = gen;
+            lgUploadedMats = 0;
+        }
         var mats = simon.vulkanfish.client.lod.LodMaterials.snapshot();
         if (mats.length > lgUploadedMats) {
             ByteBuffer mb = MemoryUtil.memByteBuffer(lodMat.mapped(), 65536 * 16);
@@ -503,7 +511,7 @@ public final class NativePassRunner {
                     mb.putInt(i * 16 + f * 4, c | (t << 24));
                 }
                 int kind = m.kind();
-                mb.putInt(i * 16 + 12, (kind & 7) | ((m.emission() & 15) << 4));
+                mb.putInt(i * 16 + 12, (kind & 7) | ((m.emission() & 15) << 4) | (m.fullCover() ? 1 << 8 : 0));
                 tb.putInt(i * 4, m.constTint());
             }
             lgUploadedMats = mats.length;
@@ -859,7 +867,7 @@ public final class NativePassRunner {
     }
     private int lodClusterCount;
     private int[] lodMaskData;
-    private int lodMaskCamX, lodMaskCamZ;
+    private int lodMaskCamX, lodMaskCamZ, lodMaskMinSY;
     private boolean lodMaskPending;
     private long layoutLod;
     private long pipeLod;
@@ -1456,9 +1464,9 @@ public final class NativePassRunner {
             lodIndirect2 = makeBuffer(arena, 16, stor | ind | dst, dev);
             lodClusterTotal = makeBuffer(arena, 16, stor | dst, dev);
             int n = simon.vulkanfish.client.lod.LodManager.NEAR_MASK_SIZE;
-            lodNearMask = makeBuffer(arena, (long) n * n / 8, stor | dst, dev);
+            lodNearMask = makeBuffer(arena, (long) n * n * 4, stor | dst, dev); // je Chunk ein uint (Section-Bits)
             int M = EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT, F = VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
-            layoutLod = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, SB}, {3, UB}, {6, SB}}, M | F), M, 16);
+            layoutLod = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, SB}, {3, UB}, {6, SB}}, M | F), M | F, 16);
             pipeLod = meshPipe(arena, layoutLod, module(arena, loader, "lodMesh"), module(arena, loader, "lodFrag"),
                     2, FMT_GBUF, VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
             if (pipeLod == 0L) throw new IllegalStateException("LOD-Pipeline fehlgeschlagen");
@@ -1491,11 +1499,12 @@ public final class NativePassRunner {
         lodClusterCount = clusters;
     }
 
-    /** Nahfeld-Abdeckung (Bit pro Chunk, 128x128 toroidal) fuer den LOD-Mesh-Shader. */
-    public void setLodNearMask(int[] mask, int camChunkX, int camChunkZ) {
+    /** Nahfeld-Abdeckung (je Chunk Section-Bits ab minSectionY, 128x128 toroidal) fuer LOD-Cull und -Mesh. */
+    public void setLodNearMask(int[] mask, int camChunkX, int camChunkZ, int minSectionY) {
         lodMaskData = mask.clone();
         lodMaskCamX = camChunkX;
         lodMaskCamZ = camChunkZ;
+        lodMaskMinSY = minSectionY;
         lodMaskPending = true;
     }
 
@@ -2350,7 +2359,8 @@ public final class NativePassRunner {
                 W.sb(9, visWater), W.sb(10, waterIndirect), W.sb(11, visTrans), W.sb(12, transIndirect),
                 W.sb(13, lodVisBits), W.sb(14, lodNearMask));
         VK10.vkCmdPushConstants(cmd, layoutCull, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0,
-                arena.ints(phase, lodMaskData != null ? 1 : 0, lodMaskCamX, lodMaskCamZ));
+                // nearMode: Bit 0 an, darueber minSectionY + 2048
+                arena.ints(phase, lodMaskData != null ? 1 | ((lodMaskMinSY + 2048) << 1) : 0, lodMaskCamX, lodMaskCamZ));
         VK10.vkCmdDispatch(cmd, lodClusterCount, 1, 1);
     }
 
@@ -2435,8 +2445,8 @@ public final class NativePassRunner {
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutLod,
                     W.sb(0, lodMeshlets), W.sb(1, lodQuads), W.sb(2, lodNearMask), W.ub(3, uniforms[slot]), W.sb(6, lodList));
             ByteBuffer pc = arena.malloc(16);
-            pc.putInt(0, lodMaskCamX).putInt(4, lodMaskCamZ).putInt(8, lodMaskData != null ? 1 : 0).putInt(12, 0);
-            VK10.vkCmdPushConstants(cmd, layoutLod, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT, 0, pc);
+            pc.putInt(0, lodMaskCamX).putInt(4, lodMaskCamZ).putInt(8, lodMaskData != null ? 1 : 0).putInt(12, lodMaskMinSY);
+            VK10.vkCmdPushConstants(cmd, layoutLod, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, pc);
             EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodIndirect.buffer(), 0L, 1, 12);
         }
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);

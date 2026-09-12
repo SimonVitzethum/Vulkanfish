@@ -105,6 +105,7 @@ public final class VulkanfishRenderer {
             lod = new simon.vulkanfish.client.lod.LodManager(simon.vulkanfish.client.VulkanfishSettings.lodChunks(),
                     simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
             nativeRunner.setLod(lod);
+            lod.setNearField(streamer);
             nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
             lod.setRunner(nativeRunner);
             FrameDataCapture.lodFogDistance = lod.farBlocks();
@@ -506,12 +507,28 @@ public final class VulkanfishRenderer {
             selfTestCommand("tp @p 34 190 -69 0 12");
             FrameDataCapture.testSunAngle = 25.0f;
         }
-        if (f >= 300 && player != null) {
+        if (f >= 300 && player != null && !(Boolean.getBoolean("vulkanfish.lodMove") && f >= 2400)) {
             float yaw = f < 1700 ? 0.0f : 90.0f;
             lockView(player, yaw, dim == null ? 12.0f : dim.equals("the_nether") ? 5.0f : 20.0f);
         }
         if (f == 1500 && nativeRunner != null) nativeRunner.passTimings();
         if (f == 1650 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit LOD-Blick: {}", nativeRunner.passTimings());
+        // Bewegung auf Bodenhoehe (-Dvulkanfish.lodMove): erst Fernfeld am Start, dann 2500 Bloecke weiter
+        // springen und langsam weiterfliegen -> muss das Fernfeld nachziehen (Stufen, Farben, Loecher)
+        if (Boolean.getBoolean("vulkanfish.lodMove") && player != null) {
+            if (f == 2400) selfTestCommand("tp @p 2534 120 -69 -90 3");
+            if (f == 2438) NativePassRunner.debugView = Integer.getInteger("vulkanfish.lodMoveDebug", 0);
+            if (f == 2445) NativePassRunner.debugView = 0;
+            if (f >= 2400) {
+                // Blick nach Osten (+X), Flug vorwaerts: neues Fernfeld kommt von vorn
+                if (f > 2700) player.setPos(player.getX() + 0.35, player.getY(), player.getZ()); // ~55 Bl./s
+                lockView(player, -90.0f, 3.0f);
+            }
+            if (f == 2420 || f == 2440 || f == 2460 || f == 2500 || f == 2550 || f == 2700 || f == 3300 || f == 3900 || f == 4500) {
+                pendingScreenshot = f;
+                LOG.info("[vulkanfish] Bewegungstest f{} bei x={}", f, (int) player.getX());
+            }
+        }
         // Bobby-Cache fuellen: an entfernte Orte springen (Chunks laden, beim Verlassen cacht Bobby sie)
         if (Boolean.getBoolean("vulkanfish.bobbyWarm")) {
             if (f == 1700) selfTestCommand("tp @p 1634 190 -69");

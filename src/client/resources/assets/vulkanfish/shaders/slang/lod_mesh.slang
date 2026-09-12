@@ -7,7 +7,7 @@
 
 [[vk::binding(0, 0)]] StructuredBuffer<MeshletHeader> gMeshlets; // vertexStart = erstes Quad, indexStart = Stufe
 [[vk::binding(1, 0)]] StructuredBuffer<uint2> gQuads;
-[[vk::binding(2, 0)]] StructuredBuffer<uint> gNearMask;          // 128x128 Bit, toroidal (Chunk & 127)
+[[vk::binding(2, 0)]] StructuredBuffer<uint> gNearMask;          // je Chunk (& 127, toroidal) Section-Bits ab minSectionY
 [[vk::binding(3, 0)]] ConstantBuffer<FrameUniforms> gFrame;
 [[vk::binding(6, 0)]] StructuredBuffer<uint> gVisibleMeshlets;
 
@@ -15,7 +15,7 @@ struct LodPush
 {
     int2 camChunk;
     int maskValid;
-    int pad;
+    int minSectionY;
 };
 [[vk::push_constant]] ConstantBuffer<LodPush> gLod;
 
@@ -30,6 +30,7 @@ struct LodVertOut
     nointerpolation float3 normal;
     nointerpolation float2 light;  // Emission, Himmel (0..1)
     nointerpolation uint mat;      // Material | Emission << 4 (wie das Nahfeld)
+    float3 inner : TEXCOORD5;      // Punkt im Voxel hinter der Flaeche (Abdeckungstest je Pixel)
 };
 
 struct LodPrimOut
@@ -40,16 +41,47 @@ struct LodPrimOut
 static const float3 FACE_N[6] = { float3(1, 0, 0), float3(-1, 0, 0), float3(0, 1, 0),
                                   float3(0, -1, 0), float3(0, 0, 1), float3(0, 0, -1) };
 
-bool nearCovered(float2 worldXZ)
+// Vom Nahfeld gezeichnete Sections des Chunks (0 = nichts / ausserhalb des Fensters)
+uint nearBits(int2 c)
+{
+    if (gLod.maskValid == 0 || any(abs(c - gLod.camChunk) >= 64))
+        return 0u;
+    return gNearMask[uint((c.y & 127) * 128 + (c.x & 127))];
+}
+
+// Section-Bits von y0..y1 (Bloecke); unter/ueber dem Bereich liegt nichts -> gilt als abgedeckt
+uint sectionRange(float y0, float y1)
+{
+    int s0 = max(int(floor(y0 / 16.0)) - gLod.minSectionY, 0);
+    int s1 = min(int(floor(y1 / 16.0)) - gLod.minSectionY, 31);
+    if (s1 < s0)
+        return 0u;
+    uint hi = s1 >= 31 ? 0xFFFFFFFFu : ((1u << uint(s1 + 1)) - 1u);
+    return hi & ~((1u << uint(s0)) - 1u);
+}
+
+// Box komplett in gezeichneten Sections? (Quad samt dahinterliegendem Voxel)
+bool nearCoveredBox(float3 mn, float3 mx)
 {
     if (gLod.maskValid == 0)
         return false;
-    int2 c = int2(floor(worldXZ / 16.0));
-    int2 d = c - gLod.camChunk;
-    if (any(abs(d) >= 64))
+    int2 c0 = int2(floor(mn.xz / 16.0)), c1 = int2(floor(mx.xz / 16.0));
+    if (any(c1 - c0 > 3))
         return false;
-    uint bit = uint((c.y & 127) * 128 + (c.x & 127));
-    return (gNearMask[bit >> 5] & (1u << (bit & 31))) != 0;
+    uint need = sectionRange(mn.y, mx.y);
+    for (int z = c0.y; z <= c1.y; z++)
+        for (int x = c0.x; x <= c1.x; x++)
+            if ((nearBits(int2(x, z)) & need) != need)
+                return false;
+    return true;
+}
+
+// Punkt in einer gezeichneten Section?
+bool nearCoveredPoint(float3 p)
+{
+    uint b = nearBits(int2(floor(p.xz / 16.0)));
+    int s = int(floor(p.y / 16.0)) - gLod.minSectionY;
+    return s >= 0 && s < 32 && ((b >> uint(s)) & 1u) != 0;
 }
 
 [shader("mesh")]
@@ -99,19 +131,24 @@ void lodMesh(
     float3 n = FACE_N[face];
 
     float3 corners[4] = { p0, p0 + du, p0 + du + dv, p0 + dv };
+    float3 back = -n * min(0.5, scale * 0.5); // in den Voxel, dem die Flaeche gehoert
     for (uint c = 0; c < 4; c++)
     {
         uint vi = lt * 4 + c;
         verts[vi].pos = mul(f.viewProj, float4(corners[c], 1.0));
+        verts[vi].inner = corners[c] + back;
         verts[vi].color = color;
         verts[vi].normal = n;
-        verts[vi].light = float2(float(emission) / 15.0, sky);
+        verts[vi].light = float2(kind == LOD_KIND_WATER ? 0.0 : float(emission) / 15.0, sky); // Wasser: Bits = Tiefe
         verts[vi].mat = mat | (emission << 4);
     }
     uint b = lt * 4;
     tris[lt * 2] = uint3(b, b + 1, b + 2);
     tris[lt * 2 + 1] = uint3(b, b + 2, b + 3);
-    bool cull = nearCovered((p0 + (du + dv) * 0.5).xz);
+    // ganz vom Nahfeld gezeichnet -> verwerfen; teilweise -> je Pixel im Fragment-Shader
+    float3 qa = p0 - n * scale, qb = p0 + du + dv;
+    float3 qmn = min(qa, qb) + 0.01, qmx = max(qa, qb) - 0.01;
+    bool cull = nearCoveredBox(qmn, qmx);
     prims[lt * 2].cull = cull;
     prims[lt * 2 + 1].cull = cull;
 }
@@ -123,6 +160,7 @@ struct LodFragIn
     nointerpolation float3 normal;
     nointerpolation float2 light;
     nointerpolation uint mat;
+    float3 inner : TEXCOORD5;
 };
 
 struct LodGBufferOut
@@ -134,6 +172,10 @@ struct LodGBufferOut
 [shader("fragment")]
 LodGBufferOut lodFrag(LodFragIn input)
 {
+    // Pixel in einer vom Nahfeld gezeichneten Section: dort gilt das Nahfeld (keine Doppelflaechen,
+    // keine Loecher an Chunk-Grenzen, die ein Quad nur teilweise ueberdeckt)
+    if (nearCoveredPoint(input.inner))
+        discard;
     LodGBufferOut o;
     o.albedoMat = float4(input.color, float(input.mat) / 255.0);
     o.normalLight = float4(octEncode(input.normal), input.light.x, input.light.y);

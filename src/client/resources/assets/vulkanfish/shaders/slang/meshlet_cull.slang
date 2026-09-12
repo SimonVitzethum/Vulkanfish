@@ -24,7 +24,7 @@
 [[vk::binding(11, 0)]] RWStructuredBuffer<uint> gVisibleTrans;  // Glas/Eis
 [[vk::binding(12, 0)]] RWStructuredBuffer<uint> gTransIndirect;
 [[vk::binding(13, 0)]] RWStructuredBuffer<uint> gVisBits;      // pro Meshlet-Slot: im letzten Frame sichtbar
-[[vk::binding(14, 0)]] StructuredBuffer<uint> gNearMask;       // LOD: Nahfeld-Chunks (128x128 Bit, toroidal)
+[[vk::binding(14, 0)]] StructuredBuffer<uint> gNearMask;       // LOD: je Chunk (128x128 toroidal) gezeichnete Sections
 
 // Zwei-Phasen-Occlusion-Culling (Kamera):
 //  Phase 1: nur, was im LETZTEN Frame sichtbar war (Frustum + Backface) -> G-Buffer -> Hi-Z
@@ -36,7 +36,7 @@
 struct CullPush
 {
     uint phase;
-    uint nearMode;         // LOD: 1 = Meshlets unter geladenem Nahfeld verwerfen
+    uint nearMode;         // LOD: Bit 0 = Meshlets in gezeichneten Nahfeld-Sections verwerfen, darueber minSectionY + 2048
     int camChunkX, camChunkZ;
 };
 [[vk::push_constant]] ConstantBuffer<CullPush> gCull;
@@ -98,14 +98,20 @@ bool hizVisible(float3 c, float r, FrameUniforms f)
     return zNearest >= d;
 }
 
-// LOD: liegt die xz-Box komplett ueber Chunks, die das Nahfeld zeichnet? (dann bringt LOD nichts)
-bool nearCoveredBox(float2 mn, float2 mx)
+// LOD: liegt die Box komplett in Sections, die das Nahfeld zeichnet? (dann bringt LOD nichts)
+bool nearCoveredBox(float3 mn, float3 mx)
 {
-    if (gCull.nearMode == 0)
+    if ((gCull.nearMode & 1u) == 0)
         return false;
-    int2 c0 = int2(floor(mn / 16.0)), c1 = int2(floor(mx / 16.0));
+    int2 c0 = int2(floor(mn.xz / 16.0)), c1 = int2(floor(mx.xz / 16.0));
     if (any(c1 - c0 > 3))
         return false;
+    int minSY = int(gCull.nearMode >> 1) - 2048;
+    int s0 = max(int(floor(mn.y / 16.0)) - minSY, 0);
+    int s1 = min(int(floor(mx.y / 16.0)) - minSY, 31);
+    if (s1 < s0)
+        return true; // ganz unter/ueber der Welt
+    uint need = (s1 >= 31 ? 0xFFFFFFFFu : ((1u << uint(s1 + 1)) - 1u)) & ~((1u << uint(s0)) - 1u);
     int2 cam = int2(gCull.camChunkX, gCull.camChunkZ);
     for (int z = c0.y; z <= c1.y; z++)
     {
@@ -113,8 +119,7 @@ bool nearCoveredBox(float2 mn, float2 mx)
         {
             if (abs(x - cam.x) >= 64 || abs(z - cam.y) >= 64)
                 return false;
-            uint bit = uint((z & 127) * 128 + (x & 127));
-            if ((gNearMask[bit >> 5] & (1u << (bit & 31))) == 0)
+            if ((gNearMask[uint((z & 127) * 128 + (x & 127))] & need) != need)
                 return false;
         }
     }
@@ -144,7 +149,7 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
             {
                 float boundR = length(cl.extent) + cl.lodError;
                 pass = sphereFrustum(cl.center, boundR, f.frustumPlanes) ? 1u : 0u;
-                if (pass != 0 && nearCoveredBox(cl.center.xz - cl.extent.xz, cl.center.xz + cl.extent.xz))
+                if (pass != 0 && nearCoveredBox(cl.center - cl.extent, cl.center + cl.extent))
                     pass = 0u;
                 if (pass != 0)
                 {
@@ -177,7 +182,7 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
 
         // Meshlet-Feinfilter: Frustum + Backface-Ebene (+ Hi-Z in Phase 2)
         bool pass = sphereFrustum(mh.boundCenter, mh.boundRadius, f.frustumPlanes)
-                 && !nearCoveredBox(mh.boundCenter.xz - mh.boundRadius, mh.boundCenter.xz + mh.boundRadius);
+                 && !nearCoveredBox(mh.boundCenter - mh.boundRadius, mh.boundCenter + mh.boundRadius);
         if (pass && dot(mh.coneAxis, mh.coneAxis) > 0.5)
             pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff - 0.01;
         if (phase == 1)

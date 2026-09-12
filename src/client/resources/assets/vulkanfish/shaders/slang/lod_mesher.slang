@@ -127,7 +127,13 @@ uint faceKey(uint job, int x, int y, int z, uint dir, uint h, out bool valid)
     uint face = dir == 2 ? 0u : dir == 3 ? 2u : 1u;
     uint biome = (v.x >> 16) & 255u;
     uint rgb = faceColor(m, face, biome);
-    if (dir == 2 && v.y != 0) rgb = mixRgb(rgb, faceColor(v.y & 0xFFFFu, 0, biome));
+    if (dir == 2 && v.y != 0)
+    {
+        // Bodendecker: Schneeschicht/Teppich (info bit 8) ersetzt die Oberseite, Pflanzen mischen
+        uint cov = v.y & 0xFFFFu;
+        uint cc = faceColor(cov, 0, biome);
+        rgb = ((gMat[cov].w >> 8) & 1u) != 0 ? cc : mixRgb(rgb, cc);
+    }
     uint sky;
     if (ny >= int(h)) sky = 15;
     else
@@ -136,6 +142,15 @@ uint faceKey(uint job, int x, int y, int z, uint dir, uint h, out bool valid)
         sky = ny > gTop[job * W * W + uint(cz) * W + uint(cx)] ? 15u : 3u;
     }
     uint emi = (gMat[m].w >> 4) & 15u;
+    if (k == KIND_WATER && dir == 2)
+    {
+        // Wasseroberflaeche: statt Leuchtkraft die Tiefe bis zum Grund (1..15 -> c*c/4 Bloecke,
+        // 0 = unbekannt/tief) fuer die Wasserfarbe im Deferred-Pass
+        int bed = gTop[job * W * W + uint(gz) * W + uint(gx)];
+        float depth = bed < 0 ? 1e6 : float(y - bed) * float(1u << uint(gMJobs[job].level));
+        emi = uint(clamp(ceil(sqrt(depth * 4.0)), 1.0, 15.0));
+        if (bed < 0) emi = 0;
+    }
     uint r7 = (rgb >> 17) & 0x7Fu, g7 = (rgb >> 9) & 0x7Fu, b7 = (rgb >> 1) & 0x7Fu;
     valid = true;
     return r7 | (g7 << 7) | (b7 << 14) | (sky << 21) | (emi << 25) | ((k & 7u) << 29);
@@ -160,22 +175,30 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         uint job = i / (W * W), col = i % (W * W);
         MeshJob j = gMJobs[job];
         uint h = hv(j.level);
-        int top = -1, lo = 0x7FFFFFFF;
+        // Von oben: der erste nicht-leere Voxel ist die Obergrenze der Spalte (Wasser ueber dem
+        // Grund eingeschlossen); je Spalte nur ein Atomic statt einem je Wasservoxel
+        int top = -1, lo = 0x7FFFFFFF, hi = -1;
         for (int y = int(h) - 1; y >= 0; y--)
         {
             uint m = gGrid[job * gM.gridPerJob + uint(y) * W * W + col].x & 0xFFFFu;
             if (m == 0) continue;
             uint k = kindOf(m);
             if (k == KIND_AIR || k == KIND_COVER) continue;
-            if (top < 0 && occludes(k)) top = y;
+            if (hi < 0) hi = y;
             lo = y;
-            if (top < 0 && k == KIND_WATER) { InterlockedMax(gCount[job * 10 + 8], uint(y)); }
+            if (occludes(k)) { top = y; break; }
         }
         gTop[job * W * W + col] = top;
-        if (lo != 0x7FFFFFFF)
+        // unter der Oberkante: tiefster nicht-leerer Voxel (Hoehlen/Ueberhaenge) fuer den Hoehenbereich
+        for (int y = top - 1; y >= 0; y--)
+        {
+            uint m = gGrid[job * gM.gridPerJob + uint(y) * W * W + col].x & 0xFFFFu;
+            if (m != 0 && kindOf(m) != KIND_AIR && kindOf(m) != KIND_COVER) lo = y;
+        }
+        if (hi >= 0)
         {
             InterlockedMin(gCount[job * 10 + 7], uint(lo));
-            InterlockedMax(gCount[job * 10 + 8], uint(max(top, lo)));
+            InterlockedMax(gCount[job * 10 + 8], uint(hi));
         }
         return;
     }

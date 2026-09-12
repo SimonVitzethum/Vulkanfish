@@ -75,6 +75,15 @@ public final class LodManager {
         runner = r;
     }
 
+    private simon.vulkanfish.client.gpu.TerrainStreamer nearField;
+    private int lastCoverageVersion = -1;
+    private long lastMaskFrame;
+
+    /** Nahfeld (wer zeichnet welche Chunks): LOD blendet nur wirklich gezeichnete Chunks aus. */
+    public void setNearField(simon.vulkanfish.client.gpu.TerrainStreamer streamer) {
+        nearField = streamer;
+    }
+
     // ---- LOD komplett auf der GPU ----
     private volatile boolean gpuGen;       // GPU generiert fehlende Chunks (Seed/Datapacks)
     private simon.vulkanfish.client.lod.gen.LodBiomeTable biomeTable;
@@ -299,7 +308,8 @@ public final class LodManager {
     private ClientLevel level;
     private int minY, height;
     private int camChunkX, camChunkZ, nearRd;
-    private final int[] nearMask = new int[NEAR_MASK_SIZE * NEAR_MASK_SIZE / 32];
+    // je Chunk (toroidal 128x128) die vom Nahfeld gezeichneten Sections als Bits ab minSectionY
+    private final int[] nearMask = new int[NEAR_MASK_SIZE * NEAR_MASK_SIZE];
     // Summentabelle der Nahfeld-Abdeckung um (satCx, satCz), Radius satR: Knoten-Test in O(1)
     private int[] nearSat = new int[1];
     private int satCx, satCz, satR;
@@ -382,12 +392,18 @@ public final class LodManager {
             nearMaskDirty = true;
         }
         if (frame % 10 == 0) nearMaskDirty = true; // geladene Chunks aendern sich laufend
+        // Nahfeld hat Sections fertig gemesht oder neue sichtbare wartend: Maske zeitnah nachziehen
+        if (nearField != null && nearField.coverageVersion() != lastCoverageVersion && frame - lastMaskFrame >= 2) {
+            lastCoverageVersion = nearField.coverageVersion();
+            nearMaskDirty = true;
+        }
         boolean coverageChanged = false;
         if (nearMaskDirty) {
             nearMaskDirty = false;
+            lastMaskFrame = frame;
             coverageChanged = buildNearMask();
             if ((coverageChanged || !nearMaskUploaded) && runner != null) {
-                runner.setLodNearMask(nearMask, camChunkX, camChunkZ);
+                runner.setLodNearMask(nearMask, camChunkX, camChunkZ, Math.floorDiv(minY, 16));
                 nearMaskUploaded = true;
             }
         }
@@ -398,8 +414,8 @@ public final class LodManager {
 
         // Auswahl nur bei Bewegung (4 Bloecke) oder anderer Aufloesung/Sichtweite neu
         double moved = Double.isNaN(lastSelX) ? 1e9 : Math.abs(camX - lastSelX) + Math.abs(camY - lastSelY) + Math.abs(camZ - lastSelZ);
-        if (moved > 4.0 || nearRd != lastSelNear || Math.abs(pixelAngle - lastPixelAngle) > lastPixelAngle * 0.02f
-                || coverageChanged) {
+        // (Nahfeld-Abdeckung aendert nur, was die GPU ausblendet – keine neue Auswahl noetig)
+        if (moved > 4.0 || nearRd != lastSelNear || Math.abs(pixelAngle - lastPixelAngle) > lastPixelAngle * 0.02f) {
             lastSelX = camX;
             lastSelY = camY;
             lastSelZ = camZ;
@@ -491,7 +507,8 @@ public final class LodManager {
         double dy = Math.max(0, Math.max(minY - camY, camY - (minY + height)));
         double distXZ = Math.sqrt(dx * dx + dz * dz);
         if (distXZ > far) return;
-        if (nodeFullyNear(l, nx, nz)) return; // Nahfeld zeichnet alles hier
+        // Auch Knoten unter dem Nahfeld bauen: wird ein Chunk frei (Bewegen, noch nicht gemesht),
+        // steht das LOD sofort bereit; gezeichnet wird dort nur, was das Nahfeld nicht abdeckt
         double dist = Math.sqrt(distXZ * distXZ + dy * dy);
         if (l > 0 && dist < splitDistance(l, pixelAngle)) {
             for (int cz = 0; cz < 2; cz++)
@@ -512,8 +529,8 @@ public final class LodManager {
         return nearCount(c0x, c0z, c0x + chunksPer - 1, c0z + chunksPer - 1) == chunksPer * chunksPer;
     }
 
-    /** Zeichnet das Nahfeld diesen Chunk? Gleiches Kriterium wie Vanillas Section-Sichtbarkeit. */
-    private boolean nearCovers(int cx, int cz) {
+    /** Im Sichtradius des Nahfelds und geladen (sonst zeichnet es dort sicher nichts). */
+    private boolean inNearView(int cx, int cz) {
         return nearRd > 0 && ChunkTrackingView.isInViewDistance(camChunkX, camChunkZ, nearRd, cx, cz)
                 && level.getChunkSource().getChunk(cx, cz, ChunkStatus.FULL, false) != null;
     }
@@ -672,12 +689,17 @@ public final class LodManager {
             long k = buildQueue.getLong(buildHead++);
             Node n = nodes.get(k);
             if (n == null || n.building || !n.dirty || !desiredSet.contains(k)) continue;
-            if (!ensureChunks(n, camX, camZ)) {
+            boolean gpu = runner != null && runner.lodGpuReady();
+            boolean partial = !ensureChunks(n, camX, camZ);
+            // Noch nie gezeigt und die GPU kann generieren: sofort bauen (fehlende Saeulen aus der
+            // Worldgen), statt Sekunden auf den Spielstand zu warten und so lange den groben
+            // Vorfahren zu zeigen. Der Knoten bleibt dirty und wird mit allen Daten nachgebaut.
+            if (partial && !(gpu && gpuGen && !n.ready)) {
                 deferred.add(k); // Daten kommen asynchron; Ankunft reiht den Knoten wieder ein
                 continue;
             }
             n.building = true;
-            n.dirty = false;
+            n.dirty = partial;
             int serial = ++n.buildSerial;
             buildsInFlight.incrementAndGet();
             budget--;
@@ -1116,8 +1138,11 @@ public final class LodManager {
         }
     }
 
-    /** Bit pro Chunk: vom Nahfeld gezeichnet -> Fernfeld-Quads dort verwerfen (toroidal 128x128). */
-    /** @return true, wenn sich die Abdeckung geaendert hat (Auswahl neu). */
+    /**
+     * Je Chunk ein Bit pro Section: vom Nahfeld gezeichnet -> Fernfeld dort verwerfen (Mesh-Shader
+     * je Quad, Fragment je Pixel). Summentabelle: Chunks, die das Nahfeld komplett zeichnet.
+     * @return true, wenn sich die Abdeckung geaendert hat
+     */
     private boolean buildNearMask() {
         int[] old = nearMask.clone();
         int oldCx = satCx, oldCz = satCz;
@@ -1128,16 +1153,15 @@ public final class LodManager {
         int w = satR * 2 + 1;
         if (nearSat.length < (w + 1) * (w + 1)) nearSat = new int[(w + 1) * (w + 1)];
         java.util.Arrays.fill(nearSat, 0);
-        if (level != null && nearRd > 0) {
+        if (level != null && nearRd > 0 && nearField != null) {
             for (int z = 0; z < w; z++) {
                 int cz = satCz - satR + z, row = 0;
                 for (int x = 0; x < w; x++) {
                     int cx = satCx - satR + x;
-                    boolean cov = nearCovers(cx, cz);
-                    if (cov) {
-                        int bit = (cz & (NEAR_MASK_SIZE - 1)) * NEAR_MASK_SIZE + (cx & (NEAR_MASK_SIZE - 1));
-                        nearMask[bit >> 5] |= 1 << (bit & 31);
-                        row++;
+                    if (inNearView(cx, cz)) {
+                        int bits = (int) nearField.coveredSections(cx, cz);
+                        if (bits != 0) nearMask[(cz & (NEAR_MASK_SIZE - 1)) * NEAR_MASK_SIZE + (cx & (NEAR_MASK_SIZE - 1))] = bits;
+                        if (nearField.chunkComplete(cx, cz)) row++;
                     }
                     nearSat[(z + 1) * (w + 1) + x + 1] = nearSat[z * (w + 1) + x + 1] + row;
                 }
@@ -1235,13 +1259,15 @@ public final class LodManager {
         clusterAlloc.reset();
         lastSelX = Double.NaN;
         nearMaskDirty = true;
-        LodMaterials.reset();
+        // Material-IDs bleiben ueber Weltwechsel gleich (Bloecke aendern sich nicht, GPU-Tabelle bleibt gueltig)
         // GPU: Cluster-Zaehler 0 -> nichts mehr sichtbar, bis neu gebaut
     }
 
+    private static final boolean LOG_FAST = Boolean.getBoolean("vulkanfish.lodMove");
+
     private void log() {
         long now = System.currentTimeMillis();
-        if (now - lastLogMs < 10_000) return;
+        if (now - lastLogMs < (LOG_FAST ? 2_000 : 10_000)) return;
         lastLogMs = now;
         long bytes = sweptBytesLast; // aus dem verteilten Durchlauf (sweepChunks)
         int ready = 0, drawn = 0;
@@ -1249,6 +1275,16 @@ public final class LodManager {
             if (n.ready) ready++;
             if (n.drawn) drawn++;
         }
+        // Rueckstand: gewuenschte, noch nicht fertige Knoten (nah = unter 1024 Bloecken)
+        int missing = 0, missingNear = 0;
+        for (int i = 0; i < desired.size(); i++) {
+            long k = desired.getLong(i);
+            Node n = nodes.get(k);
+            if (n != null && n.ready) continue;
+            missing++;
+            if (keyDistance(k, lastSelX, lastSelZ) < 1024) missingNear++;
+        }
+        LOG.info("[vulkanfish] LOD-Rueckstand: {} Knoten offen, davon {} unter 1024 Bloecken", missing, missingNear);
         long cn = Math.max(1, COLUMN_TIMES.get(2));
         LOG.info("[vulkanfish] LOD-CPU je Chunk (ms): Saeule Einlesen {} Bauen {} (n={}); Knoten-Meshing {} (n={})",
                 fmt(COLUMN_TIMES.get(0) / 1e6 / cn), fmt(COLUMN_TIMES.get(1) / 1e6 / cn), COLUMN_TIMES.get(2),
