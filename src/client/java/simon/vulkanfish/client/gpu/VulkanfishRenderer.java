@@ -34,33 +34,15 @@ public final class VulkanfishRenderer {
     // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
     private static volatile boolean vanillaOpaqueDisabled;
     private final GpuDrivenConfig config;
-    private final GpuSceneManager scene;
-    private final HizPyramid hiz;
-    private final MeshletManager meshlets;
-    private final EntityInstanceBuffer entities;
     private final AsyncFrameGraph frameGraph;
-    private final RaytracingModule rt;
     private final BlazeDeviceInterop device;
-    private final ArchetypeStore archetypes;
-    private final TlasManager tlas;
     private final BobbyInterop bobby;
     private boolean initialized;
 
-    public VulkanfishRenderer(GpuDrivenConfig config, GpuSceneManager scene, HizPyramid hiz,
-                              MeshletManager meshlets, EntityInstanceBuffer entities,
-                              AsyncFrameGraph frameGraph, RaytracingModule rt,
-                              BlazeDeviceInterop device, ArchetypeStore archetypes,
-                              TlasManager tlas, BobbyInterop bobby) {
+    public VulkanfishRenderer(GpuDrivenConfig config, AsyncFrameGraph frameGraph, BlazeDeviceInterop device, BobbyInterop bobby) {
         this.config = config;
-        this.scene = scene;
-        this.hiz = hiz;
-        this.meshlets = meshlets;
-        this.entities = entities;
         this.frameGraph = frameGraph;
-        this.rt = rt;
         this.device = device;
-        this.archetypes = archetypes;
-        this.tlas = tlas;
         this.bobby = bobby;
     }
 
@@ -100,9 +82,7 @@ public final class VulkanfishRenderer {
             LOG.warn("[vulkanfish] Mesh-Shading auf Mojangs Device nicht aktiv -> Vanilla-Pfad");
             return;
         }
-        // 3. Archetypen einmalig registrieren (CPU baeckt, GPU speichert).
-        archetypes.registerDefaults();
-        // 4. Bobby optional (Fernfeld-Quelle fuer 250-Chunk-LOD).
+        // 3. Bobby optional (Fernfeld-Quelle fuer 250-Chunk-LOD).
         boolean bobbyOn = config.enableBobbyFarField() && bobby.probe();
         try {
             shaderLoader.load();
@@ -639,15 +619,4 @@ public final class VulkanfishRenderer {
         return initialized && config.enableMeshShaders();
     }
 
-    public BlazeDeviceInterop device() {
-        return device;
-    }
-
-    public TlasManager tlas() {
-        return tlas;
-    }
-
-    public BobbyInterop bobby() {
-        return bobby;
-    }
 }
