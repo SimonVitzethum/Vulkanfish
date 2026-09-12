@@ -1,0 +1,44 @@
+{
+	"required": true,
+	"package": "simon.vulkanfish.client.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": [
+		"CameraMixin",
+		"ChunkMapInvoker",
+		"ChunkSectionsToRenderMixin",
+		"ClientChunkCacheMixin",
+		"ExampleClientMixin",
+		"GameRendererMixin",
+		"LevelExtractorMixin",
+		"LevelRendererMixin",
+		"RenderSystemMixin",
+		"SectionCompilerMixin",
+		"SpriteContentsAccessor",
+		"VulkanBackendMixin",
+		"VulkanBackendVmaMixin",
+		"worldgen.BlendedNoiseAccessor",
+		"worldgen.DfClampAccessor",
+		"worldgen.DfConstantAccessor",
+		"worldgen.DfFindTopSurfaceAccessor",
+		"worldgen.DfIntervalSelectAccessor",
+		"worldgen.DfMappedAccessor",
+		"worldgen.DfMulOrAddAccessor",
+		"worldgen.DfNoiseAccessor",
+		"worldgen.DfRangeChoiceAccessor",
+		"worldgen.DfShiftAAccessor",
+		"worldgen.DfShiftAccessor",
+		"worldgen.DfShiftBAccessor",
+		"worldgen.DfShiftedNoiseAccessor",
+		"worldgen.DfYGradientAccessor",
+		"worldgen.ImprovedNoiseAccessor",
+		"worldgen.MultiNoiseBiomeSourceInvoker",
+		"worldgen.NormalNoiseAccessor",
+		"worldgen.PerlinNoiseAccessor"
+	],
+	"injectors": {
+		"defaultRequire": 1
+	},
+	"overwrites": {
+		"requireAnnotations": true
+	}
+}

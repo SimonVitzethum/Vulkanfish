@@ -1,0 +1,237 @@
+{
+  "_comment": "Slang->SPIR-V Manifest. Gradle-Task compileSlang baut jedes Modul. Loader laedt .spv aus assets/vulkanfish/shaders/spv/. Look: eigene Implementierung (look.slang), Complementary-inspiriert, kein Code aus dem Pack. HINWEIS: terrain_task/entity_task (amplification) sind valide Slang-Quellen, werden aber derzeit NICHT emittiert, weil slangc 2026.17.1 im SPIR-V-Backend bei jeder Amplification-Stage segfaultet (HLSL-Target ok). Produktionspfad: meshlet_cull/entity_cull (Compute) + Mesh-only + DrawMeshTasksIndirectCountEXT.",
+  "slangVersion": "2026.17.1",
+  "modules": [
+    {
+      "file": "meshlet_cull.slang",
+      "entry": "meshletCull",
+      "stage": "compute",
+      "spv": "meshlet_cull.spv"
+    },
+    {
+      "file": "terrain_mesh.slang",
+      "entry": "terrainMeshDirect",
+      "stage": "mesh",
+      "spv": "terrain_mesh_direct.spv"
+    },
+    {
+      "file": "terrain_mesh.slang",
+      "entry": "terrainFrag",
+      "stage": "fragment",
+      "spv": "terrain_frag.spv"
+    },
+    {
+      "file": "entity_cull.slang",
+      "entry": "entityCull",
+      "stage": "compute",
+      "spv": "entity_cull.spv"
+    },
+    {
+      "file": "entity_mesh.slang",
+      "entry": "entityMeshDirect",
+      "stage": "mesh",
+      "spv": "entity_mesh_direct.spv"
+    },
+    {
+      "file": "entity_mesh.slang",
+      "entry": "entityMesh",
+      "stage": "mesh",
+      "spv": "entity_mesh.spv"
+    },
+    {
+      "file": "entity_mesh.slang",
+      "entry": "entityFrag",
+      "stage": "fragment",
+      "spv": "entity_frag.spv"
+    },
+    {
+      "file": "hiz_downsample.slang",
+      "entry": "hizDownsample",
+      "stage": "compute",
+      "spv": "hiz.spv"
+    },
+    {
+      "file": "rt_gi.slang",
+      "entry": "rtgiRgen",
+      "stage": "raygeneration",
+      "spv": "rt_rgen.spv"
+    },
+    {
+      "file": "rt_gi.slang",
+      "entry": "rtgiMiss",
+      "stage": "miss",
+      "spv": "rt_miss.spv"
+    },
+    {
+      "file": "rt_gi.slang",
+      "entry": "shadowMiss",
+      "stage": "miss",
+      "spv": "rt_shadowmiss.spv"
+    },
+    {
+      "file": "rt_gi.slang",
+      "entry": "rtgiChit",
+      "stage": "closesthit",
+      "spv": "rt_chit.spv"
+    },
+    {
+      "file": "rt_gi.slang",
+      "entry": "shadowChit",
+      "stage": "closesthit",
+      "spv": "rt_shadowchit.spv"
+    },
+    {
+      "file": "denoise.slang",
+      "entry": "denoiseTemporal",
+      "stage": "compute",
+      "spv": "denoise_temporal.spv"
+    },
+    {
+      "file": "denoise.slang",
+      "entry": "denoiseAtrous",
+      "stage": "compute",
+      "spv": "denoise_atrous.spv"
+    },
+    {
+      "file": "lod_build.slang",
+      "entry": "lodBuild",
+      "stage": "compute",
+      "spv": "lod_build.spv"
+    },
+    {
+      "file": "entity_mesh.slang",
+      "entry": "entityFragDirect",
+      "stage": "fragment",
+      "spv": "entity_frag_direct.spv"
+    },
+    {
+      "file": "terrain_mesh.slang",
+      "entry": "terrainShadowMesh",
+      "stage": "mesh",
+      "spv": "terrain_shadow_mesh.spv"
+    },
+    {
+      "file": "terrain_mesh.slang",
+      "entry": "terrainShadowFrag",
+      "stage": "fragment",
+      "spv": "terrain_shadow_frag.spv"
+    },
+    {
+      "file": "deferred.slang",
+      "entry": "deferredMain",
+      "stage": "compute",
+      "spv": "deferred.spv"
+    },
+    {
+      "file": "bloom.slang",
+      "entry": "bloomDown",
+      "stage": "compute",
+      "spv": "bloom_down.spv"
+    },
+    {
+      "file": "bloom.slang",
+      "entry": "bloomUp",
+      "stage": "compute",
+      "spv": "bloom_up.spv"
+    },
+    {
+      "file": "final.slang",
+      "entry": "finalMain",
+      "stage": "compute",
+      "spv": "final.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "waterMesh",
+      "stage": "mesh",
+      "spv": "water_mesh.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "waterFrag",
+      "stage": "fragment",
+      "spv": "water_frag.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "translucentMesh",
+      "stage": "mesh",
+      "spv": "translucent_mesh.spv"
+    },
+    {
+      "file": "water.slang",
+      "entry": "translucentRecordFrag",
+      "stage": "fragment",
+      "spv": "translucent_record_frag.spv"
+    },
+    {
+      "file": "taa.slang",
+      "entry": "taaResolve",
+      "stage": "compute",
+      "spv": "taa.spv"
+    },
+    {
+      "file": "oit.slang",
+      "entry": "oitResolve",
+      "stage": "compute",
+      "spv": "oit_resolve.spv"
+    },
+    {
+      "file": "oit.slang",
+      "entry": "oitFullscreenMesh",
+      "stage": "mesh",
+      "spv": "oit_fullscreen_mesh.spv"
+    },
+    {
+      "file": "oit.slang",
+      "entry": "oitCompositeFrag",
+      "stage": "fragment",
+      "spv": "oit_composite_frag.spv"
+    },
+    {
+      "file": "deferred.slang",
+      "entry": "deferredMainRt",
+      "stage": "compute",
+      "spv": "deferred_main_rt.spv",
+      "defines": [
+        "VF_RT=1"
+      ]
+    },
+    {
+      "file": "rt_lights.slang",
+      "entry": "lightBin",
+      "stage": "compute",
+      "spv": "rt_light_bin.spv"
+    },
+    {
+      "file": "lod_mesh.slang",
+      "entry": "lodMesh",
+      "stage": "mesh",
+      "spv": "lod_mesh.spv"
+    },
+    {
+      "file": "lod_mesh.slang",
+      "entry": "lodFrag",
+      "stage": "fragment",
+      "spv": "lod_frag.spv"
+    },
+    {
+      "file": "worldgen.slang",
+      "entry": "worldgenMain",
+      "stage": "compute",
+      "spv": "worldgen.spv"
+    },
+    {
+      "file": "lod_gen.slang",
+      "entry": "lodGenMain",
+      "stage": "compute",
+      "spv": "lod_gen.spv"
+    },
+    {
+      "file": "lod_mesher.slang",
+      "entry": "lodMeshMain",
+      "stage": "compute",
+      "spv": "lod_mesher.spv"
+    }
+  ]
+}

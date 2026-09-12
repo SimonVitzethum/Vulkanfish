@@ -1,0 +1,169 @@
+plugins {
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
+	id 'maven-publish'
+}
+
+repositories {
+	// Add repositories to retrieve artifacts from in here.
+	// You should only use this when depending on other mods because
+	// Loom adds the essential maven repositories to download Minecraft and libraries from automatically.
+	// See https://docs.gradle.org/current/userguide/declaring_repositories.html
+	// for more information about repositories.
+}
+
+loom {
+	splitEnvironmentSourceSets()
+
+	mods {
+		"vulkanfish" {
+			sourceSet sourceSets.main
+			sourceSet sourceSets.client
+		}
+	}
+}
+
+dependencies {
+	// To change the versions see the gradle.properties file
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// Fabric API. This is technically optional, but you probably want it anyway.
+	implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+// Selbsttest: ./gradlew runClient -PquickWorld="New World"
+// haengt QuickPlay-Args an (Welt-Autojoin, kleines Fenster).
+tasks.named("runClient") {
+	if (project.hasProperty("quickWorld")) {
+		args("--quickPlaySingleplayer", project.property("quickWorld"),
+			"--width", project.findProperty("vfWidth") ?: "640", "--height", project.findProperty("vfHeight") ?: "480")
+	}
+	// Vulkan erzwingen (Mojangs Crash-Guard faellt sonst nach SIGSEGVs auf OpenGL zurueck)
+	args("--graphicsBackend", "vulkan")
+	// Validierungs-Layer fuer unsere nativen Calls (nur Diagnose, kostet FPS)
+	if (project.hasProperty("vulkanValidation")) {
+		args("--vulkanValidation")
+	}
+	// Debug-PNGs des nativen Pfads (run/vulkanfish-*.png, Frame 600/660)
+	if (project.hasProperty("vfSnapshots")) {
+		jvmArgs("-Dvulkanfish.snapshots=true")
+	}
+	// Beliebige -D-Properties an die Spiel-JVM: -PvfJvm="-Dvulkanfish.debugView=1 ..."
+	if (project.hasProperty("vfJvm")) {
+		jvmArgs(project.property("vfJvm").toString().split(" "))
+	}
+	// Selbsttest: veraendert die Test-Welt (Teich anlegen) – nur mit Kopie benutzen!
+	if (project.hasProperty("vfTestWorldEdits")) {
+		jvmArgs("-Dvulkanfish.testWorldEdits=true")
+	}
+	// Selbsttest: nach N nativen Frames sauber beenden (prueft den Shutdown-Pfad)
+	if (project.hasProperty("vfExitAfter")) {
+		jvmArgs("-Dvulkanfish.exitAfterFrames=" + project.property("vfExitAfter"))
+	}
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+	// Vorkompilierte Slang-SPIR-V ins Jar packen
+	from("build/slang") {
+		into "assets/vulkanfish/shaders/spv"
+	}
+}
+
+// ---- Slang -> SPIR-V ----
+// Baut alle .slang aus src/client/resources/.../slang nach build/slang/*.spv.
+// slangc wird beim ersten Lauf automatisch von GitHub geladen (shader-slang).
+def slangVersion = "2026.17.1"
+def slangDir = file("$buildDir/slangc")
+def slangcBin = file("$slangDir/bin/slangc")
+def slangSrc = file("src/client/resources/assets/vulkanfish/shaders/slang")
+def slangOut = file("$buildDir/slang")
+
+tasks.register("downloadSlangc") {
+	outputs.file(slangcBin)
+	doLast {
+		if (!slangcBin.exists()) {
+			slangDir.mkdirs()
+			def tgz = file("$buildDir/slang-${slangVersion}.tgz")
+			def url = "https://github.com/shader-slang/slang/releases/download/v${slangVersion}/slang-${slangVersion}-linux-x86_64.tar.gz"
+			logger.lifecycle("Lade slangc ${slangVersion} ...")
+			new URL(url).withInputStream { i -> tgz.withOutputStream { it << i } }
+			copy { from tarTree(tgz); into slangDir }
+			slangcBin.setExecutable(true)
+		}
+	}
+}
+
+tasks.register("compileSlang") {
+	dependsOn "downloadSlangc"
+	inputs.dir(slangSrc)
+	outputs.dir(slangOut)
+	doLast {
+		slangOut.mkdirs()
+		def manifest = new groovy.json.JsonSlurper().parseText(file("$slangSrc/shaders.json").text)
+		manifest.modules.each { m ->
+			def out = file("$slangOut/${m.spv}")
+			logger.lifecycle("slangc ${m.file} [${m.stage}:${m.entry}] -> ${m.spv}")
+			def cmd = [slangcBin.toString(), slangSrc.toString() + "/" + m.file.toString(),
+				"-target", "spirv", "-o", out.toString(),
+				"-entry", m.entry.toString(), "-stage", m.stage.toString(),
+				"-emit-spirv-directly", "-O3", "-I", slangSrc.toString()] as List<String>
+			// Varianten desselben Moduls per Define (z. B. Deferred mit Ray Queries)
+			(m.defines ?: []).each { cmd.add("-D" + it) }
+			def proc = new ProcessBuilder(cmd).redirectErrorStream(true).start()
+			def log = proc.inputStream.text
+			proc.waitFor()
+			if (proc.exitValue() != 0) {
+				throw new GradleException("slangc fehlgeschlagen für ${m.file}:${m.entry}\n${log}")
+			}
+			if (log?.trim()) logger.warn(log.trim())
+		}
+	}
+}
+
+processResources.dependsOn("compileSlang")
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 25
+}
+
+java {
+	// Loom will automatically attach sourcesJar to a RemapSourcesJar task and to the "build" task
+	// if it is present.
+	// If you remove this line, sources will not be generated.
+	withSourcesJar()
+
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
+}
+
+jar {
+	def projectName = project.name
+	inputs.property "projectName", projectName
+
+	from("LICENSE") {
+		rename { "${it}_$projectName"}
+	}
+}
+
+// configure the maven publication
+publishing {
+	publications {
+		create("mavenJava", MavenPublication) {
+			from components.java
+		}
+	}
+
+	// See https://docs.gradle.org/current/userguide/publishing_maven.html for information on how to set up publishing.
+	repositories {
+		// Add repositories to publish to here.
+		// Notice: This block does NOT have the same function as the block in the top level.
+		// The repositories here will be used for publishing your artifact, not for
+		// retrieving dependencies.
+	}
+}

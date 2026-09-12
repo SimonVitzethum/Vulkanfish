@@ -1,0 +1,483 @@
+package simon.vulkanfish.client.gpu;
+
+import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import net.minecraft.client.Minecraft;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+/**
+ * Einstiegspunkt, der aus Mixins aufgerufen wird.
+ *
+ * <p>26.2 rendert ueber Blaze3D {@code LevelRenderer.render(...)} mit
+ * Vulkan-Backend. Der Mod klinkt sich dort ein:
+ * <ol>
+ *   <li>{@code LevelRenderer.render} HEAD: Kamera/Himmel erfassen, Terrain-
+ *       Streamer ticken (Dirty-Sections -> Worker-Meshing).</li>
+ *   <li>{@code ChunkSectionsToRender.renderGroup(OPAQUE)}: statt Vanillas
+ *       Opaque-Terrain den nativen Frame (Upload, Hi-Z, Meshlet-Cull,
+ *       Mesh-Draw, Composite) in Mojangs Submission haengen; Farbe + Tiefe
+ *       landen im Main-Target, Vanilla rendert danach Entities/Translucent.</li>
+ *   <li>Fallback: fehlen Mesh-Shader oder schlaegt etwas fehl, rendert
+ *       Vanilla unveraendert.</li>
+ * </ol>
+ */
+public final class VulkanfishRenderer {
+    private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
+    private static final boolean SNAPSHOTS = Boolean.getBoolean("vulkanfish.snapshots");
+    private static final long EXIT_AFTER_FRAMES = Long.getLong("vulkanfish.exitAfterFrames", 0L);
+    private static final boolean TEST_WORLD_EDITS = Boolean.getBoolean("vulkanfish.testWorldEdits");
+    private static final boolean SCENE_TEST = Boolean.getBoolean("vulkanfish.sceneTest");
+    private static final boolean LOD_TEST = Boolean.getBoolean("vulkanfish.lodTest");
+    // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
+    private static volatile boolean vanillaOpaqueDisabled;
+    private final GpuDrivenConfig config;
+    private final GpuSceneManager scene;
+    private final HizPyramid hiz;
+    private final MeshletManager meshlets;
+    private final EntityInstanceBuffer entities;
+    private final AsyncFrameGraph frameGraph;
+    private final RaytracingModule rt;
+    private final BlazeDeviceInterop device;
+    private final ArchetypeStore archetypes;
+    private final TlasManager tlas;
+    private final BobbyInterop bobby;
+    private boolean initialized;
+
+    public VulkanfishRenderer(GpuDrivenConfig config, GpuSceneManager scene, HizPyramid hiz,
+                              MeshletManager meshlets, EntityInstanceBuffer entities,
+                              AsyncFrameGraph frameGraph, RaytracingModule rt,
+                              BlazeDeviceInterop device, ArchetypeStore archetypes,
+                              TlasManager tlas, BobbyInterop bobby) {
+        this.config = config;
+        this.scene = scene;
+        this.hiz = hiz;
+        this.meshlets = meshlets;
+        this.entities = entities;
+        this.frameGraph = frameGraph;
+        this.rt = rt;
+        this.device = device;
+        this.archetypes = archetypes;
+        this.tlas = tlas;
+        this.bobby = bobby;
+    }
+
+    private final SlangShaderLoader shaderLoader = new SlangShaderLoader();
+    private NativePassRunner nativeRunner;
+    private TerrainStreamer streamer;
+    private simon.vulkanfish.client.lod.LodManager lod;
+    private boolean initAttempted;
+    private boolean shutDown;
+    private NativePassRunner.FrameUniformsData pendingFrame;
+    private long pendingScreenshot = -1;
+    // CPU-Zeit unseres Codes pro Frame (Render-Thread), Log alle 10 s
+    private long cpuNanosStart, cpuNanosTerrain, cpuNanosWater, cpuNanosTaa;
+    private int cpuFrames;
+    private long cpuLogMs;
+
+    public void init() {
+        // Nur Buchhaltung am Client-Start; Device-Probe passiert lazy im
+        // ersten Frame (siehe ensureInitialized), weil beim Mod-Init noch
+        // kein Blaze3D-Device existiert.
+        frameGraph.init();
+    }
+
+    /** Idempotent, Render-Thread. Einmaliger Aufbau sobald Device da ist. */
+    private synchronized void ensureInitialized() {
+        if (initAttempted || shutDown) return;
+        initAttempted = true;
+        // 1. Native Handles aus Blaze3D (VulkanDevice -> LWJGL). Ohne Device kein Pfad.
+        if (!device.probe()) {
+            LOG.warn("[vulkanfish] Lazy-Init: noch kein Device – neuer Versuch naechster Frame");
+            initAttempted = false; // spaeter erneut versuchen
+            return;
+        }
+        // 2. Mesh-Shader muessen auf MOJANGS Device aktiv sein (VulkanBackendMixin)
+        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading();
+        if (!meshPath) {
+            LOG.warn("[vulkanfish] Mesh-Shading auf Mojangs Device nicht aktiv -> Vanilla-Pfad");
+            return;
+        }
+        // 3. Archetypen einmalig registrieren (CPU baeckt, GPU speichert).
+        archetypes.registerDefaults();
+        // 4. Bobby optional (Fernfeld-Quelle fuer 250-Chunk-LOD).
+        boolean bobbyOn = config.enableBobbyFarField() && bobby.probe();
+        try {
+            shaderLoader.load();
+            LOG.info("[vulkanfish] {} Slang-SPIR-V-Module geladen", shaderLoader.moduleCount());
+        } catch (Exception e) {
+            LOG.warn("[vulkanfish] SPIR-V fehlt (compileSlang noch nicht gelaufen?), Fallback auf Vanilla-Pfad", e);
+            return;
+        }
+        // 5. Native Pipelines/Puffer auf Mojangs Device (Push-Deskriptoren wie Blaze3D).
+        nativeRunner = new NativePassRunner(device, config.enableHizCulling());
+        if (!nativeRunner.init(shaderLoader)) {
+            LOG.warn("[vulkanfish] Nativ deaktiviert ({}), Vanilla rendert", nativeRunner.disableReason());
+            nativeRunner.destroy(); // bis dahin angelegte Objekte nicht auf Mojangs Device liegen lassen
+            nativeRunner = null;
+            return;
+        }
+        streamer = new TerrainStreamer(nativeRunner);
+        if (config.enableLod() && nativeRunner.lodReady()) {
+            lod = new simon.vulkanfish.client.lod.LodManager(config.lodDistanceChunks(), config.lodPixelError());
+            nativeRunner.setLod(lod);
+            nativeRunner.setLodGpuBudget(config.lodGpuBudgetMs());
+            lod.setRunner(nativeRunner);
+            FrameDataCapture.lodFogDistance = lod.farBlocks();
+            LOG.info("[vulkanfish] LOD-Fernfeld: {} Chunks, max. {} px Fehler pro Voxel, {} Worker-Threads, GPU-Budget {} ms",
+                    config.lodDistanceChunks(), config.lodPixelError(), WorkerPool.threads(), config.lodGpuBudgetMs());
+        }
+        initialized = true;
+        vanillaOpaqueDisabled = true;
+        LOG.info("[vulkanfish] GPU-driven renderer init: mesh={} hiz={} rt={} (Pass folgt) bobby={}",
+                meshPath, config.enableHizCulling(), device.supportsRaytracing(), bobbyOn);
+    }
+
+    /** Pro Frame aus LevelRendererMixin (Render-Thread, vor Vanillas Frame-Graph). */
+    public void onFrameStart(net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
+                             net.minecraft.client.renderer.state.level.SkyRenderState skyState) {
+        ensureInitialized();
+        pendingFrame = null;
+        if (!initialized || !nativeRunner.isReady()) return;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level == null || cameraState == null) return;
+        long t0 = System.nanoTime();
+        streamer.tick(mc.level, cameraState.pos.x, cameraState.pos.y, cameraState.pos.z);
+        if (lod != null) {
+            // Winkel eines Pixels: 2*tan(fov/2)/Hoehe = 2/(m11*Hoehe)
+            float pixelAngle = FrameDataCapture.hasProjection()
+                    ? 2.0f / (Math.max(FrameDataCapture.projectionM11(), 0.01f) * Math.max(mc.getWindow().getHeight(), 1)) : 0f;
+            lod.tick(mc.level, cameraState.pos.x, cameraState.pos.y, cameraState.pos.z, pixelAngle,
+                    mc.options.getEffectiveRenderDistance());
+        }
+        pendingFrame = FrameDataCapture.capture(frameGraph.currentFrame(), cameraState, skyState,
+                NativePassRunner.SHADOW_RES);
+        cpuNanosStart += System.nanoTime() - t0;
+        if (streamer.overflowed() && vanillaOpaqueDisabled) {
+            // GPU-Scene voll: Vanilla muss die restlichen Sections wieder selbst meshen (Hybrid)
+            LOG.warn("[vulkanfish] GPU-Scene voll -> Vanilla meshet Opaque wieder mit (Sichtweite reduzieren spart das)");
+            restoreVanillaOpaque();
+        }
+    }
+
+    /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
+    public void onFrameEnd() {
+        if (initialized && nativeRunner != null && nativeRunner.isReady() && config.enableTaa()) {
+            long t0 = System.nanoTime();
+            nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget());
+            cpuNanosTaa += System.nanoTime() - t0;
+        }
+        if (initialized) logCpu();
+        FrameDataCapture.taaJitter = initialized && nativeRunner != null && nativeRunner.isReady() && config.enableTaa();
+        if (pendingScreenshot < 0) return;
+        // Screenshot.grab kopiert SOFORT im Command-Stream -> erst hier ist das Level-Bild fertig
+        long tag = pendingScreenshot;
+        pendingScreenshot = -1;
+        Minecraft mc = Minecraft.getInstance();
+        net.minecraft.client.Screenshot.grab(mc.gameDirectory, mc.gameRenderer.mainRenderTarget(),
+                msg -> LOG.info("[vulkanfish] Selbsttest-Screenshot {}: {}", tag, msg.getString()));
+    }
+
+    /**
+     * Aus ChunkSectionsToRenderMixin unmittelbar VOR Vanillas OPAQUE-Gruppe
+     * (die danach nur noch nicht abgedeckte Sections zeichnet).
+     * @return true, wenn unser Frame aufgenommen wurde
+     */
+    public boolean renderOpaqueTerrain(GpuTextureView atlas) {
+        NativePassRunner.FrameUniformsData data = pendingFrame;
+        pendingFrame = null;
+        if (data == null || !initialized || !nativeRunner.isReady()
+                || !(atlas instanceof VulkanGpuTextureView vkAtlas)) {
+            return false;
+        }
+        long t0 = System.nanoTime();
+        int slot = frameGraph.beginFrame();
+        boolean ok = nativeRunner.renderFrame(slot, data, streamer,
+                Minecraft.getInstance().gameRenderer.mainRenderTarget(), vkAtlas.vkImageView());
+        frameGraph.endFrame(slot);
+        cpuNanosTerrain += System.nanoTime() - t0;
+        if (!ok && !nativeRunner.isReady() && vanillaOpaqueDisabled) {
+            restoreVanillaOpaque(); // nativer Pfad endgueltig aus -> Vanilla komplett zurueck
+        }
+        long f = frameGraph.currentFrame();
+        if (ok && SNAPSHOTS) {
+            // Beweis-Snapshots (run/*.png): G-Buffer-Normalen, dann Composite
+            if (f == 600) {
+                nativeRunner.requestSnapshot(2); // Normale/Licht
+            } else if (f == 630) {
+                nativeRunner.requestSnapshot(1);
+            } else if (f == 660) {
+                nativeRunner.requestSnapshot(0);
+            } else if (f == 700) {
+                pendingScreenshot = f;
+            }
+        }
+        if (EXIT_AFTER_FRAMES > 0) {
+            // Selbsttest laeuft ohne Fensterfokus: Minecraft pausiert dann den integrierten Server
+            // (keine Blockupdates, Zeit steht). Pause-Screen schliessen, Optionen bleiben unveraendert.
+            Minecraft mc = Minecraft.getInstance();
+            var screen = mc.gui.screen();
+            if (screen != null && screen.isPauseScreen()) mc.gui.setScreen(null);
+        }
+        if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.hizTest")) {
+            // A/B: gleiches Standbild mit/ohne Hi-Z -> Differenz = faelschlich weggecullte Geometrie
+            if (f == 560) pendingScreenshot = f;
+            if (f == 580) NativePassRunner.hizForceOff = true;
+            if (f == 620) pendingScreenshot = f;
+            if (f == 640) NativePassRunner.hizForceOff = false;
+        }
+        if (EXIT_AFTER_FRAMES > 0 && LOD_TEST) {
+            lodTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && SCENE_TEST && TEST_WORLD_EDITS) {
+            sceneTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && SNAPSHOTS) {
+            // Selbsttest-Tageszeiten fuer Look-Vergleiche: Mittag, Sonnenuntergang, Nacht
+            // Wasser-Szene nur in der Test-Welt (Kopie), nie in einer echten Welt
+            if (f == 300 && TEST_WORLD_EDITS) {
+                LOG.info("[vulkanfish] Selbsttest: Spieler bei {}", Minecraft.getInstance().player.blockPosition());
+                selfTestCommand("gamerule randomTickSpeed 0");          // kein Zufrieren im Schneebiom
+                selfTestCommand("gamerule minecraft:random_tick_speed 0");
+                selfTestCommand("execute at @p run fill ~-10 ~0 ~2 ~10 ~3 ~22 minecraft:air"); // Schneedecke weg
+                selfTestCommand("execute at @p run fill ~-10 ~-4 ~2 ~10 ~-1 ~22 minecraft:water");
+                selfTestCommand("execute at @p run fill ~-3 ~-4 ~8 ~3 ~-3 ~12 minecraft:stone");
+                selfTestCommand("execute at @p run fill ~-10 ~-1 ~15 ~0 ~-1 ~22 minecraft:ice");   // Eis auf dem Teich
+                selfTestCommand("execute at @p run fill ~2 ~0 ~5 ~4 ~1 ~5 minecraft:glass");
+                selfTestCommand("execute at @p run fill ~5 ~0 ~5 ~7 ~1 ~5 minecraft:light_blue_stained_glass");
+            }
+            if (f == 400) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag/Mittag
+            if (f == 1050) FrameDataCapture.testSunAngle = 80.0f;  // tiefe Abendsonne
+            if (f == 1300) FrameDataCapture.testSunAngle = 180.0f; // Mitternacht
+            // Schatten-Debug-Ansicht kurz vor den Mittag-/Abend-Screenshots
+            if (f == 930 || f == 1180) NativePassRunner.debugView = 1;
+            if (f == 960 || f == 1210) NativePassRunner.debugView = 0;
+            if (f == 1400) NativePassRunner.debugView = 5; // Wasser magenta
+            if (f == 1450 && TEST_WORLD_EDITS) selfTestCommand("execute at @p run tp @p ~ ~-3 ~8"); // in den Teich
+            if (f == 1440) NativePassRunner.debugView = 0;
+            if (f == 950 || f == 1200 || f == 1000 || f == 1250 || f == 1420 || f == 1500 || f == 1560) {
+                pendingScreenshot = f;
+            }
+        }
+        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && f > 700 && Minecraft.getInstance().player != null) {
+            // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
+            var player = Minecraft.getInstance().player;
+            if (f >= 1450 && TEST_WORLD_EDITS) {
+                player.setYRot(0.0f);   // unter Wasser nach oben: Snell-Fenster
+                player.setXRot(-35.0f);
+            } else if (((f >= 1380 && f <= 1440) || (f >= 960 && f <= 1010) || (f >= 1220 && f <= 1260)) && TEST_WORLD_EDITS) {
+                player.setYRot(0.0f);  // Blick nach Sueden (+Z) auf den Test-Teich
+                player.setXRot(40.0f);
+            } else {
+                player.setYRot(player.getYRot() + 4.0f);
+                player.setXRot((float) Math.sin(f * 0.02) * 35.0f);
+            }
+        }
+        if (EXIT_AFTER_FRAMES > 0 && f == EXIT_AFTER_FRAMES) {
+            // Selbsttest: sauber beenden (prueft den Shutdown-Pfad)
+            LOG.info("[vulkanfish] Selbsttest: {} Frames, beende Client", f);
+            Minecraft.getInstance().stop();
+        }
+        return ok;
+    }
+
+    /**
+     * Hybrid-Filter fuer Vanillas Opaque-Draws: true = unsere GPU-Scene hat die
+     * Section, Vanilla laesst sie aus. Nur solange der native Pfad laeuft.
+     */
+    public boolean coversSection(long sectionNode) {
+        return initialized && nativeRunner.isReady() && pendingFrame != null && streamer.covers(sectionNode);
+    }
+
+    /** Aus ChunkSectionsToRenderMixin vor Vanillas TRANSLUCENT-Gruppe. */
+    public void renderWater() {
+        if (!initialized || nativeRunner == null || !nativeRunner.isReady()) return;
+        long t0 = System.nanoTime();
+        nativeRunner.renderWater(Minecraft.getInstance().gameRenderer.mainRenderTarget());
+        cpuNanosWater += System.nanoTime() - t0;
+        if (!nativeRunner.isReady() && vanillaOpaqueDisabled) restoreVanillaOpaque();
+    }
+
+    private void logCpu() {
+        cpuFrames++;
+        long now = System.currentTimeMillis();
+        if (now - cpuLogMs < 10_000) return;
+        cpuLogMs = now;
+        double n = Math.max(cpuFrames, 1) * 1e6;
+        LOG.info("[vulkanfish] CPU/Frame (Render-Thread): streamer+capture {} ms, terrain-aufnahme {} ms, wasser {} ms, taa {} ms",
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosStart / n), String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTerrain / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosWater / n), String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTaa / n));
+        cpuNanosStart = cpuNanosTerrain = cpuNanosWater = cpuNanosTaa = 0;
+        cpuFrames = 0;
+    }
+
+    /**
+     * Szenen-Selbsttest (-Dvulkanfish.sceneTest, nur Test-Welt): feste Kulisse an absoluten
+     * Koordinaten – Glas auf Eis, verschiedenfarbiges Glas aneinander, Glas unter/ueber
+     * Wasser, Lichtquellen mit Schattenwerfern – feste Kamera, Screenshots mittags und
+     * nachts. Aufeinanderfolgende Frames (x00/x01/x02) machen Flackern per Differenz sichtbar.
+     */
+    private void sceneTest(long f) {
+        if (f == 300) {
+            selfTestCommand("gamerule minecraft:random_tick_speed 0");
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("gamerule doDaylightCycle false");
+            selfTestCommand("gamerule minecraft:advance_weather false");
+            selfTestCommand("weather clear");
+            selfTestCommand("fill 18 63 -78 50 80 -44 minecraft:air");
+            selfTestCommand("fill 18 58 -78 50 62 -44 minecraft:stone");
+            // Wasserbecken mit Glas darin und darueber
+            selfTestCommand("fill 26 59 -57 42 61 -49 minecraft:stone");
+            selfTestCommand("fill 27 60 -56 41 61 -50 minecraft:water");
+            selfTestCommand("fill 27 62 -56 41 62 -50 minecraft:water");
+            selfTestCommand("setblock 33 61 -53 minecraft:glass");
+            selfTestCommand("setblock 36 63 -53 minecraft:glass");
+            // Eis mit Glas/Buntglas darauf
+            selfTestCommand("fill 27 62 -63 33 62 -58 minecraft:ice");
+            selfTestCommand("fill 28 63 -62 29 64 -61 minecraft:glass");
+            selfTestCommand("fill 31 63 -62 31 64 -59 minecraft:red_stained_glass");
+            // Verschiedenfarbiges Glas direkt aneinander
+            selfTestCommand("fill 35 63 -62 35 65 -59 minecraft:glass");
+            selfTestCommand("fill 36 63 -62 36 65 -59 minecraft:light_blue_stained_glass");
+            selfTestCommand("fill 37 63 -62 37 65 -59 minecraft:lime_stained_glass");
+            // Lichtquellen + Schattenwerfer
+            selfTestCommand("setblock 40 63 -60 minecraft:torch");
+            selfTestCommand("fill 40 63 -58 40 65 -58 minecraft:stone_bricks");
+            selfTestCommand("setblock 26 63 -54 minecraft:lantern");
+            selfTestCommand("setblock 26 63 -52 minecraft:oak_fence");
+            selfTestCommand("setblock 43 63 -50 minecraft:soul_torch");
+            selfTestCommand("setblock 42 63 -50 minecraft:oak_log");
+            selfTestCommand("setblock 25 63 -60 minecraft:redstone_torch");
+            selfTestCommand("setblock 34 63 -48 minecraft:glowstone");
+            selfTestCommand("setblock 34 64 -49 minecraft:stone_slab");
+        }
+        var player = Minecraft.getInstance().player;
+        if (f >= 320 && player != null) {
+            if (f == 320) selfTestCommand("tp @p 34 69 -69 0 38");
+            // Nahaufnahme von Sueden: Steinsaeule vor der Fackel wirft ihren Schatten zur Kamera
+            if (f == 1150) selfTestCommand("tp @p 40.5 67 -52.5 180 45");
+            boolean close = f >= 1150;
+            player.setYRot(close ? 180.0f : 0.0f);
+            player.setXRot(close ? 45.0f : 38.0f);
+            if (f == 1450) selfTestCommand("tp @p 34 72 -40 0 5"); // ueber die Kante ins Gelaende
+            if (f >= 1450) {
+                // Bewegung fuer den Hi-Z-A/B: gleichmaessig drehen (Disocclusion an Silhouetten)
+                player.setYRot(180.0f + (Math.min(f, 1540) - 1450) * 2.5f); // ab 1540 still (A/B im selben Bild)
+                player.setXRot(8.0f);
+            }
+        }
+        // GPU-Zeiten nur ueber die Nacht-Nahaufnahme mitteln (viele Fackel-Pixel = RT-Last)
+        if (f == 1250 && nativeRunner != null) nativeRunner.passTimings();
+        if (f == 1349 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit Nacht-Nahaufnahme: {}", nativeRunner.passTimings());
+        if (f == 1350) NativePassRunner.debugView = 9;
+        if (f == 1410) NativePassRunner.debugView = 0;
+        if (f == 330) FrameDataCapture.testSunAngle = 20.0f;   // Vormittag
+        if (f == 900) FrameDataCapture.testSunAngle = 180.0f;  // Mitternacht
+        if (f == 800 || f == 801 || f == 802 || f == 1100 || f == 1101 || f == 1400 || f == 1440
+                || f == 1500 || f == 1520 || f == 1540 || f == 1560 || f == 1600 || f == 1640) pendingScreenshot = f;
+        if (f == 1580) NativePassRunner.hizForceOff = true;
+        if (f == 1620) NativePassRunner.hizForceOff = false;
+    }
+
+    /**
+     * LOD-Selbsttest (-Dvulkanfish.lodTest): aus 190 Bloecken Hoehe ueber das Fernfeld schauen,
+     * nach dem Laden Screenshots in zwei Richtungen, GPU-Zeiten ueber eine ruhige Phase.
+     * Keine Weltaenderung (nur Teleport + Spectator, Zeit fest auf Mittag).
+     */
+    private final java.util.List<Long> testFrameNs = new java.util.ArrayList<>();
+    private long testLastNs;
+
+    private void lodTest(long f) {
+        var player = Minecraft.getInstance().player;
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p 34 190 -69 0 12");
+            FrameDataCapture.testSunAngle = 25.0f;
+        }
+        if (f >= 300 && player != null) {
+            float yaw = f < 1700 ? 0.0f : 90.0f;
+            player.setYRot(yaw);
+            player.setXRot(12.0f);
+        }
+        if (f == 1500 && nativeRunner != null) nativeRunner.passTimings();
+        if (f == 1650 && nativeRunner != null) LOG.info("[vulkanfish] Selbsttest GPU-Zeit LOD-Blick: {}", nativeRunner.passTimings());
+        // Endzustand (Fernfeld fertig): GPU-Zeiten + FPS ueber 300 Frames
+        if (f == 5000 && nativeRunner != null) {
+            nativeRunner.passTimings();
+            nativeRunner.slotWaitNs = 0;
+            testFrameNs.clear();
+        }
+        if (f > 5000 && f <= 5300) {
+            long now = System.nanoTime();
+            if (testLastNs != 0L) testFrameNs.add(now - testLastNs);
+        }
+        testLastNs = System.nanoTime();
+        if (f == 5300 && nativeRunner != null) {
+            long[] a = testFrameNs.stream().mapToLong(Long::longValue).sorted().toArray();
+            double avg = java.util.Arrays.stream(a).average().orElse(0) / 1e6;
+            double p50 = a.length > 0 ? a[a.length / 2] / 1e6 : 0, p99 = a.length > 0 ? a[a.length * 99 / 100] / 1e6 : 0;
+            LOG.info("[vulkanfish] Selbsttest GPU-Zeit Endzustand: {} | {} FPS; Frame-Intervall mittel {} ms, Median {} ms, p99 {} ms; Warten auf GPU {} ms/Frame",
+                    nativeRunner.passTimings(), Minecraft.getInstance().getFps(), String.format("%.2f", avg), String.format("%.2f", p50),
+                    String.format("%.2f", p99), String.format("%.2f", nativeRunner.slotWaitNs / 1e6 / Math.max(1, a.length)));
+        }
+        if (f == 900 || f == 1600 || f == 2300 || f == 5300) pendingScreenshot = f;
+    }
+
+    /** Selbsttest: Befehl im integrierten Server (nur mit -Dvulkanfish.testWorldEdits). */
+    private static void selfTestCommand(String command) {
+        var server = Minecraft.getInstance().getSingleplayerServer();
+        if (server == null) return;
+        server.execute(() -> server.getCommands().performPrefixedCommand(server.createCommandSourceStack(), command));
+        LOG.info("[vulkanfish] Selbsttest-Befehl: /{}", command);
+    }
+
+    /** SectionCompilerMixin: darf Vanilla SOLID/CUTOUT/Fluids weglassen? (Worker-Threads) */
+    public static boolean vanillaOpaqueDisabled() {
+        return vanillaOpaqueDisabled;
+    }
+
+    /** Vanilla wieder alles meshen lassen und die Section-Geometrie neu aufbauen (Render-Thread). */
+    private void restoreVanillaOpaque() {
+        vanillaOpaqueDisabled = false;
+        Minecraft mc = Minecraft.getInstance();
+        if (mc.level != null) {
+            mc.levelRenderer.invalidateCompiledGeometry(mc.level, mc.options, mc.gameRenderer.mainCamera(), mc.getBlockColors());
+        }
+    }
+
+    /** LevelRendererMixin: Overworld-Himmel kommt aus unserem Deferred-Pass. */
+    public boolean replacesSky() {
+        Minecraft mc = Minecraft.getInstance();
+        return initialized && nativeRunner.isReady() && mc.level != null
+                && mc.level.dimension() == net.minecraft.world.level.Level.OVERWORLD;
+    }
+
+    /** Vor Mojangs Device-Zerstoerung (RenderSystemMixin). */
+    public synchronized void shutdown() {
+        if (shutDown) return;
+        shutDown = true;
+        initialized = false;
+        if (streamer != null) streamer.shutdown();
+        if (nativeRunner != null) {
+            try {
+                nativeRunner.destroy();
+            } catch (Throwable t) {
+                LOG.warn("[vulkanfish] Freigabe der nativen Ressourcen fehlgeschlagen", t);
+            }
+        }
+    }
+
+    public boolean useGpuDrivenPath() {
+        return initialized && config.enableMeshShaders();
+    }
+
+    public BlazeDeviceInterop device() {
+        return device;
+    }
+
+    public TlasManager tlas() {
+        return tlas;
+    }
+
+    public BobbyInterop bobby() {
+        return bobby;
+    }
+}
