@@ -338,6 +338,8 @@ LodGBufferOut lodFrag(LodFragIn input)
     // keine Loecher an Chunk-Grenzen, die ein Quad nur teilweise ueberdeckt). Nach den Ableitungen.
     if (nearCoveredPoint(input.inner))
         discard;
+    if (gFrame.debugView == 10)
+        color = float3(1.0, 0.0, 1.0); // Debug: vom Fernfeld gezeichnete Pixel magenta
     LodGBufferOut o;
     o.albedoMat = float4(saturate(color), float(input.mat) / 255.0);
     o.normalLight = float4(octEncode(input.normal), input.light.x, input.light.y);

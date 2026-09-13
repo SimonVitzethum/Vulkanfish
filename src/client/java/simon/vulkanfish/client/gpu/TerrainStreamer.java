@@ -76,7 +76,13 @@ public final class TerrainStreamer {
     private int framesSinceScan;
     private boolean overflowWarned;
     private boolean overflowed;
-    private boolean capacityFreed;
+    private int evictedSections; // Statistik: fuer Naehere ans LOD abgegeben
+    // GPU-Scene voll: die naechsten Sections behalten, fernere zeichnet das LOD (gleiches Licht,
+    // gleicher G-Buffer). Verdraengt wird nur, was deutlich weiter weg liegt (kein Hin und Her).
+    private static final double EVICT_MARGIN = 1.5; // Chunks
+    private static final int RETRY_PER_SCAN = 96;
+    private int camSXNow, camSZNow;
+    private int farthestAppliedHd2;
     private int framesSinceVisibleSync;
     private boolean errorWarned;
     private long quadTotal;
@@ -97,7 +103,8 @@ public final class TerrainStreamer {
         int cluster = -1;
         int quads;
         boolean applied;   // aktuelle (evtl. kurz veraltete) Geometrie liegt auf der GPU
-        boolean overflow;  // GPU-Scene war voll -> Vanilla zeichnet diese Section
+        boolean overflow;  // kein Platz in der GPU-Scene (bzw. fuer Naehere verdraengt) -> das LOD zeichnet sie
+        int needVerts;     // Vertices beim letzten gescheiterten Versuch (Wiederholung nur, wenn das passt)
         boolean shadowOnly; // nur als Schattenwerfer geladen, von Vanilla (noch) nie als sichtbar gemeldet
     }
 
@@ -186,6 +193,8 @@ public final class TerrainStreamer {
         int camSX = SectionPos.blockToSectionCoord(camX);
         int camSY = SectionPos.blockToSectionCoord(camY);
         int camSZ = SectionPos.blockToSectionCoord(camZ);
+        camSXNow = camSX;
+        camSZNow = camSZ;
         long camSection = SectionPos.asLong(camSX, camSY, camSZ);
 
         Long dirty;
@@ -199,6 +208,7 @@ public final class TerrainStreamer {
             }
             dirtyTracked++;
             s.version++;
+            if (s.overflow && !s.applied) continue; // zeichnet das LOD; neu gemesht wird erst, wenn wieder Platz ist
             s.needsMesh = true;
             wantMesh.add((long) dirty);
         }
@@ -256,16 +266,43 @@ public final class TerrainStreamer {
                 setCovered(key, false);
             }
         }
-        if (capacityFreed) {
-            capacityFreed = false;
-            for (var e : sections.long2ObjectEntrySet()) {
-                Section s = e.getValue();
-                if (s.overflow && !s.pending) {
-                    s.overflow = false; // Vanilla zeichnet sie bis zum neuen Mesh weiter -> bleibt abgedeckt
-                    s.needsMesh = true;
-                    wantMesh.add(e.getLongKey());
-                }
-            }
+        retryOverflow(camSX, camSZ);
+    }
+
+    private static int hd2(long key, int camSX, int camSZ) {
+        int dx = SectionPos.x(key) - camSX, dz = SectionPos.z(key) - camSZ;
+        return dx * dx + dz * dz;
+    }
+
+    /**
+     * Uebergelaufene Sections (zeichnet das LOD) wieder versuchen: die naechsten zuerst, wenn ihr
+     * letzter Bedarf in den freien Platz passt oder sie deutlich naeher liegen als die fernste belegte
+     * Section (die wird dann beim Hochladen verdraengt, siehe makeRoom).
+     */
+    private void retryOverflow(int camSX, int camSZ) {
+        int far = 0;
+        LongArrayList waiting = new LongArrayList();
+        for (var e : sections.long2ObjectEntrySet()) {
+            Section s = e.getValue();
+            if (s.applied && s.mStart >= 0) far = Math.max(far, hd2(e.getLongKey(), camSX, camSZ));
+            else if (s.overflow && !s.pending && !s.needsMesh) waiting.add(e.getLongKey());
+        }
+        farthestAppliedHd2 = far;
+        if (waiting.isEmpty()) return;
+        waiting.unstableSort((a, b) -> Integer.compare(hd2(a, camSX, camSZ), hd2(b, camSX, camSZ)));
+        long free = vertAlloc.capacity() - vertAlloc.used() - vertAlloc.capacity() / 100; // etwas Reserve
+        double farDist = Math.sqrt(far);
+        int n = 0;
+        for (int i = 0; i < waiting.size() && n < RETRY_PER_SCAN; i++) {
+            long key = waiting.getLong(i);
+            Section s = sections.get(key);
+            boolean nearer = Math.sqrt(hd2(key, camSX, camSZ)) + EVICT_MARGIN < farDist;
+            boolean fits = s.needVerts <= free;
+            if (!nearer && !fits) continue;
+            if (fits) free -= s.needVerts;
+            s.needsMesh = true;
+            wantMesh.add(key);
+            n++;
         }
     }
 
@@ -361,6 +398,18 @@ public final class TerrainStreamer {
                 it.remove(); // entfernt oder erledigt
                 continue;
             }
+            // Neu sichtbar, aber weiter weg als alles Belegte und kein Platz: gleich dem LOD ueberlassen
+            // (spart das Meshen; retryOverflow holt sie, sobald sie naeher sind oder Platz frei wird)
+            if (!s.applied && !s.overflow && s.mStart < 0 && sceneNearlyFull()
+                    && hd2(key, camSX, camSZ) >= farthestAppliedHd2) {
+                it.remove();
+                s.needsMesh = false;
+                s.overflow = true;
+                s.needVerts = (int) Math.min(Integer.MAX_VALUE, vertAlloc.used() / Math.max(1, meshedSections));
+                setCovered(key, false);
+                overflowed = true;
+                continue;
+            }
             if (!s.pending && frameCounter - s.lastScheduledFrame >= REMESH_MIN_FRAMES) candidates.add(key);
         }
         if (candidates.isEmpty()) return;
@@ -407,6 +456,11 @@ public final class TerrainStreamer {
         return m;
     }
 
+    private boolean sceneNearlyFull() {
+        return vertAlloc.used() > vertAlloc.capacity() * 0.97 || meshletAlloc.used() > meshletAlloc.capacity() * 0.97
+                || triAlloc.used() > triAlloc.capacity() * 0.97;
+    }
+
     /** Meshing-Reihenfolge: sichtbare Sections vor reinen Schattenwerfern gleicher Entfernung. */
     private int prio(long key, int cx, int cy, int cz) {
         Section s = sections.get(key);
@@ -432,7 +486,6 @@ public final class TerrainStreamer {
         for (int[] f : retiring) {
             allocator(f[0]).free(f[1], f[2]);
         }
-        if (!retiring.isEmpty()) capacityFreed = true;
         retiring.clear();
         // Entfernte Sections: Meshlets nullen, Bereiche erst im naechsten flush freigeben
         for (int[] f : toRetire) {
@@ -458,55 +511,64 @@ public final class TerrainStreamer {
             long bytes = (long) r.vertexCount() * SectionMesher.VERTEX_BYTES + r.triCount() * 4L
                     + (long) r.meshletCount() * SectionMesher.MESHLET_BYTES + NativePassRunner.CLUSTER_BYTES;
             if (bytes > runner.stagingFree()) break; // naechster Frame
+            if (!apply(runner, r, s)) break; // Platz wird erst im naechsten Frame frei
             ready.poll();
             s.pending = false;
             // Immer uebernehmen (neuer als der GPU-Stand, pro Section nur ein Job in Arbeit);
             // war die Section inzwischen wieder dirty, direkt nachmeshen. Verwerfen wuerde
             // bei Dauer-Aenderungen (fliessendes Wasser, Farmen) nie etwas anzeigen.
-            if (r.version() != s.version) {
+            if (r.version() != s.version && !(s.overflow && !s.applied)) {
                 s.needsMesh = true;
                 wantMesh.add(r.key());
             }
-            apply(runner, r, s);
         }
         runner.setMeshletTotal(meshletAlloc.top());
         runner.setClusterTotal(clusterAlloc.top());
         logStats(runner);
     }
 
-    private void apply(NativePassRunner runner, SectionMesher.MeshResult r, Section s) {
-        setCovered(r.key(), true); // danach ist sie gezeichnet (oder Vanilla zeichnet sie bei Ueberlauf)
-        releaseRanges(runner, s);
-        quadTotal -= s.quads;
-        s.quads = 0;
-        s.applied = false;
-        s.overflow = false;
+    /** @return false: kein Platz, fernere Sections wurden verdraengt -> im naechsten Frame erneut (dann frei) */
+    private boolean apply(NativePassRunner runner, SectionMesher.MeshResult r, Section s) {
         if (r.quadCount() == 0) {
-            s.applied = true; // nichts zu zeichnen
+            setCovered(r.key(), true); // nichts zu zeichnen: fuers LOD abgedeckt
+            releaseRanges(runner, s);
+            quadTotal -= s.quads;
+            s.quads = 0;
+            s.applied = true;
+            s.overflow = false;
             zeroCluster(runner, s);
             runner.rtSectionApplied(r.key(), 0, 0, 0, 0L, r.lights());
-            return;
+            return true;
         }
 
+        // Erst neu zuteilen, dann die alte Geometrie freigeben: bleibt kein Platz, zeichnet die Section
+        // bis zum naechsten Versuch ihr altes Mesh weiter (kein Flackern)
         int v = vertAlloc.alloc(r.vertexCount());
         int t = v < 0 ? -1 : triAlloc.alloc(r.triCount());
         int m = t < 0 ? -1 : meshletAlloc.alloc(r.meshletCount());
-        if (s.cluster < 0 && m >= 0) s.cluster = clusterAlloc.alloc(1);
-        if (v < 0 || t < 0 || m < 0 || s.cluster < 0) {
+        int cl = s.cluster >= 0 ? s.cluster : m >= 0 ? clusterAlloc.alloc(1) : -1;
+        if (v < 0 || t < 0 || m < 0 || cl < 0) {
             if (v >= 0) vertAlloc.free(v, r.vertexCount());
             if (t >= 0) triAlloc.free(t, r.triCount());
             if (m >= 0) meshletAlloc.free(m, r.meshletCount());
+            if (cl >= 0 && s.cluster < 0) clusterAlloc.free(cl, 1);
+            s.needVerts = r.vertexCount();
+            if (makeRoom(runner, r)) return false;
             if (!overflowWarned) {
                 overflowWarned = true;
-                LOG.warn("[vulkanfish] GPU-Scene voll (verts {}/{}, meshlets {}/{}) – Vanilla zeichnet den Rest",
-                        vertAlloc.top(), vertAlloc.capacity(), meshletAlloc.top(), meshletAlloc.capacity());
+                LOG.warn("[vulkanfish] GPU-Scene voll (verts {}/{}, meshlets {}/{}) – entfernte Sections zeichnet das Fernfeld",
+                        vertAlloc.used(), vertAlloc.capacity(), meshletAlloc.used(), meshletAlloc.capacity());
             }
-            s.overflow = true;
-            overflowed = true;
-            zeroCluster(runner, s);
+            toLod(runner, s, r.key());
             runner.rtSectionApplied(r.key(), 0, 0, 0, 0L, r.lights()); // Lichter ja, Geometrie nicht
-            return;
+            return true;
         }
+        s.cluster = cl;
+        setCovered(r.key(), true);
+        releaseRanges(runner, s);
+        quadTotal -= s.quads;
+        s.quads = 0;
+        s.overflow = false;
         s.vStart = v;
         s.vCount = r.vertexCount();
         s.tStart = t;
@@ -565,6 +627,52 @@ public final class TerrainStreamer {
                 .putFloat(48, -1f)                         // coneCutoff
                 .putInt(52, 0);                            // flags
         runner.stageCopy(NativePassRunner.TARGET_CLUSTERS, (long) s.cluster * NativePassRunner.CLUSTER_BYTES, cb);
+        return true;
+    }
+
+    /** Section ans LOD abgeben: Geometrie weg, nicht mehr abgedeckt (das Fernfeld zeichnet sie). */
+    private void toLod(NativePassRunner runner, Section s, long key) {
+        releaseRanges(runner, s);
+        quadTotal -= s.quads;
+        s.quads = 0;
+        s.applied = false;
+        s.overflow = true;
+        zeroCluster(runner, s);
+        setCovered(key, false);
+        overflowed = true;
+    }
+
+    /**
+     * GPU-Scene voll: deutlich fernere belegte Sections (die fernsten zuerst) ans LOD abgeben, bis
+     * reichlich Platz fuer diese frei wird (Luecken im Allokator). Ihre Bereiche werden im naechsten
+     * Frame frei. @return false, wenn es nichts Ferneres gibt
+     */
+    private boolean makeRoom(NativePassRunner runner, SectionMesher.MeshResult r) {
+        double myDist = Math.sqrt(hd2(r.key(), camSXNow, camSZNow));
+        LongArrayList cand = new LongArrayList();
+        for (var e : sections.long2ObjectEntrySet()) {
+            Section c = e.getValue();
+            if (c.applied && c.mStart >= 0 && !c.pending
+                    && Math.sqrt(hd2(e.getLongKey(), camSXNow, camSZNow)) > myDist + EVICT_MARGIN) cand.add(e.getLongKey());
+        }
+        if (cand.isEmpty()) return false;
+        cand.unstableSort((a, b) -> Integer.compare(hd2(b, camSXNow, camSZNow), hd2(a, camSXNow, camSZNow)));
+        long needV = Math.max(2L * r.vertexCount(), vertAlloc.capacity() / 256);
+        long needT = Math.max(2L * r.triCount(), triAlloc.capacity() / 256);
+        long needM = Math.max(2L * r.meshletCount(), meshletAlloc.capacity() / 256);
+        long gotV = 0, gotT = 0, gotM = 0;
+        for (int i = 0; i < cand.size() && (gotV < needV || gotT < needT || gotM < needM); i++) {
+            long key = cand.getLong(i);
+            Section c = sections.get(key);
+            gotV += c.vCount;
+            gotT += c.tCount;
+            gotM += c.mCount;
+            c.needVerts = c.vCount;
+            toLod(runner, c, key);
+            runner.rtSectionRemoved(key); // BLAS liest den Vertexbereich, der gleich neu vergeben wird
+            evictedSections++;
+        }
+        return true;
     }
 
     /** Neu gemeshte Section: alte Meshlets JETZT nullen (sonst doppelt/veraltet sichtbar), Bereiche retiren. */
@@ -640,15 +748,17 @@ public final class TerrainStreamer {
         long now = System.currentTimeMillis();
         if (now - lastStatsMs < 10_000) return;
         lastStatsMs = now;
-        LOG.info("[vulkanfish] Terrain: {} Sections ({} gemesht, {} in Arbeit), {} Quads, Meshlets {}/{} (GPU sichtbar: {}), Verts {}/{}, {} FPS, Wasser-Quads gemesht {}, dirty {}/{}",
-                sections.size(), meshedSections, jobsInFlight.get(), quadTotal,
-                meshletAlloc.top(), meshletAlloc.capacity(), runner.lastVisibleMeshlets(),
-                vertAlloc.top(), vertAlloc.capacity(), Minecraft.getInstance().getFps(), waterQuadsMeshed, dirtyTracked, dirtyReceived);
+        int toLod = 0;
+        for (Section s : sections.values()) if (s.overflow && !s.applied) toLod++;
+        LOG.info("[vulkanfish] Terrain: {} Sections ({} gemesht, {} in Arbeit, {} ans LOD abgegeben, {} verdraengt), {} Quads, Meshlets {}/{} (GPU sichtbar: {}), Verts {}/{}, {} FPS, Wasser-Quads gemesht {}, dirty {}/{}",
+                sections.size(), meshedSections, jobsInFlight.get(), toLod, evictedSections, quadTotal,
+                meshletAlloc.used(), meshletAlloc.capacity(), runner.lastVisibleMeshlets(),
+                vertAlloc.used(), vertAlloc.capacity(), Minecraft.getInstance().getFps(), waterQuadsMeshed, dirtyTracked, dirtyReceived);
         LOG.info("[vulkanfish] GPU-Zeit/Frame: {} (Schatten-Meshlets {}, Wasser-Meshlets {})", runner.passTimings(),
                 runner.lastShadowMeshlets(), runner.lastWaterMeshlets());
     }
 
-    /** Mindestens einmal kein Platz in der GPU-Scene gewesen (dann meshet Vanilla mit). */
+    /** Mindestens einmal kein Platz in der GPU-Scene gewesen (ohne LOD meshet dann Vanilla mit). */
     public boolean overflowed() {
         return overflowed;
     }

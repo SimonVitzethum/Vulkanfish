@@ -34,7 +34,7 @@ struct FrameUniforms
     float thunderFactor;      // 468
     float caveFactor;         // 472  0 offen .. 1 tief in Hoehlen (Kamera-Himmelslicht)
     float exposure;           // 476
-    uint debugView;           // 480  0 aus, 1 Schatten, 2 Normalen, 3 Albedo, 4 Licht, 5 Wasser magenta
+    uint debugView;           // 480  0 aus, 1 Schatten, 2 Normalen, 3 Albedo, 4 Licht, 5 Wasser magenta, 10 LOD magenta
     uint cullFlags;           // 484  bit0: Wasser + Glas/Eis ueberspringen (Schatten-Cull)
     uint rtFlags;             // 488  bit0: Raytracing-Blocklicht aktiv
     uint rtLightCount;        // 492

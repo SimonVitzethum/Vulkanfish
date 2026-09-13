@@ -13,6 +13,7 @@ public final class RangeAllocator {
     private final int capacity;
     private final TreeMap<Integer, Integer> free = new TreeMap<>();
     private int top;
+    private long used; // belegte Elemente (ohne Luecken)
 
     public RangeAllocator(int capacity) {
         this.capacity = capacity;
@@ -29,17 +30,20 @@ public final class RangeAllocator {
                 int start = e.getKey();
                 it.remove();
                 if (len > n) free.put(start + n, len - n);
+                used += n;
                 return start;
             }
         }
         if ((long) top + n > capacity) return -1;
         int start = top;
         top += n;
+        used += n;
         return start;
     }
 
     public void free(int start, int n) {
         if (n <= 0) return;
+        used -= n;
         Map.Entry<Integer, Integer> prev = free.floorEntry(start);
         if (prev != null && prev.getKey() + prev.getValue() == start) {
             free.remove(prev.getKey());
@@ -58,6 +62,12 @@ public final class RangeAllocator {
     public void reset() {
         free.clear();
         top = 0;
+        used = 0;
+    }
+
+    /** Belegte Elemente (ohne freie Luecken unterhalb von top). */
+    public long used() {
+        return used;
     }
 
     public int top() {
