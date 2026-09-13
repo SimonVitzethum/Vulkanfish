@@ -182,25 +182,39 @@ public final class LodManager {
                 }
                 int q = quadAlloc.alloc(quads);
                 int ms = q < 0 ? -1 : meshletAlloc.alloc(meshlets);
-                if (n.cluster < 0 && ms >= 0) n.cluster = clusterAlloc.alloc(1);
-                if (q < 0 || ms < 0 || n.cluster < 0) {
+                if (q < 0 || ms < 0) {
                     if (q >= 0) quadAlloc.free(q, quads);
                     if (ms >= 0) meshletAlloc.free(ms, meshlets);
                     n.ready = false;
                     n.dirty = true;
                     deferred.add(n.key);
-                    warnFull();
+                    memoryPressure = true; // aufbewahrte Knoten verdraengen
                     continue;
                 }
                 n.quadStart = q;
                 n.quadCount = quads;
                 n.meshletStart = ms;
                 n.meshletCount = meshlets;
-                commits.add(new NativePassRunner.LodGpuCommit(i, q, ms, n.cluster, n.level, n.nx, n.nz, dir));
+                // Cluster-Index im Meshlet-Kopf ist nur Buchhaltung (der Cull nutzt die Kennbits)
+                commits.add(new NativePassRunner.LodGpuCommit(i, q, ms, Math.max(n.cluster, 0), n.level, n.nx, n.nz, dir));
                 if (n.drawn) clusterShow.add(n.key);
                 drawSetDirty = true;
             }
             return commits;
+        }
+
+        @Override
+        public void lodCancelled(java.util.List<NativePassRunner.LodGpuJob> jobs) {
+            // Batches verworfen (neuer Generator): Zaehler freigeben, Knoten neu einreihen
+            for (var job : jobs) {
+                buildsInFlight.decrementAndGet();
+                Node n = nodes.get(job.nodeKey());
+                if (n != null && n.buildSerial == job.serial()) {
+                    n.building = false;
+                    n.dirty = true;
+                    enqueue(n);
+                }
+            }
         }
     };
     private boolean overflowWarned;
@@ -251,10 +265,15 @@ public final class LodManager {
         volatile int state;
         volatile int wantLevel = MAX_LEVEL;
         int requestedLevel = Integer.MAX_VALUE;
+        // Anfrage lieferte nichts, es gibt aber eine (grobere) Saeule: nicht endlos neu anfragen
+        volatile boolean noFinerData;
     }
 
     private final ConcurrentHashMap<Long, ChunkEntry> chunks = new ConcurrentHashMap<>();
-    private final ConcurrentLinkedQueue<Long> updatedChunks = new ConcurrentLinkedQueue<>();
+    private final ConcurrentLinkedQueue<long[]> updatedChunks = new ConcurrentLinkedQueue<>(); // {Chunk, geaenderte Stufen}
+    // je Chunk der Inhalts-Hash jeder Stufe, mit dem Knoten zuletzt gebaut werden konnten (bleibt auch,
+    // wenn die Saeule selbst verworfen wird): erneutes Einlesen gleicher Daten baut nichts neu
+    private final ConcurrentHashMap<Long, long[]> publishedHash = new ConcurrentHashMap<>();
     private final LongArrayList requestQueue = new LongArrayList();
     private int requestHead;          // bis hier abgearbeitet (Liste wird nur periodisch sortiert/kompaktiert)
     private int requestSortedSize;
@@ -294,7 +313,7 @@ public final class LodManager {
     private final RangeAllocator quadAlloc = new RangeAllocator(MAX_QUADS);
     private final RangeAllocator meshletAlloc = new RangeAllocator(MAX_MESHLETS);
     private final RangeAllocator clusterAlloc = new RangeAllocator(MAX_CLUSTERS);
-    private final List<int[]> retiring = new ArrayList<>(); // {0 quads|1 meshlets, start, count}
+    private final List<int[]> retiring = new ArrayList<>(); // {0 quads|1 meshlets|2 Cluster, start, count}
     private final List<int[]> toRetire = new ArrayList<>();
     private final LongArrayList clusterShow = new LongArrayList();
     private final LongArrayList clusterHide = new LongArrayList();
@@ -409,8 +428,8 @@ public final class LodManager {
         }
 
         // Fertige Saeulen -> betroffene Knoten neu bauen
-        Long ck;
-        while ((ck = updatedChunks.poll()) != null) markNodesDirty(ck);
+        long[] upd;
+        while ((upd = updatedChunks.poll()) != null) markNodesDirty(upd[0], (int) upd[1]);
 
         // Auswahl nur bei Bewegung (4 Bloecke) oder anderer Aufloesung/Sichtweite neu
         double moved = Double.isNaN(lastSelX) ? 1e9 : Math.abs(camX - lastSelX) + Math.abs(camY - lastSelY) + Math.abs(camZ - lastSelZ);
@@ -439,7 +458,8 @@ public final class LodManager {
         }
         scheduleBuilds(camX, camZ);
         processRequests(camX, camZ);
-        if (frame % 300 == 0) evict(camX, camZ);
+        if (frame % 300 == 0 || (memoryPressure && frame % 10 == 0)) evict(camX, camZ);
+        if (frame % 1200 == 0) prunePublished(camX, camZ);
         sweepChunks(camX, camZ, 2048);
         log();
     }
@@ -793,7 +813,7 @@ public final class LodManager {
                 int st = e.state;
                 if (st == STATE_NODATA) continue;
                 LodColumn c = e.column;
-                if (st == STATE_READY && c != null && c.minLevel <= n.level) continue;
+                if (st == STATE_READY && c != null && (c.minLevel <= n.level || e.noFinerData)) continue;
                 all = false;
                 if (st != STATE_PENDING && requestSet.add(key)) requestQueue.add(key);
             }
@@ -806,17 +826,19 @@ public final class LodManager {
         return e != null ? e.column : null;
     }
 
-    private void markNodesDirty(long chunk) {
+    /** changedLevels: Bit l = Daten der Stufe l neu; sonst nur wartende Knoten wecken (nichts neu bauen). */
+    private void markNodesDirty(long chunk, int changedLevels) {
         int cx = (int) (chunk >> 32), cz = (int) chunk;
         for (int l = 0; l <= MAX_LEVEL; l++) {
             int chunksPer = 2 << l;
+            boolean changed = (changedLevels & (1 << l)) != 0;
             // der Chunk selbst und (als Rand) die Nachbarknoten
             for (int dz = -1; dz <= 1; dz++) {
                 for (int dx = -1; dx <= 1; dx++) {
                     int nx = Math.floorDiv(cx + dx, chunksPer), nz = Math.floorDiv(cz + dz, chunksPer);
                     Node n = nodes.get(nodeKey(l, nx, nz));
                     if (n != null) {
-                        n.dirty = true;
+                        if (changed) n.dirty = true;
                         enqueue(n);
                     }
                 }
@@ -928,8 +950,12 @@ public final class LodManager {
     }
 
     private void noData(ChunkEntry e) {
-        if (e.column == null) e.state = STATE_NODATA;
-        else e.state = STATE_READY;
+        if (e.column == null) {
+            e.state = STATE_NODATA;
+        } else {
+            e.noFinerData = true; // Knoten bauen mit dem, was da ist (fehlende Stufen generiert die GPU)
+            e.state = STATE_READY;
+        }
     }
 
     /**
@@ -984,6 +1010,7 @@ public final class LodManager {
         b.fillFromSections(sections, height);
         long t1 = System.nanoTime();
         e.column = b.build(cx, cz, source, Math.min(e.wantLevel, MAX_LEVEL), minY);
+        e.noFinerData = false;
         long t2 = System.nanoTime();
         COLUMN_TIMES.addAndGet(0, t1 - t0);
         COLUMN_TIMES.addAndGet(1, t2 - t1);
@@ -993,15 +1020,31 @@ public final class LodManager {
             sourceCount[source]++;
             columnsBuilt++;
         }
-        updatedChunks.add(chunkKey(cx, cz));
+        // Welche Stufen haben sich gegenueber dem letzten Stand geaendert? (fehlende Stufen behalten den alten Hash)
+        long key = chunkKey(cx, cz);
+        LodColumn col = e.column;
+        int changed = 0;
+        synchronized (publishedHash) {
+            long[] prev = publishedHash.get(key);
+            long[] now = prev != null ? prev.clone() : new long[LodColumn.LEVELS];
+            for (int l = 0; l < LodColumn.LEVELS; l++) {
+                long h = col.levelHash(l);
+                if (h == 0L) continue;
+                if (h != now[l]) changed |= 1 << l;
+                now[l] = h;
+            }
+            publishedHash.put(key, now);
+        }
+        updatedChunks.add(new long[]{key, changed});
     }
 
     // ---------- Upload (Frame-Aufnahme) ----------
 
     /** Fertige Meshes hochladen und Cluster ein-/ausblenden (im Staging-Ring des Frames). */
     public void flushUploads(NativePassRunner runner) {
-        for (int[] f : retiring) (f[0] == 0 ? quadAlloc : meshletAlloc).free(f[1], f[2]);
+        for (int[] f : retiring) (f[0] == 0 ? quadAlloc : f[0] == 1 ? meshletAlloc : clusterAlloc).free(f[1], f[2]);
         retiring.clear();
+        // Cluster-Slots: bereits beim Freigeben genullt; hier nur einen Durchgang spaeter wiederverwenden
         for (int[] f : toRetire) {
             if (f[0] == 1) runner.stageFill(NativePassRunner.TARGET_LOD_MESHLETS, (long) f[1] * 64, (long) f[2] * 64);
             retiring.add(f);
@@ -1046,9 +1089,7 @@ public final class LodManager {
         // Cluster-Sichtbarkeit
         for (int i = 0; i < clusterHide.size(); i++) {
             Node n = nodes.get(clusterHide.getLong(i));
-            if (n != null && n.cluster >= 0 && !n.drawn) {
-                runner.stageFill(NativePassRunner.TARGET_LOD_CLUSTERS, (long) n.cluster * 64, 64);
-            }
+            if (n != null && (!n.drawn || n.meshletStart < 0)) releaseCluster(runner, n);
         }
         clusterHide.clear();
         for (int i = 0; i < clusterShow.size(); i++) {
@@ -1070,16 +1111,15 @@ public final class LodManager {
         n.aabb = m.aabb();
         if (m.quadCount() == 0) {
             n.ready = true;
-            if (n.cluster >= 0) runner.stageFill(NativePassRunner.TARGET_LOD_CLUSTERS, (long) n.cluster * 64, 64);
+            releaseCluster(runner, n);
             return true;
         }
         int q = quadAlloc.alloc(m.quadCount());
         int ms = q < 0 ? -1 : meshletAlloc.alloc(m.meshletCount());
-        if (n.cluster < 0 && ms >= 0) n.cluster = clusterAlloc.alloc(1);
-        if (q < 0 || ms < 0 || n.cluster < 0) {
+        if (q < 0 || ms < 0) {
             if (q >= 0) quadAlloc.free(q, m.quadCount());
             if (ms >= 0) meshletAlloc.free(ms, m.meshletCount());
-            warnFull();
+            memoryPressure = true;
             return false;
         }
         n.quadStart = q;
@@ -1114,7 +1154,15 @@ public final class LodManager {
     }
 
     private void writeCluster(NativePassRunner runner, Node n) {
-        if (n.cluster < 0 || n.meshletStart < 0 || n.aabb == null) return;
+        if (n.meshletStart < 0 || n.aabb == null) return;
+        if (n.cluster < 0) {
+            // Cluster-Slots nur fuer gezeichnete Knoten: der Cull laeuft ueber alle belegten Slots
+            n.cluster = clusterAlloc.alloc(1);
+            if (n.cluster < 0) {
+                warnFull();
+                return;
+            }
+        }
         float[] a = n.aabb;
         ByteBuffer cb = ByteBuffer.allocate(64).order(ByteOrder.LITTLE_ENDIAN);
         cb.putFloat(0, (a[0] + a[3]) * 0.5f).putFloat(4, (a[1] + a[4]) * 0.5f).putFloat(8, (a[2] + a[5]) * 0.5f)
@@ -1126,6 +1174,14 @@ public final class LodManager {
                 .putFloat(48, -1f)
                 .putInt(52, 2); // Fernfeld
         runner.stageCopy(NativePassRunner.TARGET_LOD_CLUSTERS, (long) n.cluster * 64, cb);
+    }
+
+    /** Cluster-Slot nullen (Cull ueberspringt ihn) und im naechsten Durchgang freigeben. */
+    private void releaseCluster(NativePassRunner runner, Node n) {
+        if (n.cluster < 0) return;
+        runner.stageFill(NativePassRunner.TARGET_LOD_CLUSTERS, (long) n.cluster * 64, 64);
+        toRetire.add(new int[]{2, n.cluster, 1});
+        n.cluster = -1;
     }
 
     private boolean fullWarned;
@@ -1182,12 +1238,47 @@ public final class LodManager {
 
     // ---------- Aufraeumen ----------
 
+    // Aufbewahren statt Neubauen: fertige Knoten ausserhalb der Auswahl bleiben auf der GPU, bis der
+    // Speicher knapp wird. Zurueck an einem bekannten Ort ist das Fernfeld dann sofort da (vorher
+    // wurde alles nach 600 Frames verworfen und bei der Rueckkehr komplett neu generiert).
+    private static final double KEEP_FILL = 0.75;   // bis zu diesem Fuellstand (Quads/Meshlets) aufbewahren
+    private static final double EVICT_TO = 0.65;    // ... sonst bis hierher verdraengen
+    private static final double PRESSURE_TO = 0.5;  // nach einer gescheiterten Zuteilung
+    private static final int MAX_NODES = 300_000;   // CPU-Buchhaltung
+    private static final long IDLE_FRAMES = 600;    // so lange unbenutzt, bevor ein Knoten verdraengt werden darf
+    private boolean memoryPressure;
+
     private void evict(double camX, double camZ) {
-        // Knoten, die lange weder gewuenscht noch als Ersatz gezeichnet wurden
-        LongArrayList dead = new LongArrayList();
+        boolean pressure = memoryPressure;
+        memoryPressure = false;
         LongOpenHashSet wanted = new LongOpenHashSet(desired);
+        long quads = 0, meshlets = 0;
+        LongArrayList dead = new LongArrayList();
+        LongArrayList kept = new LongArrayList();
         for (Node n : nodes.values()) {
-            if (!n.building && !n.drawn && !wanted.contains(n.key) && frame - n.lastUsedFrame > 600) dead.add(n.key);
+            quads += n.quadCount;
+            meshlets += n.meshletCount;
+            if (n.building || n.drawn || wanted.contains(n.key) || frame - n.lastUsedFrame <= IDLE_FRAMES) continue;
+            // nie fertig gewordene Knoten: nichts aufzubewahren (Neuanlage kostet nichts)
+            if (!n.ready) dead.add(n.key);
+            else kept.add(n.key);
+        }
+        double fill = Math.max(quads / (double) MAX_QUADS, meshlets / (double) MAX_MESHLETS);
+        double target = pressure ? PRESSURE_TO : fill > KEEP_FILL ? EVICT_TO : 1.0;
+        int nodeTarget = nodes.size() - dead.size() > MAX_NODES ? MAX_NODES * 9 / 10 : Integer.MAX_VALUE;
+        if (target < 1.0 || nodeTarget != Integer.MAX_VALUE) {
+            // die am weitesten entfernten zuerst (die braucht man am spaetesten wieder)
+            sortByDistance(kept, k -> 1.0 / (1.0 + keyDistance(k, camX, camZ)));
+            long qLimit = (long) (target * MAX_QUADS), mLimit = (long) (target * MAX_MESHLETS);
+            int alive = nodes.size() - dead.size();
+            for (int i = 0; i < kept.size() && (quads > qLimit || meshlets > mLimit || alive > nodeTarget); i++) {
+                Node n = nodes.get(kept.getLong(i));
+                quads -= n.quadCount;
+                meshlets -= n.meshletCount;
+                alive--;
+                dead.add(n.key);
+            }
+            if (pressure && (quads > qLimit || meshlets > mLimit)) warnFull(); // alles Verbleibende wird gebraucht
         }
         for (int i = 0; i < dead.size(); i++) {
             Node n = nodes.remove(dead.getLong(i));
@@ -1195,9 +1286,15 @@ public final class LodManager {
                 toRetire.add(new int[]{0, n.quadStart, n.quadCount});
                 toRetire.add(new int[]{1, n.meshletStart, n.meshletCount});
             }
-            if (n.cluster >= 0) {
-                clusterAlloc.free(n.cluster, 1); // Cluster ist bereits genullt (nicht gezeichnet)
-            }
+            if (n.cluster >= 0) toRetire.add(new int[]{2, n.cluster, 1}); // nicht gezeichnet: Slot ist genullt
+        }
+    }
+
+    /** Hashes von Chunks, die kein aufbewahrter Knoten mehr betreffen kann (weit weg), verwerfen. */
+    private void prunePublished(double camX, double camZ) {
+        double limit = farBlocks() + 2048; // etwas ueber die Auswahl hinaus (aufbewahrte Knoten am Rand)
+        synchronized (publishedHash) {
+            publishedHash.keySet().removeIf(k -> chunkDist(k, camX, camZ) > limit);
         }
     }
 
@@ -1228,15 +1325,28 @@ public final class LodManager {
             if (c == null) continue;
             sweptBytes += c.bytes();
             int need = levelAt(dist - 32, lastPixelAngle);
-            if (need > c.minLevel + 1) {
+            if (need > c.minLevel + 1 && reloadable(c)) {
                 e.column = c.trimmed(need - 1); // eine Stufe Reserve fuer kleine Bewegungen
                 e.wantLevel = need - 1;
             }
         }
     }
 
+    /**
+     * Kommen die feinen Stufen nach dem Ausduennen wieder? Spielstand und Bobby ja; ein live
+     * uebernommener Chunk nur im Einzelspieler (der Server speichert ihn). Auf einem Server waere
+     * er sonst fuer immer grob: jede Anfrage liefe ins Leere und der Knoten wartete endlos.
+     */
+    private boolean reloadable(LodColumn c) {
+        return c.source == LodColumn.SOURCE_SAVED || c.source == LodColumn.SOURCE_BOBBY
+                || (c.source == LodColumn.SOURCE_LIVE && Minecraft.getInstance().getSingleplayerServer() != null);
+    }
+
     private void resetAll() {
+        memoryPressure = false;
         nodes.clear();
+        publishedHash.clear();
+        updatedChunks.clear();
         chunks.clear();
         chunkSweep = null;
         nearMaskUploaded = false;
@@ -1263,17 +1373,18 @@ public final class LodManager {
         // GPU: Cluster-Zaehler 0 -> nichts mehr sichtbar, bis neu gebaut
     }
 
-    private static final boolean LOG_FAST = Boolean.getBoolean("vulkanfish.lodMove");
+    private static final boolean LOG_FAST = Boolean.getBoolean("vulkanfish.lodMove") || Boolean.getBoolean("vulkanfish.lodReturn");
 
     private void log() {
         long now = System.currentTimeMillis();
         if (now - lastLogMs < (LOG_FAST ? 2_000 : 10_000)) return;
         lastLogMs = now;
         long bytes = sweptBytesLast; // aus dem verteilten Durchlauf (sweepChunks)
-        int ready = 0, drawn = 0;
+        int ready = 0, drawn = 0, building = 0;
         for (Node n : nodes.values()) {
             if (n.ready) ready++;
             if (n.drawn) drawn++;
+            if (n.building) building++;
         }
         // Rueckstand: gewuenschte, noch nicht fertige Knoten (nah = unter 1024 Bloecken)
         int missing = 0, missingNear = 0;
@@ -1284,7 +1395,8 @@ public final class LodManager {
             missing++;
             if (keyDistance(k, lastSelX, lastSelZ) < 1024) missingNear++;
         }
-        LOG.info("[vulkanfish] LOD-Rueckstand: {} Knoten offen, davon {} unter 1024 Bloecken", missing, missingNear);
+        LOG.info("[vulkanfish] LOD-Rueckstand: {} Knoten offen, davon {} unter 1024 Bloecken; im Bau {} Knoten, {} Auftraege gezaehlt",
+                missing, missingNear, building, buildsInFlight.get());
         long cn = Math.max(1, COLUMN_TIMES.get(2));
         LOG.info("[vulkanfish] LOD-CPU je Chunk (ms): Saeule Einlesen {} Bauen {} (n={}); Knoten-Meshing {} (n={})",
                 fmt(COLUMN_TIMES.get(0) / 1e6 / cn), fmt(COLUMN_TIMES.get(1) / 1e6 / cn), COLUMN_TIMES.get(2),

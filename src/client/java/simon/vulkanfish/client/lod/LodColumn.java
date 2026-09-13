@@ -94,6 +94,15 @@ public final class LodColumn {
         return new LodColumn(chunkX, chunkZ, source, Math.min(level, LEVELS - 1), minY, height, cs, rs);
     }
 
+    /** Inhalts-Hash einer Stufe (0 = Stufe fehlt): gleiche Daten erneut geladen -> Knoten nicht neu bauen. */
+    public long levelHash(int level) {
+        if (!hasLevel(level)) return 0L;
+        long h = 0x9E3779B97F4A7C15L ^ source;
+        for (long r : runs[level]) h = (h ^ r) * 0x100000001B3L + (h >>> 29);
+        for (int c : colStart[level]) h = (h ^ c) * 0x100000001B3L + (h >>> 29);
+        return h == 0L ? 1L : h;
+    }
+
     /** Ungefaehrer Speicherbedarf (Statistik). */
     public long bytes() {
         long b = 64;

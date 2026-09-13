@@ -31,6 +31,7 @@ public final class VulkanfishRenderer {
     private static final boolean SCENE_TEST = Boolean.getBoolean("vulkanfish.sceneTest");
     private static final boolean LOD_TEST = Boolean.getBoolean("vulkanfish.lodTest");
     private static final boolean ICE_TEST = Boolean.getBoolean("vulkanfish.iceTest");
+    private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
     private static volatile boolean vanillaOpaqueDisabled;
     private final GpuDrivenConfig config;
@@ -167,6 +168,8 @@ public final class VulkanfishRenderer {
         }
         if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
             iceTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && LOD_RETURN) {
+            lodReturnTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST) {
             lodTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SCENE_TEST && TEST_WORLD_EDITS) {
@@ -422,6 +425,45 @@ public final class VulkanfishRenderer {
      * Eis-/Entity-Selbsttest (-Dvulkanfish.iceTest, nur Test-Welt): zugefrorener Teich, Eis
      * wird angeschlagen (Risse) und gebrochen (wird zu Wasser); Tiere in der Sonne fuer Schatten.
      */
+    /**
+     * LOD-Rueckkehr-Selbsttest (-Dvulkanfish.lodTest -Dvulkanfish.lodReturn): Fernfeld am Start
+     * aufbauen, weit wegspringen (-Dvulkanfish.lodReturnDist, Standard 1500 Bloecke), dort warten,
+     * bis die alten Knoten verdraengt sind, zurueck. Screenshots und Rueckstand im selben Abstand
+     * nach der Ankunft wie beim ersten Besuch -> Nachbau-Tempo im Vergleich.
+     */
+    private void lodReturnTest(long f) {
+        var player = Minecraft.getInstance().player;
+        Integer rd = Integer.getInteger("vulkanfish.testRenderDistance");
+        if (f == 200 && rd != null) Minecraft.getInstance().options.renderDistance().set(rd);
+        int away = Integer.getInteger("vulkanfish.lodReturnDist", 1500);
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p 34 120 -69 -90 3");
+            FrameDataCapture.testSunAngle = 25.0f;
+        }
+        int hops = Integer.getInteger("vulkanfish.lodHops", 0);
+        if (hops > 0) {
+            // Dimensionswechsel hin und zurueck (neue Welt fuers LOD, GPU-Generator wird neu eingerichtet)
+            for (int i = 0; i < hops; i++) {
+                if (f == 1400 + i * 1200L) selfTestCommand("execute in minecraft:the_nether run tp @p 0 90 0");
+                if (f == 2000 + i * 1200L) selfTestCommand("execute in minecraft:overworld run tp @p 34 120 -69 -90 3");
+            }
+            if (f == 1400 + hops * 1200L + 600 && player != null) {
+                LOG.info("[vulkanfish] Rueckkehrtest: {} Dimensionswechsel fertig", hops);
+                pendingScreenshot = f;
+            }
+            if (f >= 300 && player != null && player.level().dimension() == net.minecraft.world.level.Level.OVERWORLD) lockView(player, -90.0f, 3.0f);
+            return;
+        }
+        if (f == 1400) selfTestCommand("tp @p " + (34 + away) + " 120 -69 -90 3");
+        if (f == 2600) selfTestCommand("tp @p 34 120 -69 -90 3");
+        if (f >= 300 && player != null) lockView(player, -90.0f, 3.0f);
+        if (f == 420 || f == 600 || f == 900 || f == 1390 || f == 2720 || f == 2900 || f == 3200 || f == 3690) {
+            pendingScreenshot = f;
+            if (player != null) LOG.info("[vulkanfish] Rueckkehrtest f{} bei x={}", f, (int) player.getX());
+        }
+    }
+
     private void iceTest(long f) {
         BlockPos hit = new BlockPos(34, 62, -56), hit2 = new BlockPos(36, 62, -54);
         if (f == 300) {

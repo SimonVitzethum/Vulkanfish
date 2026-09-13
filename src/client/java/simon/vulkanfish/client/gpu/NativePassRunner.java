@@ -357,6 +357,9 @@ public final class NativePassRunner {
 
         /** counts: je Auftrag 10 Werte (6 Seiten, Ueberlauf, yMin, yMax, frei). */
         java.util.List<LodGpuCommit> lodMeshed(java.util.List<LodGpuJob> jobs, int[] counts);
+
+        /** Angenommene Auftraege, die nie fertig werden (Batches verworfen, z. B. neuer Generator). */
+        void lodCancelled(java.util.List<LodGpuJob> jobs);
     }
 
     public static final int LOD_BATCH = 8;
@@ -477,6 +480,14 @@ public final class NativePassRunner {
             lgGridPerJob = 34 * 34 * genHeight;
             lgUploadedMats = 0;
             lgUploadedBiomes = 0;
+            // Laufende Batches werden verworfen: ihre Auftraege dem (bisherigen) Client zurueckgeben,
+            // sonst bleiben die Knoten fuer immer "im Bau" und der Auftragszaehler waechst je Weltwechsel
+            if (lodClient != null && LOD_BENCH < 0) {
+                java.util.List<LodGpuJob> dropped = new java.util.ArrayList<>();
+                if (lbBuilding != null) dropped.addAll(lbBuilding.jobs);
+                for (LodBatch b : lbWaiting) dropped.addAll(b.jobs);
+                if (!dropped.isEmpty()) lodClient.lodCancelled(dropped);
+            }
             resetLodBatches();
             lodClient = client;
             lodGpuReady = true;
