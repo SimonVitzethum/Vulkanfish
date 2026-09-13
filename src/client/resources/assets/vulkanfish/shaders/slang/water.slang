@@ -322,7 +322,7 @@ float4 shadeWaterSurface(WaterVertOut input)
     float3 L = f.lightDir / max(lightFade, 1e-4);
     float shadow = 1.0;
     if (f.dimension == 0 && f.shadowDistance > 0.0 && dist < f.shadowDistance)
-        shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, Nf, float2(px));
+        shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, Nf, float2(px)) * skyAccess(skyL);
     else
         shadow = smoothstep(0.35, 0.95, skyL);
 
@@ -486,7 +486,7 @@ float4 shadeTranslucent(TransVertOut input, float4 tex)
     float lightFade = length(f.lightDir);
     float3 L = f.lightDir / max(lightFade, 1e-4);
     float shadow = f.dimension == 0 && f.shadowDistance > 0.0 && dist < f.shadowDistance
-        ? sampleShadowMap(gShadowMap, gShadowCmp, f, wp, n, input.pos.xy) : smoothstep(0.35, 0.95, skyL);
+        ? sampleShadowMap(gShadowMap, gShadowCmp, f, wp, n, input.pos.xy) * skyAccess(skyL) : smoothstep(0.35, 0.95, skyL);
     float3 albedo = toLinear(tex.rgb * input.color.rgb);
     float3 lightSum = (f.dimension == 0 ? directColor(f) * saturate(dot(n, L)) * lightFade * shadow : float3(0.0))
                     + (f.dimension == 0 ? ambientColor(f, n) * skyL * skyL : float3(0.12, 0.09, 0.08))

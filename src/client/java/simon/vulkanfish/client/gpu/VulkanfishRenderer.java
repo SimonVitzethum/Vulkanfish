@@ -31,6 +31,7 @@ public final class VulkanfishRenderer {
     private static final boolean SCENE_TEST = Boolean.getBoolean("vulkanfish.sceneTest");
     private static final boolean LOD_TEST = Boolean.getBoolean("vulkanfish.lodTest");
     private static final boolean ICE_TEST = Boolean.getBoolean("vulkanfish.iceTest");
+    private static final boolean CAVE_TEST = Boolean.getBoolean("vulkanfish.caveTest");
     private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
     private static volatile boolean vanillaOpaqueDisabled;
@@ -158,6 +159,8 @@ public final class VulkanfishRenderer {
             if (screen instanceof net.minecraft.client.gui.screens.PauseScreen) mc.gui.setScreen(null);
             // Maus nicht fangen: echte Mausbewegung wuerde sonst die Testkamera drehen
             if (mc.mouseHandler.isMouseGrabbed()) mc.mouseHandler.releaseMouse();
+            // Ohne Eingaben drosselt Minecraft nach einer Weile auf 30 FPS (AFK) – lange Tests aktiv halten
+            mc.getFramerateLimitTracker().onInputReceived();
         }
         if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.hizTest")) {
             // A/B: gleiches Standbild mit/ohne Hi-Z -> Differenz = faelschlich weggecullte Geometrie
@@ -166,7 +169,9 @@ public final class VulkanfishRenderer {
             if (f == 620) pendingScreenshot = f;
             if (f == 640) NativePassRunner.hizForceOff = false;
         }
-        if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
+        if (EXIT_AFTER_FRAMES > 0 && CAVE_TEST && TEST_WORLD_EDITS) {
+            caveTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
             iceTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && LOD_RETURN) {
             lodReturnTest(f);
@@ -201,7 +206,7 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && f > 700 && Minecraft.getInstance().player != null) {
+        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && f > 700 && Minecraft.getInstance().player != null) {
             // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
             var player = Minecraft.getInstance().player;
             if (f >= 1450 && TEST_WORLD_EDITS) {
@@ -425,6 +430,40 @@ public final class VulkanfishRenderer {
      * Eis-/Entity-Selbsttest (-Dvulkanfish.iceTest, nur Test-Welt): zugefrorener Teich, Eis
      * wird angeschlagen (Risse) und gebrochen (wird zu Wasser); Tiere in der Sonne fuer Schatten.
      */
+    /**
+     * Hoehlen-Selbsttest (-Dvulkanfish.caveTest, nur Test-Welt): geschlossener Raum tief im Fels,
+     * weit weg vom Spawn (die Oberflaeche darueber war nie sichtbar), dazu ein Schacht zum Himmel.
+     * Mittagssonne: der Raum muss dunkel bleiben, nur unter dem Schacht darf Sonne fallen.
+     */
+    private void caveTest(long f) {
+        var player = Minecraft.getInstance().player;
+        if (f == 300) {
+            selfTestCommand("gamerule minecraft:random_tick_speed 0");
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("gamerule minecraft:advance_weather false");
+            selfTestCommand("weather clear");
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p 3000.5 34 3000.5 -45 30");
+            FrameDataCapture.testSunAngle = 5.0f;
+        }
+        if (f == 500) {
+            selfTestCommand("fill 2990 30 2990 3010 38 3010 minecraft:air");
+            // Schraeger Schlitz zum Himmel (Sonne um 30 Grad nach Sueden geneigt): hier muss sie auf den Boden fallen
+            selfTestCommand("fill 3004 39 3004 3012 90 3040 minecraft:air");
+            selfTestCommand("fill 3004 91 3004 3012 140 3070 minecraft:air");
+        }
+        if (f >= 300 && player != null) {
+            // ab 950 unter den Schacht blicken: dort muss die Sonne auf den Boden fallen
+            boolean shaft = f >= 950;
+            if (f > 320) player.setPos(shaft ? 3001.5 : 3000.5, 34, shaft ? 3001.5 : 3000.5);
+            lockView(player, -45.0f, 30.0f);
+        }
+        if (f == 880) NativePassRunner.debugView = 1; // Schattenfaktor
+        if (f == 910) NativePassRunner.debugView = 0;
+        if (f == 850 || f == 900 || f == 1000) pendingScreenshot = f;
+        if (f == 1000 && nativeRunner != null) LOG.info("[vulkanfish] Hoehlentest GPU-Zeit: {}", nativeRunner.passTimings());
+    }
+
     /**
      * LOD-Rueckkehr-Selbsttest (-Dvulkanfish.lodTest -Dvulkanfish.lodReturn): Fernfeld am Start
      * aufbauen, weit wegspringen (-Dvulkanfish.lodReturnDist, Standard 1500 Bloecke), dort warten,

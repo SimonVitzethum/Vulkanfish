@@ -17,6 +17,14 @@ static const float2 POISSON[8] = {
     float2(-0.651, -0.024), float2(0.421, -0.628), float2(0.036, 0.931), float2(0.975, -0.100)
 };
 
+// Himmelszugang aus Vanillas Himmelslicht (0..1): wo es (fast) 0 ist, fuehrt kein Weg zum Himmel,
+// also auch kein Sonnenstrahl. Sicherheitsnetz fuer Hoehlen, falls der Schattenkarte ein
+// Schattenwerfer fehlt (Section nie gesehen, Chunk noch nicht gemesht, ausserhalb der Tiefe).
+float skyAccess(float skyL)
+{
+    return smoothstep(0.02, 0.33, skyL);
+}
+
 // offsetDir: Normale (Akne-Schutz) bzw. Lichtrichtung bei Laub
 float sampleShadowMap(Texture2D<float> map, SamplerComparisonState cmp, FrameUniforms f,
                       float3 wp, float3 offsetDir, float2 pixel)

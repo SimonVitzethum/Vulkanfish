@@ -230,7 +230,8 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
     if (f.dimension == 0 && diffuse > 0.0)
     {
         if (f.shadowDistance > 0.0 && length(wp - f.camPos) < f.shadowDistance)
-            shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, foliage ? L : n, float2(px)) * lerp(skyGate, 1.0, 0.75);
+            shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, foliage ? L : n, float2(px)) * lerp(skyGate, 1.0, 0.75)
+                   * skyAccess(skyL);
         else
             shadow = skyGate;
     }

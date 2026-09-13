@@ -38,6 +38,9 @@ struct CullPush
     uint phase;
     uint nearMode;         // LOD: Bit 0 = Meshlets in gezeichneten Nahfeld-Sections verwerfen, darueber minSectionY + 2048
     int camChunkX, camChunkZ;
+    float minTopY;         // Meshlets ganz unterhalb verwerfen (LOD-Schattenwerfer: nur Luecken des Nahfelds)
+    float maxDistXZ;       // ... und waagerecht weiter als das von der Kamera (Chunk camChunkX/Z) entfernt
+    uint pad1, pad2;
 };
 [[vk::push_constant]] ConstantBuffer<CullPush> gCull;
 
@@ -181,8 +184,13 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
             continue; // Schatten-Cull: Wasser/Glas werfen keine Schatten; Phase 1: nur Opakes
 
         // Meshlet-Feinfilter: Frustum + Backface-Ebene (+ Hi-Z in Phase 2)
+        // Abdeckung nur fuer den Teil ueber minTopY pruefen (darunter ist das Meshlet ohnehin nicht gefragt)
+        float3 bmn = mh.boundCenter - mh.boundRadius, bmx = mh.boundCenter + mh.boundRadius;
+        bmn.y = max(bmn.y, gCull.minTopY);
         bool pass = sphereFrustum(mh.boundCenter, mh.boundRadius, f.frustumPlanes)
-                 && !nearCoveredBox(mh.boundCenter - mh.boundRadius, mh.boundCenter + mh.boundRadius);
+                 && bmx.y >= gCull.minTopY
+                 && length(mh.boundCenter.xz - (float2(gCull.camChunkX, gCull.camChunkZ) + 0.5) * 16.0) - mh.boundRadius <= gCull.maxDistXZ
+                 && !nearCoveredBox(bmn, bmx);
         if (pass && dot(mh.coneAxis, mh.coneAxis) > 0.5)
             pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff - 0.01;
         if (phase == 1)

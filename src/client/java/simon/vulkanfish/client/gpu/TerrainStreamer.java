@@ -98,7 +98,15 @@ public final class TerrainStreamer {
         int quads;
         boolean applied;   // aktuelle (evtl. kurz veraltete) Geometrie liegt auf der GPU
         boolean overflow;  // GPU-Scene war voll -> Vanilla zeichnet diese Section
+        boolean shadowOnly; // nur als Schattenwerfer geladen, von Vanilla (noch) nie als sichtbar gemeldet
     }
+
+    // Schattenwerfer: Vanillas Sichtbarkeitssuche meldet aus einer Hoehle nie die Oberflaeche darueber
+    // (Fels verdeckt sie) -> ohne diese Sections faellt die Sonne durch den Fels. Im Radius der
+    // Schattenkarte deshalb alle nicht leeren Sections ab knapp unter der Kamera laden.
+    static final int SHADOW_RADIUS = (int) Math.ceil(FrameDataCapture.SHADOW_DISTANCE / 16.0) + 1;
+    static final int SHADOW_BELOW = 2; // Sections unter der Kamera (Sonne kommt von oben)
+    private static final int SHADOW_PRIO = 16 * 1024; // hinter sichtbare Sections derselben Entfernung
 
     private final NativePassRunner runnerRef;
 
@@ -203,7 +211,8 @@ public final class TerrainStreamer {
             framesSinceScan = 0;
             lastCameraSection = camSection;
             lastRadius = radius;
-            scan(camSX, camSZ, radius);
+            scan(camSX, camSY, camSZ, radius);
+            syncShadowCasters(camSX, camSY, camSZ, radius);
         }
         schedule(camSX, camSY, camSZ);
     }
@@ -219,11 +228,14 @@ public final class TerrainStreamer {
      * NICHT flaechig: nur was Vanilla je als sichtbar erkannt hat (syncVisible),
      * sonst fuellen unsichtbare Hoehlensysteme die GPU-Scene.
      */
-    private void scan(int camSX, int camSZ, int radius) {
+    private void scan(int camSX, int camSY, int camSZ, int radius) {
         LongArrayList remove = new LongArrayList();
         for (var e : sections.long2ObjectEntrySet()) {
             long key = e.getLongKey();
-            if (!inRadius(key, camSX, camSZ, radius)
+            // Reine Schattenwerfer ausserhalb des Schattenradius (plus Rand gegen Hin-und-her) verwerfen
+            boolean staleShadow = e.getValue().shadowOnly && !e.getValue().pending
+                    && (!inRadius(key, camSX, camSZ, SHADOW_RADIUS + 2) || SectionPos.y(key) < camSY - SHADOW_BELOW - 2);
+            if (staleShadow || !inRadius(key, camSX, camSZ, radius)
                     || level.getChunkSource().getChunk(SectionPos.x(key), SectionPos.z(key), ChunkStatus.FULL, false) == null) {
                 remove.add(key);
             }
@@ -257,6 +269,42 @@ public final class TerrainStreamer {
         }
     }
 
+    /** Nicht leere Sections im Schattenradius ab knapp unter der Kamera als Schattenwerfer laden. */
+    private void syncShadowCasters(int camSX, int camSY, int camSZ, int radius) {
+        if (Boolean.getBoolean("vulkanfish.noShadowCasters")) return; // Messung
+        int r = Math.min(SHADOW_RADIUS, radius);
+        int minSY = level.getMinSectionY();
+        int maxSY = level.getMaxSectionY();
+        int sy0 = Math.max(minSY, camSY - SHADOW_BELOW);
+        var src = level.getChunkSource();
+        for (int dz = -r; dz <= r; dz++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (dx * dx + dz * dz > r * r) continue;
+                int cx = camSX + dx, cz = camSZ + dz;
+                LevelChunk chunk = src.getChunk(cx, cz, ChunkStatus.FULL, false);
+                if (chunk == null) continue;
+                // wie syncVisible: erst mit geladenen Nachbarn (sonst Kanten gegen "Luft")
+                if (src.getChunk(cx + 1, cz, ChunkStatus.FULL, false) == null || src.getChunk(cx - 1, cz, ChunkStatus.FULL, false) == null
+                        || src.getChunk(cx, cz + 1, ChunkStatus.FULL, false) == null || src.getChunk(cx, cz - 1, ChunkStatus.FULL, false) == null) continue;
+                for (int sy = sy0; sy <= maxSY; sy++) {
+                    long key = SectionPos.asLong(cx, sy, cz);
+                    if (sections.containsKey(key) || airVisible.contains(key)) continue;
+                    if (chunk.getSection(sy - minSY).hasOnlyAir()) {
+                        // nichts zu zeichnen: fuers LOD abgedeckt (sonst kommen dessen Schatten-Meshlets ueber
+                        // der Oberflaeche durch den Cull); bekommt sie Bloecke, oeffnet der Dirty-Pfad sie wieder
+                        airVisible.add(key);
+                        setCovered(key, true);
+                        continue;
+                    }
+                    Section s = new Section();
+                    s.shadowOnly = true;
+                    sections.put(key, s);
+                    wantMesh.add(key);
+                }
+            }
+        }
+    }
+
     /** Vanillas aktuelle Sichtbarkeitsliste (Frustum + Occlusion-BFS) -> zu meshende Sections. */
     private void syncVisible(Minecraft mc, int camSX, int camSZ, int radius) {
         var visible = mc.levelRenderer.visibleSections();
@@ -264,7 +312,14 @@ public final class TerrainStreamer {
         int maxSY = level.getMaxSectionY();
         for (int i = 0; i < visible.size(); i++) {
             long key = visible.get(i).getSectionNode();
-            if (sections.containsKey(key) || airVisible.contains(key) || !inRadius(key, camSX, camSZ, radius)) continue;
+            Section known = sections.get(key);
+            if (known != null && known.shadowOnly) {
+                // jetzt auch sichtbar: normale Section (bleibt bis zum Sichtradius, zaehlt fuers LOD)
+                known.shadowOnly = false;
+                setBit(trackedBits, key, true);
+                continue;
+            }
+            if (known != null || airVisible.contains(key) || !inRadius(key, camSX, camSZ, radius)) continue;
             int sy = SectionPos.y(key);
             if (sy < minSY || sy > maxSY) continue;
             int cx = SectionPos.x(key), cz = SectionPos.z(key);
@@ -309,7 +364,7 @@ public final class TerrainStreamer {
             if (!s.pending && frameCounter - s.lastScheduledFrame >= REMESH_MIN_FRAMES) candidates.add(key);
         }
         if (candidates.isEmpty()) return;
-        candidates.unstableSort((a, b) -> Integer.compare(dist2(a, camSX, camSY, camSZ), dist2(b, camSX, camSY, camSZ)));
+        candidates.unstableSort((a, b) -> Integer.compare(prio(a, camSX, camSY, camSZ), prio(b, camSX, camSY, camSZ)));
         RenderRegionCache cache = new RenderRegionCache();
         int gen = generation;
         BlockStateModelSet models = modelSet;
@@ -323,7 +378,7 @@ public final class TerrainStreamer {
             s.lastScheduledFrame = frameCounter;
             wantMesh.remove(key);
             jobsInFlight.incrementAndGet();
-            WorkerPool.submit(WorkerPool.PRIO_SECTION + dist2(key, camSX, camSY, camSZ), () -> {
+            WorkerPool.submit(WorkerPool.PRIO_SECTION + prio(key, camSX, camSY, camSZ), () -> {
                 try {
                     done.add(mesher(models).mesh(region, key, gen, version));
                 } catch (Throwable t) {
@@ -350,6 +405,12 @@ public final class TerrainStreamer {
             meshers.set(m);
         }
         return m;
+    }
+
+    /** Meshing-Reihenfolge: sichtbare Sections vor reinen Schattenwerfern gleicher Entfernung. */
+    private int prio(long key, int cx, int cy, int cz) {
+        Section s = sections.get(key);
+        return dist2(key, cx, cy, cz) + (s != null && s.shadowOnly ? SHADOW_PRIO : 0);
     }
 
     /**

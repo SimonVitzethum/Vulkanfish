@@ -889,6 +889,9 @@ public final class NativePassRunner {
     private boolean lodMaskPending;
     private long layoutLod;
     private long pipeLod;
+    private long pipeLodShadow; // Fernfeld in die Schattenkarte (wo das Nahfeld nichts zeichnet)
+    private static final boolean NO_LOD_SHADOW = Boolean.getBoolean("vulkanfish.noLodShadow"); // Messung
+    private Buf lodVisShadow, lodShadowIndirect;
     private Buf visBits;        // pro Meshlet-Slot: im letzten Frame sichtbar (Zwei-Phasen-Culling)
     private Buf meshIndirect2;
     private boolean visBitsCleared;
@@ -1229,7 +1232,7 @@ public final class NativePassRunner {
         // + 13S Sichtbarkeits-Bits, push 4 (Phase: 0 Schatten, 1/2 Kamera-Zwei-Phasen)
         layoutCull = pipelineLayout(arena,
                 setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, UB}, {3, SI}, {4, SM}, {5, SB}, {6, SB}, {7, SB}, {8, SB},
-                        {9, SB}, {10, SB}, {11, SB}, {12, SB}, {13, SB}, {14, SB}}, C), C, 16);
+                        {9, SB}, {10, SB}, {11, SB}, {12, SB}, {13, SB}, {14, SB}}, C), C, 32);
         pipeCull = computePipe(arena, layoutCull, module(arena, loader, "meshletCull"));
         // Terrain (G-Buffer + Schatten teilen das Layout): 0S 1S 2S 3U 4I 5SMP 6S
         layoutTerrain = pipelineLayout(arena,
@@ -1502,6 +1505,10 @@ public final class NativePassRunner {
             pipeLod = meshPipe(arena, layoutLod, module(arena, loader, "lodMesh"), module(arena, loader, "lodFrag"),
                     2, FMT_GBUF, VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false);
             if (pipeLod == 0L) throw new IllegalStateException("LOD-Pipeline fehlgeschlagen");
+            lodVisShadow = makeBuffer(arena, meshlets * 4, stor, dev);
+            lodShadowIndirect = makeBuffer(arena, 16, stor | ind | dst, dev);
+            pipeLodShadow = meshPipe(arena, layoutLod, module(arena, loader, "lodShadowMesh"), module(arena, loader, "lodShadowFrag"),
+                    0, FMT_GBUF, VK10.VK_COMPARE_OP_LESS_OR_EQUAL, true);
             if (MeshShaderSupport.float64Enabled()) {
                 int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
                 int[][] lb = new int[24][];
@@ -1931,7 +1938,14 @@ public final class NativePassRunner {
             // Phase 1: im Vorframe Sichtbares (ohne Hi-Z), Schatten-Cull wie gehabt
             recordCull(arena, cmd, uniforms[slot], visMeshlets, visMeshletCount, meshIndirect, 1);
             recordLodCull(arena, cmd, uniforms[slot], lodVis1, lodIndirect1, 1);
-            if (shadows) recordCull(arena, cmd, shadowUniforms[slot], visShadow, visShadowCount, shadowIndirect, 0);
+            if (shadows) {
+                recordCull(arena, cmd, shadowUniforms[slot], visShadow, visShadowCount, shadowIndirect, 0);
+                // Fernfeld als Schattenwerfer nur ab der Hoehe, ab der das Nahfeld sie selbst laedt
+                // (TerrainStreamer.syncShadowCasters): dort fuellt es Luecken, bis die Sections gemesht sind
+                float shadowFloor = (Math.floorDiv((int) Math.floor(d.camY()), 16) - TerrainStreamer.SHADOW_BELOW) * 16f;
+                if (pipeLodShadow != 0L && !NO_LOD_SHADOW) recordLodCull(arena, cmd, shadowUniforms[slot], lodVisShadow, lodShadowIndirect, 0,
+                        shadowFloor, lodMaskData != null ? TerrainStreamer.SHADOW_RADIUS * 16f : 1e30f); // Mitte = Masken-Chunk
+            }
             barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                     VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK10.VK_ACCESS_SHADER_READ_BIT);
             stamp(cmd, q0 + 4);
@@ -2393,6 +2407,7 @@ public final class NativePassRunner {
             VK10.vkCmdUpdateBuffer(cmd, lodIndirect1.buffer(), 0, arena.ints(0, 1, 1));
             VK10.vkCmdUpdateBuffer(cmd, lodIndirect2.buffer(), 0, arena.ints(0, 1, 1));
             VK10.vkCmdUpdateBuffer(cmd, lodWaterIndirect.buffer(), 0, arena.ints(0, 1, 1));
+            VK10.vkCmdUpdateBuffer(cmd, lodShadowIndirect.buffer(), 0, arena.ints(0, 4, 1)); // y: 4 Gruppen je Meshlet (lodShadowMesh)
             VK10.vkCmdUpdateBuffer(cmd, lodClusterTotal.buffer(), 0, arena.ints(lodClusterCount));
             if (lodMaskPending && lodMaskData != null) {
                 lodMaskPending = false;
@@ -2437,24 +2452,35 @@ public final class NativePassRunner {
                 W.sb(5, meshletTotal), W.sb(6, visible), W.sb(7, counter), W.sb(8, indirect),
                 W.sb(9, visWater), W.sb(10, waterIndirect), W.sb(11, visTrans), W.sb(12, transIndirect),
                 W.sb(13, visBits), W.sb(14, lodNearMask != null ? lodNearMask : visBits));
-        VK10.vkCmdPushConstants(cmd, layoutCull, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, arena.ints(phase, 0, 0, 0));
+        VK10.vkCmdPushConstants(cmd, layoutCull, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                arena.ints(phase, 0, 0, 0, Float.floatToRawIntBits(-1e30f), Float.floatToRawIntBits(1e30f), 0, 0));
         // Eine Workgroup pro belegtem Cluster (hierarchischer Cull)
         VK10.vkCmdDispatch(cmd, clusterCount, 1, 1);
     }
 
-    /** Fernfeld-Cull: gleiche Pipeline (Zwei-Phasen, Hi-Z), eigene Hierarchie und Listen. */
+    /** Fernfeld-Cull: gleiche Pipeline (Zwei-Phasen, Hi-Z), eigene Hierarchie und Listen; Phase 0 = Schattenkarte. */
     private void recordLodCull(Arena arena, VkCommandBuffer cmd, Buf ubo, Buf visible, Buf indirect, int phase) {
+        recordLodCull(arena, cmd, ubo, visible, indirect, phase, -1e30f, 1e30f);
+    }
+
+    /**
+     * minTopY / maxDistXZ: Meshlets ganz darunter bzw. waagerecht weiter weg verwerfen (Schatten: nur
+     * wo das Nahfeld selbst Schattenwerfer laedt, siehe TerrainStreamer.syncShadowCasters).
+     */
+    private void recordLodCull(Arena arena, VkCommandBuffer cmd, Buf ubo, Buf visible, Buf indirect, int phase,
+                               float minTopY, float maxDistXZ) {
         if (!lodReady || lodClusterCount == 0) return;
         VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeCull);
         push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutCull,
                 W.sb(0, lodClusters), W.sb(1, lodMeshlets), W.ub(2, ubo),
                 W.si(3, hiz.view()), W.sm(4, linearSampler),
-                W.sb(5, lodClusterTotal), W.sb(6, visible), W.sb(7, visMeshletCount), W.sb(8, indirect),
+                W.sb(5, lodClusterTotal), W.sb(6, visible), W.sb(7, phase == 0 ? visShadowCount : visMeshletCount), W.sb(8, indirect),
                 W.sb(9, lodVisWater), W.sb(10, lodWaterIndirect), W.sb(11, visTrans), W.sb(12, transIndirect),
                 W.sb(13, lodVisBits), W.sb(14, lodNearMask));
         VK10.vkCmdPushConstants(cmd, layoutCull, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0,
                 // nearMode: Bit 0 an, darueber minSectionY + 2048
-                arena.ints(phase, lodMaskData != null ? 1 | ((lodMaskMinSY + 2048) << 1) : 0, lodMaskCamX, lodMaskCamZ));
+                arena.ints(phase, lodMaskData != null ? 1 | ((lodMaskMinSY + 2048) << 1) : 0, lodMaskCamX, lodMaskCamZ,
+                        Float.floatToRawIntBits(minTopY), Float.floatToRawIntBits(maxDistXZ), 0, 0));
         VK10.vkCmdDispatch(cmd, lodClusterCount, 1, 1);
     }
 
@@ -2490,6 +2516,17 @@ public final class NativePassRunner {
                 W.sb(0, meshlets), W.sb(1, verts), W.sb(2, tris), W.ub(3, shadowUniforms[slot]),
                 W.si(4, atlasView), W.sm(5, atlasSampler), W.sb(6, visShadow));
         EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, shadowIndirect.buffer(), 0L, 1, 12);
+        if (lodReady && lodClusterCount > 0 && pipeLodShadow != 0L) {
+            // Fernfeld: Sections, die das Nahfeld (noch) nicht hat – z. B. die Oberflaeche ueber einer Hoehle
+            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLodShadow);
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutLod,
+                    W.sb(0, lodMeshlets), W.sb(1, lodQuads), W.sb(2, lodNearMask), W.ub(3, shadowUniforms[slot]),
+                    W.si(4, atlasView), W.sm(5, atlasSampler), W.sb(6, lodVisShadow), W.sb(7, lodTexTable), W.sb(8, lodDrawBiome));
+            ByteBuffer pc = arena.malloc(16);
+            pc.putInt(0, lodMaskCamX).putInt(4, lodMaskCamZ).putInt(8, lodMaskData != null ? 1 : 0).putInt(12, lodMaskMinSY);
+            VK10.vkCmdPushConstants(cmd, layoutLod, EXTMeshShader.VK_SHADER_STAGE_MESH_BIT_EXT | VK10.VK_SHADER_STAGE_FRAGMENT_BIT, 0, pc);
+            EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodShadowIndirect.buffer(), 0L, 1, 12);
+        }
         recordEntityShadows(arena, cmd, slot, entityBatches);
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
