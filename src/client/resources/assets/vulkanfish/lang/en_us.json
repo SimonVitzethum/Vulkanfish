@@ -28,9 +28,13 @@
   "options.vulkanfish.ms": "%s: %s ms",
   "options.vulkanfish.seed.header": "Server %s",
   "options.vulkanfish.seed": "World Seed",
-  "options.vulkanfish.seed.hint": "World seed (number)",
+  "options.vulkanfish.seed.hint": "World seed (number or text)",
   "options.vulkanfish.seed.apply": "Apply Seed",
   "options.vulkanfish.seed.saved": "Seed saved - the far field is generated if it matches the server.",
   "options.vulkanfish.seed.none": "No seed: far field only from visited chunks.",
-  "options.vulkanfish.seed.invalid": "Not a valid number."
+  "options.vulkanfish.seed.invalid": "Not a valid number.",
+  "options.vulkanfish.seed.match": "Seed matches the server – the far field will be generated.",
+  "options.vulkanfish.seed.mismatch": "Seed does NOT match the server (wrong seed, or the server hides it).",
+  "manageServer.vulkanfish.seed.hint": "World seed for the LOD (optional)",
+  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: with the server's world seed the LOD also generates areas you have never visited. Number or text as in world creation; empty = visited chunks only."
 }

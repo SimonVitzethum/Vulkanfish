@@ -104,6 +104,13 @@ public final class WorldgenSource {
         return forSeed(client, seed, serverData.ip);
     }
 
+    /** Passt der Seed zum Hash, den der Server schickt? null = keine Welt geladen. */
+    public static Boolean seedMatches(ClientLevel client, long seed) {
+        if (client == null) return null;
+        long serverHash = ((simon.vulkanfish.client.mixin.BiomeManagerAccessor) client.getBiomeManager()).vulkanfish$zoomSeed();
+        return BiomeManager.obfuscateSeed(seed) == serverHash;
+    }
+
     private static WorldgenSource forSeed(ClientLevel client, long seed, String serverName) {
         long serverHash = ((simon.vulkanfish.client.mixin.BiomeManagerAccessor) client.getBiomeManager()).vulkanfish$zoomSeed();
         if (BiomeManager.obfuscateSeed(seed) != serverHash) {

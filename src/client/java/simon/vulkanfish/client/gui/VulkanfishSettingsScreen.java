@@ -41,7 +41,9 @@ public final class VulkanfishSettingsScreen extends OptionsSubScreen {
         Long known = VulkanfishSettings.seedFor(address);
         if (known != null) box.setValue(Long.toString(known));
         box.setHint(Component.translatable("options.vulkanfish.seed.hint"));
-        StringWidget status = new StringWidget(Component.translatable(known != null ? "options.vulkanfish.seed.saved" : "options.vulkanfish.seed.none"), font);
+        Boolean match = known != null ? simon.vulkanfish.client.lod.gen.WorldgenSource.seedMatches(mc.level, known) : null;
+        StringWidget status = new StringWidget(Component.translatable(known == null ? "options.vulkanfish.seed.none"
+                : match == null ? "options.vulkanfish.seed.saved" : match ? "options.vulkanfish.seed.match" : "options.vulkanfish.seed.mismatch"), font);
         Button apply = Button.builder(Component.translatable("options.vulkanfish.seed.apply"), b -> {
             String v = box.getValue().trim();
             if (v.isEmpty()) {
@@ -49,15 +51,15 @@ public final class VulkanfishSettingsScreen extends OptionsSubScreen {
                 status.setMessage(Component.translatable("options.vulkanfish.seed.none"));
                 return;
             }
-            try {
-                VulkanfishSettings.setSeed(address, Long.parseLong(v));
-                status.setMessage(Component.translatable("options.vulkanfish.seed.saved"));
-                // Fernfeld neu aufsetzen (Seed wird gegen den Hash des Servers geprueft)
-                var lod = simon.vulkanfish.client.lod.LodManager.instance();
-                if (lod != null) lod.reloadWorldgen();
-            } catch (NumberFormatException e) {
-                status.setMessage(Component.translatable("options.vulkanfish.seed.invalid"));
-            }
+            long seed = VulkanfishSettings.parseSeed(v);
+            VulkanfishSettings.setSeed(address, seed);
+            // Sofort pruefen: der Server schickt einen Hash des Seeds
+            Boolean ok = simon.vulkanfish.client.lod.gen.WorldgenSource.seedMatches(mc.level, seed);
+            status.setMessage(Component.translatable(ok == null ? "options.vulkanfish.seed.saved"
+                    : ok ? "options.vulkanfish.seed.match" : "options.vulkanfish.seed.mismatch"));
+            // Fernfeld neu aufsetzen
+            var lod = simon.vulkanfish.client.lod.LodManager.instance();
+            if (lod != null) lod.reloadWorldgen();
         }).width(150).build();
         list.addSmall(box, apply);
         list.addSmall(status, null);

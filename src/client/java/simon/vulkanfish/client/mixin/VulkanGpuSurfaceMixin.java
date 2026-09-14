@@ -37,6 +37,7 @@ public class VulkanGpuSurfaceMixin {
 
     @Inject(method = "blitFromTexture", at = @At("HEAD"), cancellable = true)
     private void vulkanfish$blit(CommandEncoderBackend encoder, GpuTextureView view, CallbackInfo ci) {
+        simon.vulkanfish.client.gpu.VulkanfishRenderer.beforeSwapchainBlit();
         FgPresenter fp = FgPresenter.instance();
         if (fp == null || !fp.frameActive()) return;
         fp.onBlit(encoder, view);

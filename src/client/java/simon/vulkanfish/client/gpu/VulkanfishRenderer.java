@@ -64,6 +64,18 @@ public final class VulkanfishRenderer {
     private boolean shutDown;
     private NativePassRunner.FrameUniformsData pendingFrame;
     private long pendingScreenshot = -1;
+    /** Selbsttest: Screenshot inkl. GUI (beim Blit auf die Swapchain statt am Ende des Level-Renderns). */
+    private static volatile long pendingGuiScreenshot = -1;
+
+    /** Aus VulkanGpuSurfaceMixin vor dem Blit: das Hauptziel enthaelt jetzt auch die GUI. */
+    public static void beforeSwapchainBlit() {
+        long tag = pendingGuiScreenshot;
+        if (tag < 0) return;
+        pendingGuiScreenshot = -1;
+        Minecraft mc = Minecraft.getInstance();
+        net.minecraft.client.Screenshot.grab(mc.gameDirectory, mc.gameRenderer.mainRenderTarget(),
+                msg -> LOG.info("[vulkanfish] Selbsttest-Screenshot {}: {}", tag, msg.getString()));
+    }
     // CPU-Zeit unseres Codes pro Frame (Render-Thread), Log alle 10 s
     private long cpuNanosStart, cpuNanosTerrain, cpuNanosWater, cpuNanosTaa;
     private int cpuFrames;
@@ -170,6 +182,18 @@ public final class VulkanfishRenderer {
             if (mc.mouseHandler.isMouseGrabbed()) mc.mouseHandler.releaseMouse();
             // Ohne Eingaben drosselt Minecraft nach einer Weile auf 30 FPS (AFK) – lange Tests aktiv halten
             mc.getFramerateLimitTracker().onInputReceived();
+        }
+        if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.uiTest")) {
+            // Menues mit Vulkanfish-Zusaetzen: Server bearbeiten (Seed-Feld), Vulkanfish-Einstellungen
+            Minecraft mc = Minecraft.getInstance();
+            if (f == 400) mc.gui.setScreen(new net.minecraft.client.gui.screens.ManageServerScreen(null,
+                    net.minecraft.network.chat.Component.literal("Server bearbeiten"), ok -> {},
+                    new net.minecraft.client.multiplayer.ServerData("Test", "example.org",
+                            net.minecraft.client.multiplayer.ServerData.Type.OTHER)));
+            if (f == 460) pendingGuiScreenshot = f;
+            if (f == 480) mc.gui.setScreen(new simon.vulkanfish.client.gui.VulkanfishSettingsScreen(null, mc.options));
+            if (f == 540) pendingGuiScreenshot = f;
+            if (f == 560) mc.gui.setScreen(null);
         }
         if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.hizTest")) {
             // A/B: gleiches Standbild mit/ohne Hi-Z -> Differenz = faelschlich weggecullte Geometrie
@@ -670,8 +694,11 @@ public final class VulkanfishRenderer {
         }
         if (f == 1480 && fgTestMode != null) System.setProperty("vulkanfish.frameGen", fgTestMode.isEmpty() ? "2" : fgTestMode);
         if (f == 1550) LOG.info("[vulkanfish] FG-Test nach Umschalten: {}", fp.stats());
+        if (f == 1560) Minecraft.getInstance().debugEntries.setOverlayVisible(true); // F3 mit DLSS-FPS
+        if (f == 1590) pendingGuiScreenshot = f;
+        if (f == 1595) Minecraft.getInstance().debugEntries.setOverlayVisible(false);
         if (f == 1400) {
-            LOG.info("[vulkanfish] FG-Test Takt: {} | {} FPS, Oberflaeche {}, Drossel {}", fp.stats(), Minecraft.getInstance().getFps(),
+            LOG.info("[vulkanfish] FG-Test Takt: {} | {} FPS (angezeigt {}), Oberflaeche {}, Drossel {}", fp.stats(), Minecraft.getInstance().getFps(), fp.displayedFps(),
                     Minecraft.getInstance().windowSurface().currentConfiguration(),
                     Minecraft.getInstance().getFramerateLimitTracker().getThrottleReason());
             FgPresenter.dumpPackets = 2;

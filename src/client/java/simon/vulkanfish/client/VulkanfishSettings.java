@@ -150,6 +150,20 @@ public final class VulkanfishSettings {
         save();
     }
 
+    /**
+     * Seed wie bei der Welterstellung: Zahl oder Text (Text -> String.hashCode, wie Vanilla);
+     * leer -> null (kein Seed).
+     */
+    public static Long parseSeed(String text) {
+        String v = text == null ? "" : text.trim();
+        if (v.isEmpty()) return null;
+        try {
+            return Long.parseLong(v);
+        } catch (NumberFormatException e) {
+            return (long) v.hashCode();
+        }
+    }
+
     /** Seed fuer eine Serveradresse (Kleinschreibung, ohne Standardport), sonst null. */
     public static Long seedFor(String serverAddress) {
         return SEEDS.get(serverKey(serverAddress));

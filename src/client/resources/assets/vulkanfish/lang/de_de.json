@@ -28,9 +28,13 @@
   "options.vulkanfish.ms": "%s: %s ms",
   "options.vulkanfish.seed.header": "Server %s",
   "options.vulkanfish.seed": "Welt-Seed",
-  "options.vulkanfish.seed.hint": "Welt-Seed (Zahl)",
+  "options.vulkanfish.seed.hint": "Welt-Seed (Zahl oder Text)",
   "options.vulkanfish.seed.apply": "Seed übernehmen",
   "options.vulkanfish.seed.saved": "Seed gespeichert – das Fernfeld wird generiert, wenn er zum Server passt.",
   "options.vulkanfish.seed.none": "Kein Seed: Fernfeld nur aus besuchten Chunks.",
-  "options.vulkanfish.seed.invalid": "Keine gültige Zahl."
+  "options.vulkanfish.seed.invalid": "Ungültiger Seed.",
+  "options.vulkanfish.seed.match": "Seed passt zum Server – das Fernfeld wird generiert.",
+  "options.vulkanfish.seed.mismatch": "Seed passt NICHT zum Server (falscher Seed oder der Server verschleiert ihn).",
+  "manageServer.vulkanfish.seed.hint": "Welt-Seed für das LOD (optional)",
+  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: mit dem Welt-Seed des Servers erzeugt das LOD auch Gegenden, die du noch nie besucht hast. Zahl oder Text wie bei der Welterstellung; leer = nur besuchte Chunks."
 }

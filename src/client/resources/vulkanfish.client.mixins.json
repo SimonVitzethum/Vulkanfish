@@ -15,6 +15,7 @@
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"LightmapExtractorMixin",
+		"ManageServerScreenMixin",
 		"PreparedFrameInvoker",
 		"PreparedFrameMixin",
 		"RenderSystemMixin",
