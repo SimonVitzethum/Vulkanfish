@@ -5,6 +5,7 @@
 	"client": [
 		"BiomeManagerAccessor",
 		"CameraMixin",
+		"DebugEntryFpsMixin",
 		"ChunkMapInvoker",
 		"ChunkSectionsToRenderMixin",
 		"ClientChunkCacheMixin",

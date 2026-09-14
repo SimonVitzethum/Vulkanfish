@@ -113,6 +113,11 @@ public final class FgPresenter {
     private final long presentTimeline;       // Present-Thread signalisiert "Slot gelesen"
     private long presentTimelineValue;
     private volatile int presentedFrames, droppedFrames;
+    // Angezeigte Bilder je Sekunde (F3), vom Present-Thread gezaehlt
+    private long fpsWindowNs;
+    private int fpsCount;
+    private volatile int displayedFps;
+    private volatile long lastDisplayNs;
     // Takt-Statistik (Present-Thread): Abstaende aufeinanderfolgender Presents
     private long lastPresentNs;
     private double pacingSum, pacingSq;
@@ -459,7 +464,16 @@ public final class FgPresenter {
                         pacingSq += dt * dt;
                         pacingN++;
                     }
-                    if (ok) lastPresentNs = now;
+                    if (ok) {
+                        lastPresentNs = now;
+                        fpsCount++;
+                        lastDisplayNs = now;
+                        if (now - fpsWindowNs >= 1_000_000_000L) {
+                            displayedFps = (int) Math.round(fpsCount * 1e9 / Math.max(now - fpsWindowNs, 1L));
+                            fpsCount = 0;
+                            fpsWindowNs = now;
+                        }
+                    }
                     if (!ok) {
                         // Paket abgebrochen: Slot erst frei, wenn die schon abgeschickten Kopien durch sind
                         try (Arena a = new Arena()) {
@@ -705,6 +719,16 @@ public final class FgPresenter {
         LongBuffer p = a.mallocLong(1);
         NativePassRunner.check(VK10.vkCreateSemaphore(dev, VkSemaphoreCreateInfo.calloc(a.stack()).sType$Default(), null, p), "fgSemaphore");
         return p.get(0);
+    }
+
+    /** Angezeigte FPS inkl. erzeugter Bilder; -1, wenn die FG gerade nicht praesentiert (F3). */
+    public int displayedFps() {
+        return frameActive && System.nanoTime() - lastDisplayNs < 500_000_000L ? displayedFps : -1;
+    }
+
+    /** Aktueller Faktor (angezeigte Bilder je gerendertem). */
+    public int currentMultiplier() {
+        return Math.max(1, packetImages);
     }
 
     public String stats() {
