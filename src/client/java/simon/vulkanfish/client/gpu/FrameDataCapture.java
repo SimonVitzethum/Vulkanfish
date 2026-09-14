@@ -95,6 +95,11 @@ public final class FrameDataCapture {
         return haveProjection;
     }
 
+    /** Kopie der ungejitterten Level-Projektion (DLSS Frame Generation). */
+    public static Matrix4f levelProjectionUnjittered() {
+        return new Matrix4f(LEVEL_PROJECTION_UNJITTERED);
+    }
+
     /** m11 der Level-Projektion (= 1 / tan(fovY/2)), fuer die Pixelgroesse des LOD. */
     public static float projectionM11() {
         return haveProjection ? LEVEL_PROJECTION_UNJITTERED.m11() : 1.0f;

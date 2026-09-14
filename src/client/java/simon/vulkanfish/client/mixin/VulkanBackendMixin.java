@@ -18,6 +18,15 @@ import simon.vulkanfish.client.gpu.MeshShaderSupport;
  */
 @Mixin(VulkanBackend.class)
 public class VulkanBackendMixin {
+    /** DLSS Frame Generation: eigene Present-Queue in Mojangs Grafik-Familie. */
+    @com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation(
+            method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
+            at = @At(value = "INVOKE", target = "Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;queueFamilyCreateInfoMap()Lit/unimi/dsi/fastutil/ints/Int2IntMap;"))
+    private static it.unimi.dsi.fastutil.ints.Int2IntMap vulkanfish$presentQueue(VulkanPhysicalDevice physicalDevice,
+            com.llamalad7.mixinextras.injector.wrapoperation.Operation<it.unimi.dsi.fastutil.ints.Int2IntMap> original) {
+        return simon.vulkanfish.client.gpu.NgxBridge.withPresentQueue(original.call(physicalDevice), physicalDevice);
+    }
+
     @Inject(method = "createDevice(Ljava/util/Collection;Lcom/mojang/blaze3d/vulkan/VulkanPhysicalDevice;Ljava/util/Set;)Lorg/lwjgl/vulkan/VkDevice;",
             at = @At("HEAD"))
     private static void vulkanfish$enableMeshShaders(Collection<String> deviceExtensions,

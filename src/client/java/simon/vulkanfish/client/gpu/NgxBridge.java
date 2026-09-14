@@ -10,7 +10,6 @@ import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collection;
-import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -28,7 +27,9 @@ public final class NgxBridge {
 
     private static final Path DIR = System.getProperty("vulkanfish.ngxDir") != null ? Path.of(System.getProperty("vulkanfish.ngxDir")) : null;
 
-    private final MethodHandle init, error, dlaa, shutdown;
+    private final MethodHandle init, error, dlaa, fg, shutdown;
+    private final Arena params = Arena.ofShared();
+    private final MemorySegment fgParams;
     private int features = -1;
     private int multiFrameMax;
 
@@ -42,7 +43,10 @@ public final class NgxBridge {
         error = l.downcallHandle(lib.find("vfngx_error").orElseThrow(), FunctionDescriptor.of(ValueLayout.ADDRESS));
         dlaa = l.downcallHandle(lib.find("vfngx_dlaa").orElseThrow(), FunctionDescriptor.of(I,
                 J, I, I, J, J, I, J, J, I, J, J, I, J, J, I, F, F, I));
+        fg = l.downcallHandle(lib.find("vfngx_fg").orElseThrow(), FunctionDescriptor.of(I,
+                J, I, I, J, J, I, J, J, I, J, J, I, J, J, I, J, J, I, ValueLayout.ADDRESS, I, I, I));
         shutdown = l.downcallHandle(lib.find("vfngx_shutdown").orElseThrow(), FunctionDescriptor.ofVoid());
+        fgParams = params.allocate(ValueLayout.JAVA_FLOAT, 50);
     }
 
     /** Liegt der Shim bereit (vor der Geraeteerstellung: sollen die NGX-Extensions dazu)? */
@@ -57,6 +61,32 @@ public final class NgxBridge {
             if (physicalDevice.hasDeviceExtension(e)) extensions.add(e);
             else LOG.info("[vulkanfish] DLSS: Extension {} fehlt", e);
         }
+    }
+
+    /** Eigene Queue fuer den Present-Thread der Frame Generation: {Familie, Index} oder null. */
+    static volatile int[] presentQueue;
+
+    /**
+     * Beim Device-Anlegen: eine zusaetzliche Queue in Mojangs Grafik-Familie anfordern, damit die
+     * FG-Kopien + Presents nicht hinter dem naechsten Frame auf Mojangs Queue warten.
+     */
+    public static it.unimi.dsi.fastutil.ints.Int2IntMap withPresentQueue(it.unimi.dsi.fastutil.ints.Int2IntMap map,
+                                                                        com.mojang.blaze3d.vulkan.VulkanPhysicalDevice physicalDevice) {
+        var gfx = physicalDevice.graphicsQueueFamilyAndIndex();
+        if (!present() || gfx == null) return map;
+        int family = gfx.leftInt();
+        int used = map.getOrDefault(family, 0);
+        try (org.lwjgl.system.MemoryStack stack = org.lwjgl.system.MemoryStack.stackPush()) {
+            java.nio.IntBuffer n = stack.mallocInt(1);
+            org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice.vkPhysicalDevice(), n, null);
+            var props = org.lwjgl.vulkan.VkQueueFamilyProperties.malloc(n.get(0), stack);
+            org.lwjgl.vulkan.VK10.vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice.vkPhysicalDevice(), n, props);
+            if (family >= n.get(0) || props.get(family).queueCount() <= used) return map;
+        }
+        var out = new it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap(map);
+        out.put(family, used + 1);
+        presentQueue = new int[]{family, used};
+        return out;
     }
 
     /** Shim laden und NGX auf Mojangs Geraet initialisieren; null, wenn nicht moeglich. */
@@ -115,6 +145,22 @@ public final class NgxBridge {
         }
     }
 
+    /**
+     * Ein Zwischenbild der DLSS Frame Generation (frameIndex 1..frameCount) in den offenen Command-Buffer.
+     * camera: 50 floats (siehe vfngx.cpp fgImpl). hudImg 0 = ohne Szene-ohne-GUI. @return 0 = ok
+     */
+    public int frameGen(long cmd, int w, int h, long bbImg, long bbView, int bbFmt, long depthImg, long depthView, int depthFmt,
+                        long mvImg, long mvView, int mvFmt, long hudImg, long hudView, int hudFmt, long outImg, long outView, int outFmt,
+                        float[] camera, int frameIndex, int frameCount, boolean reset) {
+        try {
+            MemorySegment.copy(camera, 0, fgParams, ValueLayout.JAVA_FLOAT, 0, 50);
+            return (int) fg.invokeExact(cmd, w, h, bbImg, bbView, bbFmt, depthImg, depthView, depthFmt, mvImg, mvView, mvFmt,
+                    hudImg, hudView, hudFmt, outImg, outView, outFmt, fgParams, frameIndex, frameCount, reset ? 1 : 0);
+        } catch (Throwable t) {
+            return -100;
+        }
+    }
+
     public void shutdown() {
         try {
             shutdown.invokeExact();
@@ -122,8 +168,4 @@ public final class NgxBridge {
         }
     }
 
-    /** Einstellung erlaubt es (Features kommen erst nach dem Init). */
-    static Set<String> deviceExtensions() {
-        return Set.of(DEVICE_EXTENSIONS);
-    }
 }

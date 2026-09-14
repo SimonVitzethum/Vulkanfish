@@ -7,6 +7,8 @@
 #include "nvsdk_ngx.h"
 #include "nvsdk_ngx_helpers.h"
 #include "nvsdk_ngx_helpers_vk.h"
+#include "nvsdk_ngx_helpers_dlssg_vk.h"
+#include "nvsdk_ngx_params_dlssg.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -73,6 +75,11 @@ NVSDK_NGX_Parameter* gDlaaParams = nullptr;
 NVSDK_NGX_Handle* gDlaa = nullptr;
 uint32_t gDlaaW = 0, gDlaaH = 0;
 char gLastError[256] = {0};
+// DLSS Frame Generation (DLSS 4, bis 6x): Handle lazy beim ersten Aufruf, neu bei Groessen-/Formatwechsel
+NVSDK_NGX_Parameter* gFgParams = nullptr;
+NVSDK_NGX_Handle* gFg = nullptr;
+uint32_t gFgW = 0, gFgH = 0;
+int gFgFormat = 0;
 
 void NVSDK_CONV ngxLog(const char* msg, NVSDK_NGX_Logging_Level, NVSDK_NGX_Feature) {
     std::fprintf(stderr, "[vulkanfish-ngx] %s", msg);
@@ -207,8 +214,121 @@ static int dlaaImpl(uint64_t cmd, uint32_t w, uint32_t h,
     return 0;
 }
 
+// Ein generiertes Bild (Index frameIndex von frameCount, 1-basiert) in den offenen Command-Buffer.
+// p: 16 viewToClip, 16 clipToPrevClip (beide zeilenweise fuer Zeilenvektoren, ohne Jitter),
+// 2 Jitter (Pixel), 3 Kamera-Position, 3 rechts, 3 oben, 3 vorn, near, far, FOV (rad), Seitenverhaeltnis.
+static int fgImpl(uint64_t cmd, uint32_t w, uint32_t h,
+                  uint64_t bbImage, uint64_t bbView, int bbFormat,
+                  uint64_t depthImage, uint64_t depthView, int depthFormat,
+                  uint64_t mvImage, uint64_t mvView, int mvFormat,
+                  uint64_t hudImage, uint64_t hudView, int hudFormat,
+                  uint64_t outImage, uint64_t outView, int outFormat,
+                  const float* p, int frameIndex, int frameCount, int reset) {
+    if (!gInit) return -1;
+    VkCommandBuffer cb = (VkCommandBuffer)cmd;
+    if (gFg && (gFgW != w || gFgH != h || gFgFormat != bbFormat)) {
+        NVSDK_NGX_VULKAN_ReleaseFeature(gFg); // Aufrufer wartet vorher auf die GPU
+        gFg = nullptr;
+    }
+    if (!gFg) {
+        if (!gFgParams && NVSDK_NGX_FAILED(NVSDK_NGX_VULKAN_AllocateParameters(&gFgParams))) return -2;
+        NVSDK_NGX_DLSSG_Create_Params cp;
+        std::memset(&cp, 0, sizeof(cp));
+        cp.Width = w;
+        cp.Height = h;
+        cp.NativeBackbufferFormat = (unsigned int)bbFormat; // Vulkan: VkFormat-Wert
+        cp.RenderWidth = w;
+        cp.RenderHeight = h;
+        cp.DynamicResolutionScaling = false;
+        NVSDK_NGX_Result r = NGX_VK_CREATE_DLSSG(cb, 1, 1, &gFg, gFgParams, &cp);
+        if (NVSDK_NGX_FAILED(r)) {
+            err("CreateFeature DLSS-G", r);
+            gFg = nullptr;
+            return -3;
+        }
+        gFgW = w;
+        gFgH = h;
+        gFgFormat = bbFormat;
+        reset = 1;
+    }
+    NVSDK_NGX_Resource_VK backbuffer = wrap(bbImage, bbView, bbFormat, w, h, false, false);
+    NVSDK_NGX_Resource_VK depth = wrap(depthImage, depthView, depthFormat, w, h, true, false);
+    NVSDK_NGX_Resource_VK mvecs = wrap(mvImage, mvView, mvFormat, w, h, false, false);
+    NVSDK_NGX_Resource_VK hudless = wrap(hudImage, hudView, hudFormat, w, h, false, false);
+    NVSDK_NGX_Resource_VK out = wrap(outImage, outView, outFormat, w, h, false, true);
+    NVSDK_NGX_VK_DLSSG_Eval_Params ep;
+    std::memset(&ep, 0, sizeof(ep));
+    ep.pBackbuffer = &backbuffer;
+    ep.pMVecs = &mvecs;
+    ep.pDepth = &depth;
+    if (hudImage) ep.pHudless = &hudless; // Szene ohne GUI: NGX haelt die GUI ruhig
+    ep.pOutputInterpFrame = &out;
+    NVSDK_NGX_DLSSG_Opt_Eval_Params opt{}; // Wert-Init behaelt die Header-Vorgaben
+    opt.multiFrameCount = (unsigned)frameCount;
+    opt.multiFrameIndex = (unsigned)frameIndex;
+    float v2c[16], c2v[16], c2p[16], p2c[16], lens[16];
+    std::memcpy(v2c, p, sizeof(v2c));
+    std::memcpy(c2p, p + 16, sizeof(c2p));
+    auto inv = [](const float* m, float* o) { // 4x4-Inverse (Kofaktoren)
+        float t[16];
+        t[0] = m[5]*m[10]*m[15] - m[5]*m[11]*m[14] - m[9]*m[6]*m[15] + m[9]*m[7]*m[14] + m[13]*m[6]*m[11] - m[13]*m[7]*m[10];
+        t[4] = -m[4]*m[10]*m[15] + m[4]*m[11]*m[14] + m[8]*m[6]*m[15] - m[8]*m[7]*m[14] - m[12]*m[6]*m[11] + m[12]*m[7]*m[10];
+        t[8] = m[4]*m[9]*m[15] - m[4]*m[11]*m[13] - m[8]*m[5]*m[15] + m[8]*m[7]*m[13] + m[12]*m[5]*m[11] - m[12]*m[7]*m[9];
+        t[12] = -m[4]*m[9]*m[14] + m[4]*m[10]*m[13] + m[8]*m[5]*m[14] - m[8]*m[6]*m[13] - m[12]*m[5]*m[10] + m[12]*m[6]*m[9];
+        t[1] = -m[1]*m[10]*m[15] + m[1]*m[11]*m[14] + m[9]*m[2]*m[15] - m[9]*m[3]*m[14] - m[13]*m[2]*m[11] + m[13]*m[3]*m[10];
+        t[5] = m[0]*m[10]*m[15] - m[0]*m[11]*m[14] - m[8]*m[2]*m[15] + m[8]*m[3]*m[14] + m[12]*m[2]*m[11] - m[12]*m[3]*m[10];
+        t[9] = -m[0]*m[9]*m[15] + m[0]*m[11]*m[13] + m[8]*m[1]*m[15] - m[8]*m[3]*m[13] - m[12]*m[1]*m[11] + m[12]*m[3]*m[9];
+        t[13] = m[0]*m[9]*m[14] - m[0]*m[10]*m[13] - m[8]*m[1]*m[14] + m[8]*m[2]*m[13] + m[12]*m[1]*m[10] - m[12]*m[2]*m[9];
+        t[2] = m[1]*m[6]*m[15] - m[1]*m[7]*m[14] - m[5]*m[2]*m[15] + m[5]*m[3]*m[14] + m[13]*m[2]*m[7] - m[13]*m[3]*m[6];
+        t[6] = -m[0]*m[6]*m[15] + m[0]*m[7]*m[14] + m[4]*m[2]*m[15] - m[4]*m[3]*m[14] - m[12]*m[2]*m[7] + m[12]*m[3]*m[6];
+        t[10] = m[0]*m[5]*m[15] - m[0]*m[7]*m[13] - m[4]*m[1]*m[15] + m[4]*m[3]*m[13] + m[12]*m[1]*m[7] - m[12]*m[3]*m[5];
+        t[14] = -m[0]*m[5]*m[14] + m[0]*m[6]*m[13] + m[4]*m[1]*m[14] - m[4]*m[2]*m[13] - m[12]*m[1]*m[6] + m[12]*m[2]*m[5];
+        t[3] = -m[1]*m[6]*m[11] + m[1]*m[7]*m[10] + m[5]*m[2]*m[11] - m[5]*m[3]*m[10] - m[9]*m[2]*m[7] + m[9]*m[3]*m[6];
+        t[7] = m[0]*m[6]*m[11] - m[0]*m[7]*m[10] - m[4]*m[2]*m[11] + m[4]*m[3]*m[10] + m[8]*m[2]*m[7] - m[8]*m[3]*m[6];
+        t[11] = -m[0]*m[5]*m[11] + m[0]*m[7]*m[9] + m[4]*m[1]*m[11] - m[4]*m[3]*m[9] - m[8]*m[1]*m[7] + m[8]*m[3]*m[5];
+        t[15] = m[0]*m[5]*m[10] - m[0]*m[6]*m[9] - m[4]*m[1]*m[10] + m[4]*m[2]*m[9] + m[8]*m[1]*m[6] - m[8]*m[2]*m[5];
+        float det = m[0]*t[0] + m[1]*t[4] + m[2]*t[8] + m[3]*t[12];
+        for (int i = 0; i < 16; ++i) o[i] = det != 0.0f ? t[i] / det : (i % 5 == 0 ? 1.0f : 0.0f);
+    };
+    inv(v2c, c2v);
+    inv(c2p, p2c);
+    for (int i = 0; i < 16; ++i) lens[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+    std::memcpy(opt.cameraViewToClip, v2c, sizeof(v2c));
+    std::memcpy(opt.clipToCameraView, c2v, sizeof(c2v));
+    std::memcpy(opt.clipToLensClip, lens, sizeof(lens));
+    std::memcpy(opt.clipToPrevClip, c2p, sizeof(c2p));
+    std::memcpy(opt.prevClipToClip, p2c, sizeof(p2c));
+    opt.jitterOffset[0] = p[32];
+    opt.jitterOffset[1] = p[33];
+    opt.mvecScale[0] = 1.0f; // Bewegungsvektoren in Pixeln (aktuell -> vorher), wie beim DLAA
+    opt.mvecScale[1] = 1.0f;
+    for (int i = 0; i < 3; ++i) {
+        opt.cameraPos[i] = p[34 + i];
+        opt.cameraRight[i] = p[37 + i];
+        opt.cameraUp[i] = p[40 + i];
+        opt.cameraFwd[i] = p[43 + i];
+    }
+    opt.cameraNear = p[46];
+    opt.cameraFar = p[47];
+    opt.cameraFOV = p[48];
+    opt.cameraAspectRatio = p[49];
+    opt.cameraMotionIncluded = true;
+    opt.depthInverted = true; // Reverse-Z
+    opt.reset = reset ? true : false;
+    NVSDK_NGX_Result r = NGX_VK_EVALUATE_DLSSG(cb, gFg, gFgParams, &ep, &opt);
+    if (NVSDK_NGX_FAILED(r)) {
+        err("EvaluateFeature DLSS-G", r);
+        return -4;
+    }
+    return 0;
+}
+
 static void shutdownImpl() {
     if (!gInit) return;
+    if (gFg) NVSDK_NGX_VULKAN_ReleaseFeature(gFg);
+    if (gFgParams) NVSDK_NGX_VULKAN_DestroyParameters(gFgParams);
+    gFg = nullptr;
+    gFgParams = nullptr;
     if (gDlaa) NVSDK_NGX_VULKAN_ReleaseFeature(gDlaa);
     if (gDlaaParams) NVSDK_NGX_VULKAN_DestroyParameters(gDlaaParams);
     NVSDK_NGX_VULKAN_Shutdown1(gDevice);
@@ -234,6 +354,21 @@ int vfngx_dlaa(uint64_t cmd, uint32_t w, uint32_t h,
     onBigStack([&] {
         r = dlaaImpl(cmd, w, h, colorImage, colorView, colorFormat, depthImage, depthView, depthFormat,
                      mvImage, mvView, mvFormat, outImage, outView, outFormat, jitterX, jitterY, reset);
+    });
+    return r;
+}
+
+int vfngx_fg(uint64_t cmd, uint32_t w, uint32_t h,
+             uint64_t bbImage, uint64_t bbView, int bbFormat,
+             uint64_t depthImage, uint64_t depthView, int depthFormat,
+             uint64_t mvImage, uint64_t mvView, int mvFormat,
+             uint64_t hudImage, uint64_t hudView, int hudFormat,
+             uint64_t outImage, uint64_t outView, int outFormat,
+             const float* params, int frameIndex, int frameCount, int reset) {
+    int r = -1;
+    onBigStack([&] {
+        r = fgImpl(cmd, w, h, bbImage, bbView, bbFormat, depthImage, depthView, depthFormat, mvImage, mvView, mvFormat,
+                   hudImage, hudView, hudFormat, outImage, outView, outFormat, params, frameIndex, frameCount, reset);
     });
     return r;
 }

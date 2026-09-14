@@ -181,6 +181,11 @@ public final class NativePassRunner {
     private NgxBridge ngx;
     private long layoutMotion, pipeMotion;
     private Img motion;
+    // DLSS Frame Generation: Tiefe + Szene ohne Hand/GUI, am Ende von renderTaa gesichert
+    private Img fgDepth, fgHud;
+    private boolean fgCaptured, fgJump;
+    private float[] fgCamera;
+    private double[] fgAnchor;
     private boolean dlaaFailed, dlaaHistory;
     /** Selbsttest/Einstellung: DLAA statt TAA, solange NGX verfuegbar. */
     public static volatile boolean dlaaWanted = !"false".equals(System.getProperty("vulkanfish.dlss"));
@@ -974,7 +979,7 @@ public final class NativePassRunner {
 
     // allocation = VmaAllocation (Mojangs Allocator)
     private record Buf(long buffer, long allocation, long size, long mapped) {}
-    private record Img(long image, long allocation, long view, int w, int h, int mips, int format) {}
+    record Img(long image, long allocation, long view, int w, int h, int mips, int format) {}
 
     private static final int SB = VK10.VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     private static final int UB = VK10.VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -1684,7 +1689,7 @@ public final class NativePassRunner {
 
     // ---------- Images ----------
 
-    private Img makeImage(Arena arena, int w, int h, int mips, int format, int usage, int aspect) {
+    Img makeImage(Arena arena, int w, int h, int mips, int format, int usage, int aspect) {
         VkImageCreateInfo ci = VkImageCreateInfo.calloc(arena.stack()).sType$Default()
                 .imageType(VK10.VK_IMAGE_TYPE_2D).format(format).mipLevels(mips).arrayLayers(1)
                 .samples(VK10.VK_SAMPLE_COUNT_1_BIT).tiling(VK10.VK_IMAGE_TILING_OPTIMAL).usage(usage)
@@ -1751,15 +1756,19 @@ public final class NativePassRunner {
             sceneDepth = makeImage(arena, w, h, 1, FMT_DEPTH, sampled | dst, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
             history[0] = makeImage(arena, w, h, 1, FMT_HDR, sampled | stor, ca);
             history[1] = makeImage(arena, w, h, 1, FMT_HDR, sampled | stor, ca);
-            taaOut = makeImage(arena, w, h, 1, FMT_LDR, stor | src, ca);
+            taaOut = makeImage(arena, w, h, 1, FMT_LDR, stor | src | dst, ca); // dst: NGX leert die DLAA-Ausgabe beim Reset
             if (pipeMotion != 0L) motion = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R16G16_SFLOAT, stor | sampled, ca);
+            if (FgPresenter.instance() != null) {
+                fgDepth = makeImage(arena, w, h, 1, FMT_DEPTH, sampled | dst, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
+                fgHud = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
+            }
         }
         dlaaHistory = false;
         imagesInitialized = false;
         historyValid = false;
     }
 
-    private void destroyImg(Img img) {
+    void destroyImg(Img img) {
         if (img == null) return;
         VK10.vkDestroyImageView(dev, img.view(), null);
         Vma.vmaDestroyImage(vma, img.image(), img.allocation());
@@ -1771,8 +1780,10 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, fgHud}) destroyImg(img);
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = motion = null;
+        fgDepth = fgHud = null;
+        fgCaptured = false;
         oitHead = oitFront = oitFrontDepth = null;
         if (oitNodes != null) destroyBuffer(oitNodes);
         oitNodes = null;
@@ -2213,6 +2224,7 @@ public final class NativePassRunner {
         int slot = waterSlot;
         waterSlot = -1;
         FrameUniformsData d = frameData;
+        fgCaptured = false;
         if (!ready || slot < 0 || d == null) return;
         if (!(main.getColorTexture() instanceof VulkanGpuTexture mainColor)
                 || !(main.getColorTextureView() instanceof VulkanGpuTextureView colorView)
@@ -2233,8 +2245,10 @@ public final class NativePassRunner {
             ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
             ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
             putMat(ub, 144, d.viewProjUnjittered());
+            boolean fg = fgWanted(main);
+            if (fg) fgCamera = fgCameraParams(d, prevVp);
             if (dlaaActive()) {
-                if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null)) {
+                if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null, fg)) {
                     prevProjRot = d.projRotUnjittered();
                     prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
                     historyValid = false; // TAA-History ist veraltet, falls spaeter zurueckgeschaltet wird
@@ -2261,6 +2275,15 @@ public final class NativePassRunner {
                     VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_SHADER_READ_BIT,
                     VK10.VK_ACCESS_TRANSFER_READ_BIT | VK10.VK_ACCESS_TRANSFER_WRITE_BIT);
             blit(arena, cmd, taaOut.image(), mainColor.vkImage(), width, height);
+            if (fg) {
+                // Bewegungsvektoren braucht sonst nur DLAA
+                fullBarrier(arena, cmd);
+                VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotion);
+                push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutMotion,
+                        W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]));
+                VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+                fgCapture(arena, cmd, main);
+            }
             stamp(cmd, q + 1);
             fullBarrier(arena, cmd);
             check(VK10.vkEndCommandBuffer(cmd), "endTaa");
@@ -2288,6 +2311,7 @@ public final class NativePassRunner {
         int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
         layoutMotion = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, ST}, {2, UB}}, C), 0, 0);
         pipeMotion = computePipe(arena, layoutMotion, module(arena, loader, "motionMain"));
+        FgPresenter.create(this, ngx);
     }
 
     private boolean dlaaActive() {
@@ -2299,7 +2323,7 @@ public final class NativePassRunner {
     }
 
     /** Vulkan-Format von Mojangs Zielen (nur die hier vorkommenden). */
-    private static int vkFormat(com.mojang.blaze3d.textures.GpuTexture t) {
+    static int vkFormat(com.mojang.blaze3d.textures.GpuTexture t) {
         return switch (t.getFormat().name()) {
             case "D32_FLOAT" -> VK10.VK_FORMAT_D32_SFLOAT;
             case "RGBA16_FLOAT" -> VK10.VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -2312,7 +2336,7 @@ public final class NativePassRunner {
      * -> taaOut -> Main-Target. Uniforms stehen schon in taaUniforms[slot]. @return false: TAA nehmen
      */
     private boolean recordDlaa(Arena arena, int slot, VulkanGpuTexture mainColor, VulkanGpuTextureView colorView,
-                               RenderTarget main, VulkanGpuTextureView depthView, boolean haveHistory) {
+                               RenderTarget main, VulkanGpuTextureView depthView, boolean haveHistory, boolean fg) {
         if (!(main.getDepthTexture() instanceof VulkanGpuTexture mainDepth)) return false;
         VkCommandBuffer cmd = taaCmds[slot];
         check(VK10.vkResetCommandBuffer(cmd, 0), "resetDlaa");
@@ -2342,6 +2366,7 @@ public final class NativePassRunner {
         }
         fullBarrier(arena, cmd);
         blit(arena, cmd, taaOut.image(), mainColor.vkImage(), width, height);
+        if (fg) fgCapture(arena, cmd, main);
         stamp(cmd, q + 1);
         fullBarrier(arena, cmd);
         check(VK10.vkEndCommandBuffer(cmd), "endDlaa");
@@ -2351,6 +2376,97 @@ public final class NativePassRunner {
         slotValue[slot] = timelineValue;
         dlaaHistory = true;
         return true;
+    }
+
+    // ---------- DLSS 4: Frame Generation (Eingaben fuer FgPresenter) ----------
+
+    /** Eingaben der Frame Generation fuer das zuletzt gerenderte Level-Bild. */
+    public record FgInputs(long depthImage, long depthView, long motionImage, long motionView,
+                           long hudImage, long hudView, float[] camera, boolean reset) {}
+
+    private boolean fgWanted(RenderTarget main) {
+        FgPresenter fp = FgPresenter.instance();
+        return fp != null && fp.frameActive() && pipeMotion != 0L && motion != null && fgDepth != null
+                && main.getDepthTexture() instanceof VulkanGpuTexture;
+    }
+
+    /** Tiefe + Szene (nach AA, vor Hand/GUI) sichern: Mojang leert die Tiefe fuer die Hand. */
+    private void fgCapture(Arena arena, VkCommandBuffer cmd, RenderTarget main) {
+        fullBarrier(arena, cmd);
+        copyDepth(arena, cmd, ((VulkanGpuTexture) main.getDepthTexture()).vkImage(), fgDepth.image());
+        blit(arena, cmd, ((VulkanGpuTexture) main.getColorTexture()).vkImage(), fgHud.image(), width, height);
+        fullBarrier(arena, cmd);
+        fgCaptured = true;
+    }
+
+    /** Vom FgPresenter bei Mojangs Blit (gleicher Frame). null: kein Level-Bild in diesem Frame. */
+    FgInputs fgInputs(int w, int h) {
+        if (!fgCaptured || w != width || h != height || fgCamera == null) return null;
+        fgCaptured = false;
+        boolean reset = fgJump;
+        fgJump = false;
+        return new FgInputs(fgDepth.image(), fgDepth.view(), motion.image(), motion.view(),
+                fgHud.image(), fgHud.view(), fgCamera, reset);
+    }
+
+    /**
+     * Kameradaten fuer NGX (Layout siehe vfngx_fg): JOML column-major == NGX row-major mit
+     * Post-Multiplikation. Alles im relativen Raum dieses Frames; clipToPrevClip ohne Jitter.
+     */
+    private float[] fgCameraParams(FrameUniformsData d, float[] prevVp) {
+        float[] p = new float[50];
+        org.joml.Matrix4f proj = FrameDataCapture.levelProjectionUnjittered();
+        proj.get(p, 0);
+        org.joml.Matrix4f vpUnj = new org.joml.Matrix4f().set(d.viewProjUnjittered());
+        org.joml.Matrix4f c2p = prevVp != null ? new org.joml.Matrix4f().set(prevVp).mul(new org.joml.Matrix4f(vpUnj).invert())
+                : new org.joml.Matrix4f();
+        c2p.get(p, 16);
+        p[32] = FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN;
+        p[33] = FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN;
+        // Position relativ zu einem Anker (float-genau auch bei hohen Koordinaten); Sprung -> Reset
+        double[] prev = prevCamW;
+        boolean jump = prevVp == null || prev == null
+                || Math.abs(d.camWX() - prev[0]) + Math.abs(d.camWY() - prev[1]) + Math.abs(d.camWZ() - prev[2]) > 16.0;
+        if (fgAnchor == null || jump || Math.abs(d.camWX() - fgAnchor[0]) + Math.abs(d.camWZ() - fgAnchor[2]) > 2048.0) {
+            fgAnchor = new double[]{d.camWX(), d.camWY(), d.camWZ()};
+        }
+        fgJump |= jump;
+        p[34] = (float) (d.camWX() - fgAnchor[0]);
+        p[35] = (float) (d.camWY() - fgAnchor[1]);
+        p[36] = (float) (d.camWZ() - fgAnchor[2]);
+        // Blickrichtung: Zeilen der Kamerarotation (rot = proj^-1 * proj * rot)
+        org.joml.Matrix4f rot = new org.joml.Matrix4f(proj).invert().mul(new org.joml.Matrix4f().set(d.projRotUnjittered()));
+        p[37] = rot.m00(); p[38] = rot.m10(); p[39] = rot.m20();
+        p[40] = rot.m01(); p[41] = rot.m11(); p[42] = rot.m21();
+        p[43] = -rot.m02(); p[44] = -rot.m12(); p[45] = -rot.m22();
+        p[46] = 0.05f;
+        p[47] = Math.max(d.renderDistance(), 256f);
+        p[48] = (float) (2.0 * Math.atan(1.0 / proj.m11()));
+        p[49] = proj.m11() / proj.m00();
+        return p;
+    }
+
+    private volatile double spanMsEma;
+
+    /** GPU-Zeit des Level-Renderns (Terrain-Start bis AA-Ende), gleitend; 0 = noch unbekannt. */
+    double gpuSpanMs() {
+        return spanMsEma;
+    }
+
+    VulkanCommandEncoder encoder() {
+        return blaze.commandEncoder();
+    }
+
+    VkDevice device() {
+        return dev;
+    }
+
+    VkQueue graphicsQueue() {
+        return gfxQ;
+    }
+
+    int graphicsQueueFamily() {
+        return gfxFam;
     }
 
     /** Vorzeichen des an DLSS gegebenen Jitters (Selbsttest: -Dvulkanfish.dlssJitterSign=-1). */
@@ -2381,7 +2497,9 @@ public final class NativePassRunner {
                 taaMsSum += Math.max(0, ta.get(1) - ta.get(0)) * timestampPeriodNs / 1_000_000.0;
                 taaSamples++;
                 // Spanne Terrain-Start .. TAA-Ende: enthaelt Vanillas Arbeit dazwischen (Entities, Wolken ...)
-                spanMsSum += Math.max(0, ta.get(1) - ts.get(0)) * timestampPeriodNs / 1_000_000.0;
+                double span = Math.max(0, ta.get(1) - ts.get(0)) * timestampPeriodNs / 1_000_000.0;
+                spanMsSum += span;
+                spanMsEma = spanMsEma == 0.0 ? span : spanMsEma * 0.9 + span * 0.1;
             }
             // Wasser-Pass laeuft nicht in jedem Frame (dann NOT_READY)
             LongBuffer tw = arena.mallocLong(2);
@@ -2498,10 +2616,11 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront, oitFrontDepth, motion}) {
+                oitHead, oitFront, oitFrontDepth, motion, fgHud}) {
             if (img != null) toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
+        if (fgDepth != null) toGeneral(arena, cmd, fgDepth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
         toGeneral(arena, cmd, sceneDepth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
         if (!shadowInitialized) {
             toGeneral(arena, cmd, shadowMap.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -2877,12 +2996,12 @@ public final class NativePassRunner {
         VK10.vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, b, null, null);
     }
 
-    private static void fullBarrier(Arena arena, VkCommandBuffer cmd) {
+    static void fullBarrier(Arena arena, VkCommandBuffer cmd) {
         int rw = VK10.VK_ACCESS_MEMORY_READ_BIT | VK10.VK_ACCESS_MEMORY_WRITE_BIT;
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, rw, rw);
     }
 
-    private static void toGeneral(Arena arena, VkCommandBuffer cmd, long img, int mips, int aspect) {
+    static void toGeneral(Arena arena, VkCommandBuffer cmd, long img, int mips, int aspect) {
         VkImageMemoryBarrier.Buffer b = VkImageMemoryBarrier.calloc(1, arena.stack());
         b.get(0).sType$Default().oldLayout(VK10.VK_IMAGE_LAYOUT_UNDEFINED).newLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
                 .srcQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED).dstQueueFamilyIndex(VK10.VK_QUEUE_FAMILY_IGNORED)
@@ -2893,7 +3012,7 @@ public final class NativePassRunner {
                 0, null, null, b);
     }
 
-    private static void check(int res, String what) {
+    static void check(int res, String what) {
         if (res != VK10.VK_SUCCESS) throw new IllegalStateException(what + " -> VkResult " + res);
     }
 
@@ -2918,6 +3037,11 @@ public final class NativePassRunner {
             default -> "vulkanfish-frame.png";
         };
         waitAll();
+        writePng(src.image(), width, height, name);
+    }
+
+    /** RGBA8-Bild (Layout GENERAL, GPU damit fertig) als PNG; Render-Thread (eigener Befehlspuffer). */
+    void writePng(long srcImage, int width, int height, String name) {
         long bytes = (long) width * height * 4L;
         Buf buf = null;
         long fence = 0L;
@@ -2936,7 +3060,7 @@ public final class NativePassRunner {
             VkBufferImageCopy.Buffer region = VkBufferImageCopy.calloc(1, arena.stack());
             region.get(0).imageSubresource().set(VK10.VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
             region.get(0).imageExtent().set(width, height, 1);
-            VK10.vkCmdCopyImageToBuffer(cmd, src.image(), VK10.VK_IMAGE_LAYOUT_GENERAL, buf.buffer(), region);
+            VK10.vkCmdCopyImageToBuffer(cmd, srcImage, VK10.VK_IMAGE_LAYOUT_GENERAL, buf.buffer(), region);
             // Transfer-Writes fuer den Host sichtbar machen (Fence allein reicht laut Spec nicht)
             barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_HOST_BIT,
                     VK10.VK_ACCESS_TRANSFER_WRITE_BIT, VK10.VK_ACCESS_HOST_READ_BIT);
@@ -2946,7 +3070,12 @@ public final class NativePassRunner {
             fence = pf.get(0);
             VkSubmitInfo.Buffer si = VkSubmitInfo.calloc(1, arena.stack()).sType$Default()
                     .pCommandBuffers(arena.pointers(cmd.address()));
-            check(VK10.vkQueueSubmit(gfxQ, si, fence), "snapSubmit");
+            FgPresenter.QUEUE_LOCK.lock();
+            try {
+                check(VK10.vkQueueSubmit(gfxQ, si, fence), "snapSubmit");
+            } finally {
+                FgPresenter.QUEUE_LOCK.unlock();
+            }
             check(VK10.vkWaitForFences(dev, arena.longs(fence), true, 5_000_000_000L), "snapWait");
 
             ByteBuffer bb = MemoryUtil.memByteBuffer(buf.mapped(), (int) bytes);
@@ -2983,7 +3112,14 @@ public final class NativePassRunner {
     public void destroy() {
         if (dev == null) return;
         ready = false;
-        VK10.vkDeviceWaitIdle(dev);
+        FgPresenter fp = FgPresenter.instance();
+        if (fp != null) fp.destroy();
+        FgPresenter.QUEUE_LOCK.lock();
+        try {
+            VK10.vkDeviceWaitIdle(dev);
+        } finally {
+            FgPresenter.QUEUE_LOCK.unlock();
+        }
         if (ngx != null) ngx.shutdown();
         ngx = null;
         if (rt != null) rt.destroy();

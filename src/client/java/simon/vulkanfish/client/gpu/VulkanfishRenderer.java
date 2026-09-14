@@ -35,6 +35,7 @@ public final class VulkanfishRenderer {
     private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     private static final boolean NEAR_TEST = Boolean.getBoolean("vulkanfish.nearTest");
     private static final boolean SHADOW_TEST = Boolean.getBoolean("vulkanfish.shadowTest");
+    private static final boolean FG_TEST = Boolean.getBoolean("vulkanfish.fgTest");
     private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
@@ -184,6 +185,8 @@ public final class VulkanfishRenderer {
             biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && FG_TEST) {
+            fgTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && NEAR_TEST) {
             nearFieldTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && LOD_RETURN) {
@@ -244,7 +247,8 @@ public final class VulkanfishRenderer {
 
     private void applyLiveSettings() {
         NativePassRunner.rtForceOff = !simon.vulkanfish.client.VulkanfishSettings.raytracing() || Boolean.getBoolean("vulkanfish.rtOff");
-        NativePassRunner.dlaaWanted = simon.vulkanfish.client.VulkanfishSettings.dlss() && !"false".equals(System.getProperty("vulkanfish.dlss"));
+        NativePassRunner.dlaaWanted = simon.vulkanfish.client.VulkanfishSettings.dlss() && !"false".equals(System.getProperty("vulkanfish.dlss"))
+                && !"false".equals(System.getProperty("vulkanfish.dlaa")); // nur DLAA aus (Selbsttest TAA + FG)
         if (lod != null) {
             lod.setDistanceChunks(simon.vulkanfish.client.VulkanfishSettings.lodChunks());
             lod.setPixelError(simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
@@ -587,6 +591,52 @@ public final class VulkanfishRenderer {
         if (f == 1300) FrameDataCapture.testSunAngle = FrameDataCapture.lastSunAngle; // Sonne einfrieren
         if ((f >= 1200 && f < 1208) || (f >= 1400 && f < 1408)) pendingScreenshot = f;
         if (f == 1500 && nativeRunner != null) LOG.info("[vulkanfish] Schattentest Sonne {} Grad", FrameDataCapture.lastSunAngle);
+    }
+
+    /**
+     * DLSS-FG-Selbsttest (-Dvulkanfish.fgTest, dazu -Dvulkanfish.frameGen=N): Kamera ueber Baeumen
+     * dreht gleichmaessig; zwei Pakete (erzeugte + echte Bilder) landen als PNG in run/, dazu die
+     * Takt-Statistik des Present-Threads. -Dvulkanfish.fgYawStep = Grad je Frame. Keine Weltaenderung.
+     */
+    private String fgTestMode;
+
+    private void fgTest(long f) {
+        var player = Minecraft.getInstance().player;
+        var opts = Minecraft.getInstance().options;
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("time set 2500");
+            selfTestCommand("tp @p " + NEAR_X + " 100 " + NEAR_Z + " 0 20");
+            opts.pauseOnLostFocus = false; // sonst liegt das Pausemenue (GUI) ueber den FG-Bildern
+            if (Boolean.getBoolean("vulkanfish.fgNoVsync")) opts.enableVsync().set(false);
+        }
+        if (f == 1500) {
+            opts.pauseOnLostFocus = true;
+            if (Boolean.getBoolean("vulkanfish.fgNoVsync")) opts.enableVsync().set(true);
+        }
+        if (f == 900) selfTestCommand("execute positioned " + NEAR_X + " 0 " + NEAR_Z + " positioned over motion_blocking run tp @p ~ ~12 ~ 0 20");
+        float step = Float.parseFloat(System.getProperty("vulkanfish.fgYawStep", "0.5"));
+        if (f >= 300 && player != null) lockView(player, f > 1000 ? (f - 1000) * step : 0.0f, 20.0f);
+        FgPresenter fp = FgPresenter.instance();
+        if (fp == null) {
+            if (f == 1400) LOG.info("[vulkanfish] FG-Test ohne FG: {} FPS, Oberflaeche {}", Minecraft.getInstance().getFps(),
+                    Minecraft.getInstance().windowSurface().currentConfiguration());
+            return;
+        }
+        if (f == 1100) fp.resetStats();
+        // Umschalten im laufenden Spiel: aus (zurueck zu Mojangs Present) und wieder an
+        if (f == 1450) {
+            fgTestMode = System.getProperty("vulkanfish.frameGen", "");
+            System.setProperty("vulkanfish.frameGen", "1");
+        }
+        if (f == 1480 && fgTestMode != null) System.setProperty("vulkanfish.frameGen", fgTestMode.isEmpty() ? "2" : fgTestMode);
+        if (f == 1550) LOG.info("[vulkanfish] FG-Test nach Umschalten: {}", fp.stats());
+        if (f == 1400) {
+            LOG.info("[vulkanfish] FG-Test Takt: {} | {} FPS, Oberflaeche {}, Drossel {}", fp.stats(), Minecraft.getInstance().getFps(),
+                    Minecraft.getInstance().windowSurface().currentConfiguration(),
+                    Minecraft.getInstance().getFramerateLimitTracker().getThrottleReason());
+            FgPresenter.dumpPackets = 2;
+        }
     }
 
     private volatile net.minecraft.core.BlockPos biomeTestPos;

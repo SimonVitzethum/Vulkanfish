@@ -37,6 +37,15 @@ public final class VulkanfishOptions {
                 VulkanfishSettings.dlss(), VulkanfishSettings::setDlss);
     }
 
+    /** DLSS Frame Generation: aus, 2x..6x. */
+    public static OptionInstance<Integer> frameGeneration() {
+        return new OptionInstance<>("options.vulkanfish.frameGen", tip("options.vulkanfish.frameGen"),
+                (caption, value) -> value <= 1
+                        ? CommonComponents.optionNameValue(caption, CommonComponents.OPTION_OFF)
+                        : Component.translatable("options.vulkanfish.times", caption, value),
+                new OptionInstance.IntRange(1, 6), VulkanfishSettings.frameGeneration(), VulkanfishSettings::setFrameGeneration);
+    }
+
     /** Fernfeld-Radius in Schritten zu 32 Chunks (32..1024). */
     public static OptionInstance<Integer> lodDistance() {
         return new OptionInstance<>("options.vulkanfish.lodDistance", tip("options.vulkanfish.lodDistance"),
