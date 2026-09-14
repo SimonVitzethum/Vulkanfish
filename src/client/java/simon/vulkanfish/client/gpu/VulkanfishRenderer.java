@@ -37,6 +37,7 @@ public final class VulkanfishRenderer {
     private static final boolean SHADOW_TEST = Boolean.getBoolean("vulkanfish.shadowTest");
     private static final boolean FG_TEST = Boolean.getBoolean("vulkanfish.fgTest");
     private static final boolean RR_TEST = Boolean.getBoolean("vulkanfish.rrTest");
+    private static final boolean BOBBY_TEST = Boolean.getBoolean("vulkanfish.bobbyTest");
     private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
@@ -210,6 +211,8 @@ public final class VulkanfishRenderer {
             biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && BOBBY_TEST) {
+            bobbyTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && RR_TEST && TEST_WORLD_EDITS) {
             rrTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && FG_TEST) {
@@ -659,6 +662,28 @@ public final class VulkanfishRenderer {
         if (f == 1520 && Boolean.getBoolean("vulkanfish.rrGuideDump") && nativeRunner != null) nativeRunner.requestSnapshot(3);
         if (f == 1510 && nativeRunner != null)
             LOG.info("[vulkanfish] RR-Test: Ray Reconstruction {}, GPU {}", nativeRunner.rayReconstructionActive(), nativeRunner.passTimings());
+    }
+
+    /**
+     * Bobby-Selbsttest (-Dvulkanfish.bobbyTest, mit Bobby per -Dfabric.addMods und
+     * viewDistanceOverwrite in config/bobby.conf): an einer frischen Stelle Chunks laden, dann
+     * 3000 Bloecke weiter – Bobby speichert die verlassenen Chunks; das Fernfeld soll sie danach als
+     * Quelle "bobby" nutzen (LOD-Statistik im Log). Keine Weltaenderung.
+     */
+    private void bobbyTest(long f) {
+        var player = Minecraft.getInstance().player;
+        int x0 = Integer.getInteger("vulkanfish.bobbyX", 24000);
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p " + x0 + " 180 " + x0 + " 0 30");
+        }
+        if (f == 1300) selfTestCommand("tp @p " + (x0 + 3000) + " 180 " + x0 + " 90 30");
+        if (f >= 300 && player != null) lockView(player, f < 1300 ? 0.0f : 90.0f, 30.0f);
+        if (f == 2400 || f == 3000) {
+            var lod = simon.vulkanfish.client.lod.LodManager.instance();
+            if (lod != null) lod.logStats();
+            pendingScreenshot = f;
+        }
     }
 
     private String fgTestMode;

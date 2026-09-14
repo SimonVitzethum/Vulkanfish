@@ -1378,6 +1378,10 @@ public final class LodManager {
 
     private static final boolean LOG_FAST = Boolean.getBoolean("vulkanfish.lodMove") || Boolean.getBoolean("vulkanfish.lodReturn");
 
+    public void logStats() {
+        log();
+    }
+
     private void log() {
         long now = System.currentTimeMillis();
         if (now - lastLogMs < (LOG_FAST ? 2_000 : 10_000)) return;
