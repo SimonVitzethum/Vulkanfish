@@ -133,7 +133,8 @@ public final class NativePassRunner {
     private static final String[] PASS_NAMES = {"upload", "rt-bau", "hiz", "cull", "schatten", "gbuffer", "licht", "bloom", "final"};
     private static final int TS_TERRAIN = PASS_NAMES.length + 1;
     private static final int TS_PER_FRAME = TS_TERRAIN + 7; // + Wasser-Zwischenstempel (3) // + Wasser/Glas (Start/Ende) + TAA (Start/Ende)
-    private static final int TAA_UBO_BYTES = 208; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS)
+    private static final int TAA_UBO_BYTES = 224; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS) + Entity-Anzahl
+    private static final int MAX_MOVING_ENTITIES = 256;
     /** Periode der gewickelten Weltlage fuer Shader-Rauschen (ein unsichtbarer Sprung alle 4096 Bloecke). */
     private static final int WORLD_WRAP = 4096;
 
@@ -183,6 +184,10 @@ public final class NativePassRunner {
     private Img motion;
     // DLSS Frame Generation: Tiefe + Szene ohne Hand/GUI, am Ende von renderTaa gesichert
     private Img fgDepth, fgHud;
+    // Bewegte Entities fuer die Bewegungsvektoren (je Frame-Slot, 48 Byte je Entity)
+    private final Buf[] entityMotion = new Buf[FRAMES];
+    private float[] entityMotionData = new float[0];
+    private int entityMotionCount;
     // DLSS Ray Reconstruction: Hilfspuffer aus dem G-Buffer (rr_guide.slang)
     private long layoutRrGuide, pipeRrGuide, layoutRrResolve, pipeRrResolve;
     private Img rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut; // rrColor/rrOut: HDR (RR verlangt HDR)
@@ -2260,6 +2265,8 @@ public final class NativePassRunner {
             ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
             ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
             putMat(ub, 144, d.viewProjUnjittered());
+            int moving = writeEntityMotion(slot);
+            ub.putInt(208, moving);
             boolean fg = fgWanted(main);
             if (fg) fgCamera = fgCameraParams(d, prevVp);
             if (dlaaActive()) {
@@ -2295,7 +2302,8 @@ public final class NativePassRunner {
                 fullBarrier(arena, cmd);
                 VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotion);
                 push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutMotion,
-                        W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]));
+                        W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]),
+                        W.si(3, depth.view()), W.sb(4, entityMotion[slot]));
                 VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
                 fgCapture(arena, cmd, main);
             }
@@ -2324,7 +2332,11 @@ public final class NativePassRunner {
         ngx = NgxBridge.create(blaze);
         if (ngx == null || !ngx.has(NgxBridge.FEATURE_DLSS)) return;
         int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
-        layoutMotion = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, ST}, {2, UB}}, C), 0, 0);
+        layoutMotion = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, ST}, {2, UB}, {3, SI}, {4, SB}}, C), 0, 0);
+        for (int i = 0; i < FRAMES; i++) {
+            entityMotion[i] = makeBuffer(arena, MAX_MOVING_ENTITIES * 48L, VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
         pipeMotion = computePipe(arena, layoutMotion, module(arena, loader, "motionMain"));
         if (ngx.has(NgxBridge.FEATURE_RAY_RECONSTRUCTION)) {
             layoutRrGuide = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, SI}, {2, SI}, {3, SI}, {4, SI},
@@ -2373,7 +2385,8 @@ public final class NativePassRunner {
         VK10.vkCmdWriteTimestamp(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, q);
         VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotion);
         push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutMotion,
-                W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]));
+                W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]),
+                W.si(3, depth.view()), W.sb(4, entityMotion[slot]));
         VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
         boolean reset = !dlaaHistory || !haveHistory;
         boolean rr = rrActive();
@@ -2473,6 +2486,23 @@ public final class NativePassRunner {
         return ngx.rayReconstruction(cmd.address(), width, height, img, vw, fmt, m,
                 FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN,
                 reset || !lastWasRr);
+    }
+
+    /**
+     * Bewegte Entities dieses Frames (Render-Thread, vor renderTaa): je 12 floats Box-Min (xyz, pad),
+     * Box-Max, Bewegung seit dem Vorframe – relativ zum Render-Ursprung.
+     */
+    public void setEntityMotion(float[] data, int count) {
+        entityMotionData = data;
+        entityMotionCount = Math.min(count, MAX_MOVING_ENTITIES);
+    }
+
+    private int writeEntityMotion(int slot) {
+        if (entityMotion[slot] == null) return 0;
+        int n = entityMotionCount;
+        if (n > 0) MemoryUtil.memFloatBuffer(entityMotion[slot].mapped(), n * 12).put(0, entityMotionData, 0, n * 12);
+        entityMotionCount = 0;
+        return n;
     }
 
     // ---------- DLSS 4: Frame Generation (Eingaben fuer FgPresenter) ----------

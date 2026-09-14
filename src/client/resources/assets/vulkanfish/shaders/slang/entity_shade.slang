@@ -16,6 +16,13 @@ struct FsIn
     float4 pos : SV_Position;
 };
 
+float3 entityWorldPos(FrameUniforms f, int2 q, float d)
+{
+    float2 uv = (float2(q) + 0.5) / f.screenSize;
+    float4 p = mul(f.invViewProj, float4(uv * 2.0 - 1.0, d, 1.0));
+    return p.xyz / p.w;
+}
+
 // Blend: Ziel * Ausgabe (nur abdunkeln)
 [shader("fragment")]
 float4 entityShadeFrag(FsIn input) : SV_Target0
@@ -30,14 +37,30 @@ float4 entityShadeFrag(FsIn input) : SV_Target0
     float lightFade = length(f.lightDir);
     if (lightFade < 1e-3)
         discard;
-    float2 uv = input.pos.xy / f.screenSize;
-    float4 p = mul(f.invViewProj, float4(uv * 2.0 - 1.0, d, 1.0));
-    float3 wp = p.xyz / p.w;
+    float3 wp = entityWorldPos(f, px, d);
+    // Flaechennormale aus der Tiefe (je Achse der Nachbar mit der kleineren Tiefenaenderung:
+    // an Kanten nicht ueber die Silhouette hinweg)
+    float dxp = gSceneDepth.Load(int3(px + int2(1, 0), 0)), dxm = gSceneDepth.Load(int3(px - int2(1, 0), 0));
+    float dyp = gSceneDepth.Load(int3(px + int2(0, 1), 0)), dym = gSceneDepth.Load(int3(px - int2(0, 1), 0));
+    float3 ddx = abs(dxp - d) < abs(dxm - d) ? entityWorldPos(f, px + int2(1, 0), dxp) - wp : wp - entityWorldPos(f, px - int2(1, 0), dxm);
+    float3 ddy = abs(dyp - d) < abs(dym - d) ? entityWorldPos(f, px + int2(0, 1), dyp) - wp : wp - entityWorldPos(f, px - int2(0, 1), dym);
+    float3 n = normalize(cross(ddx, ddy));
+    if (dot(n, f.camPos - wp) < 0.0)
+        n = -n;
     float3 L = f.lightDir / lightFade;
-    float shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, L, input.pos.xy);
-    float amb = luma(ambientColor(f, float3(0.0, 1.0, 0.0)));
-    float sun = luma(directColor(f)) * lightFade * 0.6; // mittleres N·L einer Entity
-    // Vanilla schattiert Entity-Seiten schon selbst ab -> Sonnenschatten nicht voll draufrechnen
-    float ratio = lerp(1.0, (amb + sun * shadow) / max(amb + sun, 1e-4), 0.8);
+    float ndl = dot(n, L);
+    // Von der Sonne abgewandte Seiten schattiert Vanilla schon selbst (feste Entity-Lichtrichtungen):
+    // nicht noch einmal abdunkeln – das machte Truhen-Fronten fast schwarz
+    if (ndl <= 0.0)
+        discard;
+    float shadow = sampleShadowMap(gShadowMap, gShadowCmp, f, wp, n, input.pos.xy);
+    if (shadow >= 0.999)
+        discard;
+    // Verhaeltnis im Bildraum (nach der Tonemap-Kurve), wie das Terrain im Schatten wirkt
+    float amb = luma(ambientColor(f, n));
+    float sun = luma(directColor(f)) * lightFade * ndl;
+    float lit = luma(tonemap(float3(amb + sun), f.exposure));
+    float shaded = luma(tonemap(float3(amb + sun * shadow), f.exposure));
+    float ratio = shaded / max(lit, 1e-4);
     return float4(ratio, ratio, ratio, 1.0);
 }

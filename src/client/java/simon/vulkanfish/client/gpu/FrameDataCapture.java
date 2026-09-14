@@ -95,6 +95,9 @@ public final class FrameDataCapture {
         return haveProjection;
     }
 
+    /** Letzte Frame-Daten (Lightmap fuer Vanillas Entities: Licht wie im Deferred-Pass). */
+    public static volatile NativePassRunner.FrameUniformsData last;
+
     /** Kopie der ungejitterten Level-Projektion (DLSS Frame Generation). */
     public static Matrix4f levelProjectionUnjittered() {
         return new Matrix4f(LEVEL_PROJECTION_UNJITTERED);
@@ -185,7 +188,7 @@ public final class FrameDataCapture {
             }
             float renderDist = Math.max(mc.options.getEffectiveRenderDistance() * 16.0f, lodFogDistance);
             float time = (float) (((System.nanoTime() - T0) / 1e9) % 3600.0);
-            return new NativePassRunner.FrameUniformsData(
+            return last = new NativePassRunner.FrameUniformsData(
                     vp, invVp, shadowVp,
                     rx, ry, rz, time,
                     new float[]{sunDir.x, sunDir.y, sunDir.z}, dimension == 0 ? vis : 0.0f, lightDir, noon,

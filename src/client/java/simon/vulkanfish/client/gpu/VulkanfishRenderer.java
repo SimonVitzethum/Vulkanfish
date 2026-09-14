@@ -38,6 +38,7 @@ public final class VulkanfishRenderer {
     private static final boolean FG_TEST = Boolean.getBoolean("vulkanfish.fgTest");
     private static final boolean RR_TEST = Boolean.getBoolean("vulkanfish.rrTest");
     private static final boolean BOBBY_TEST = Boolean.getBoolean("vulkanfish.bobbyTest");
+    private static final boolean ENTITY_TEST = Boolean.getBoolean("vulkanfish.entityTest");
     private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
@@ -100,7 +101,8 @@ public final class VulkanfishRenderer {
             return;
         }
         // 2. Mesh-Shader muessen auf MOJANGS Device aktiv sein (VulkanBackendMixin)
-        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading();
+        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading()
+                && !Boolean.getBoolean("vulkanfish.vanillaCompare"); // Selbsttest: Vanillas Bild zum Vergleich
         if (!meshPath) {
             LOG.warn("[vulkanfish] Mesh-Shading auf Mojangs Device nicht aktiv -> Vanilla-Pfad");
             return;
@@ -179,10 +181,14 @@ public final class VulkanfishRenderer {
             Minecraft mc = Minecraft.getInstance();
             var screen = mc.gui.screen();
             if (screen instanceof net.minecraft.client.gui.screens.PauseScreen) mc.gui.setScreen(null);
+            mc.options.pauseOnLostFocus = false; // sonst liegt das Pausemenue in GUI-/FG-Aufnahmen (nicht gespeichert)
             // Maus nicht fangen: echte Mausbewegung wuerde sonst die Testkamera drehen
             if (mc.mouseHandler.isMouseGrabbed()) mc.mouseHandler.releaseMouse();
             // Ohne Eingaben drosselt Minecraft nach einer Weile auf 30 FPS (AFK) – lange Tests aktiv halten
             mc.getFramerateLimitTracker().onInputReceived();
+        }
+        if (EXIT_AFTER_FRAMES > 0 && f == 300 && !FG_TEST && Boolean.getBoolean("vulkanfish.fgNoVsync")) {
+            Minecraft.getInstance().options.enableVsync().set(false); // Frame Generation ohne Anzeige-Takt pruefen
         }
         if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.uiTest")) {
             // Menues mit Vulkanfish-Zusaetzen: Server bearbeiten (Seed-Feld), Vulkanfish-Einstellungen
@@ -211,6 +217,8 @@ public final class VulkanfishRenderer {
             biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && ENTITY_TEST && TEST_WORLD_EDITS) {
+            entityTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && BOBBY_TEST) {
             bobbyTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && RR_TEST && TEST_WORLD_EDITS) {
@@ -252,7 +260,8 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && BIOME_TEST == null && f > 700 && Minecraft.getInstance().player != null) {
+        boolean ownCamera = FG_TEST || RR_TEST || BOBBY_TEST || ENTITY_TEST || Boolean.getBoolean("vulkanfish.uiTest");
+        if (EXIT_AFTER_FRAMES > 0 && !ownCamera && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && BIOME_TEST == null && f > 700 && Minecraft.getInstance().player != null) {
             // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
             var player = Minecraft.getInstance().player;
             if (f >= 1450 && TEST_WORLD_EDITS) {
@@ -289,6 +298,58 @@ public final class VulkanfishRenderer {
         }
     }
 
+    // Render-Position je Entity im Vorframe (fuer die Bewegungsvektoren)
+    private final it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<double[]> prevEntityPos = new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>();
+    private float[] entityMotion = new float[12 * 64];
+    private long entityFrame;
+
+    /**
+     * Bewegte Entities (Render-Position seit dem Vorframe verschoben) als Boxen + Bewegung an den
+     * Bewegungsvektor-Pass: DLAA und Frame Generation behandeln sie sonst wie stehende Kulisse
+     * (Nachziehen, falsch eingefuegte Zwischenbilder).
+     */
+    private void gatherMovingEntities() {
+        Minecraft mc = Minecraft.getInstance();
+        var level = mc.level;
+        var d = FrameDataCapture.last;
+        if (level == null || d == null) return;
+        float pt = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
+        long frame = ++entityFrame;
+        int n = 0;
+        var cam = mc.gameRenderer.mainCamera().position();
+        it.unimi.dsi.fastutil.ints.IntOpenHashSet seen = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
+        for (var e : level.entitiesForRendering()) {
+            if (e == null) continue;
+            var pos = e.getPosition(pt);
+            if (pos.distanceToSqr(cam) > 160.0 * 160.0) continue;
+            int id = e.getId();
+            seen.add(id);
+            double[] prev = prevEntityPos.get(id);
+            double[] now = {pos.x, pos.y, pos.z, frame};
+            prevEntityPos.put(id, now);
+            if (prev == null || prev[3] != frame - 1) continue; // neu oder im Vorframe nicht erfasst
+            double dx = pos.x - prev[0], dy = pos.y - prev[1], dz = pos.z - prev[2];
+            double m2 = dx * dx + dy * dy + dz * dz;
+            if (m2 < 1e-8 || m2 > 64.0) continue; // steht bzw. teleportiert
+            if (n >= 256) continue;
+            if (entityMotion.length < (n + 1) * 12) entityMotion = java.util.Arrays.copyOf(entityMotion, entityMotion.length * 2);
+            var box = e.getBoundingBox().move(pos.subtract(e.position())).inflate(0.3);
+            int o = n * 12;
+            entityMotion[o] = (float) (box.minX - d.originX());
+            entityMotion[o + 1] = (float) (box.minY - d.originY());
+            entityMotion[o + 2] = (float) (box.minZ - d.originZ());
+            entityMotion[o + 4] = (float) (box.maxX - d.originX());
+            entityMotion[o + 5] = (float) (box.maxY - d.originY());
+            entityMotion[o + 6] = (float) (box.maxZ - d.originZ());
+            entityMotion[o + 8] = (float) dx;
+            entityMotion[o + 9] = (float) dy;
+            entityMotion[o + 10] = (float) dz;
+            n++;
+        }
+        if (prevEntityPos.size() > seen.size() + 64) prevEntityPos.keySet().retainAll(seen);
+        nativeRunner.setEntityMotion(entityMotion, n);
+    }
+
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
         if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
@@ -299,6 +360,7 @@ public final class VulkanfishRenderer {
         taaWasOn = taaOn;
         if (initialized && nativeRunner != null && nativeRunner.isReady() && taaOn) {
             long t0 = System.nanoTime();
+            if (!"false".equals(System.getProperty("vulkanfish.entityMV"))) gatherMovingEntities();
             nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget());
             cpuNanosTaa += System.nanoTime() - t0;
         }
@@ -684,6 +746,64 @@ public final class VulkanfishRenderer {
             if (lod != null) lod.logStats();
             pendingScreenshot = f;
         }
+    }
+
+    /**
+     * Entity-Selbsttest (-Dvulkanfish.entityTest, nur Test-Welt): Truhen, Ruestungsstaender,
+     * Dorfbewohner und Schwein (ohne KI) auf Steinboden, halb im Schatten einer Mauer, eine Fackel
+     * daneben. Je 8 Bilder in Folge bei Tag (1500) und Nacht (1800). -Dvulkanfish.entityVanilla
+     * vergleicht mit Vanillas Bild (Renderer aus).
+     */
+    private void entityTest(long f) {
+        var player = Minecraft.getInstance().player;
+        int x = 6000, y = 120, z = 6000;
+        if (f == 300) {
+            selfTestCommand("gamerule minecraft:random_tick_speed 0");
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("gamerule minecraft:advance_weather false");
+            selfTestCommand("weather clear");
+            selfTestCommand("time set 3000");
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p " + x + " " + (y + 4) + " " + (z - 7) + " 0 25");
+        }
+        if (f == 500) {
+            selfTestCommand("fill " + (x - 8) + " " + (y - 1) + " " + (z - 8) + " " + (x + 8) + " " + (y - 1) + " " + (z + 8) + " minecraft:stone");
+            selfTestCommand("fill " + (x - 8) + " " + y + " " + (z - 8) + " " + (x + 8) + " " + (y + 12) + " " + (z + 8) + " minecraft:air");
+            selfTestCommand("fill " + (x + 2) + " " + y + " " + (z - 3) + " " + (x + 2) + " " + (y + 4) + " " + (z + 4) + " minecraft:stone_bricks");
+            selfTestCommand("setblock " + (x - 2) + " " + y + " " + z + " minecraft:chest[facing=north]");
+            selfTestCommand("setblock " + (x + 1) + " " + y + " " + z + " minecraft:chest[facing=north]");
+            selfTestCommand("setblock " + x + " " + y + " " + (z + 2) + " minecraft:ender_chest[facing=north]");
+            selfTestCommand("setblock " + (x - 1) + " " + y + " " + (z - 2) + " minecraft:torch");
+            selfTestCommand("kill @e[type=!minecraft:player]"); // Reste frueherer Laeufe (die Testwelt bleibt bestehen)
+            selfTestCommand("summon minecraft:armor_stand " + (x - 3.5) + " " + y + " " + (z + 2.5) + " {NoGravity:1b,Rotation:[180f,0f]}");
+            String ai = Boolean.getBoolean("vulkanfish.entityAI") ? "" : "NoAI:1b,"; // mit KI: bewegte Entities
+            selfTestCommand("summon minecraft:villager " + (x - 0.5) + " " + y + " " + (z + 4.5) + " {" + ai + "Silent:1b,Rotation:[180f,0f]}");
+            selfTestCommand("summon minecraft:pig " + (x + 1.5) + " " + y + " " + (z + 2.5) + " {" + ai + "Silent:1b,Rotation:[180f,0f]}");
+            selfTestCommand("summon minecraft:zombie " + (x - 4.5) + " " + y + " " + (z + 5.5) + " {" + ai + "Silent:1b,PersistenceRequired:1b,Rotation:[180f,0f]}");
+        }
+        if (f >= 300 && player != null) {
+            if (f > 320) player.setPos(x + 0.5, y + 3.5, z - 6.5);
+            lockView(player, 0.0f, 28.0f);
+        }
+        // Schnell fahrende Lore mit Goldblock (Antriebsschienen) fuer Bewegungsvektor/Frame-Generation
+        if (f == 520) {
+            selfTestCommand("fill " + (x - 8) + " " + (y - 1) + " " + (z + 8) + " " + (x + 8) + " " + (y - 1) + " " + (z + 8) + " minecraft:redstone_block");
+            selfTestCommand("fill " + (x - 8) + " " + y + " " + (z + 8) + " " + (x + 8) + " " + y + " " + (z + 8) + " minecraft:powered_rail[shape=east_west,powered=true]");
+        }
+        if (f == 1300) selfTestCommand("summon minecraft:block_display " + (x - 7) + " " + (y + 1) + " " + (z + 8)
+                + " {Tags:[\"mv\"],teleport_duration:2,block_state:{Name:\"minecraft:gold_block\"}}");
+        String step = System.getProperty("vulkanfish.mvStep", "0.2");
+        if (f > 1300 && f < 1450 && f % 2 == 0) selfTestCommand("execute as @e[tag=mv] at @s run tp @s ~" + step + " ~ ~");
+        if (f >= 1318 && f < 1322) pendingScreenshot = f;
+        if (f == 1336 && FgPresenter.instance() != null) FgPresenter.dumpPackets = 2;
+        if (f == 1450) selfTestCommand("kill @e[tag=mv]");
+        if (f == 1600) selfTestCommand("time set 18000");
+        if (f == 1500 && player != null) {
+            var cam = Minecraft.getInstance().gameRenderer.mainCamera();
+            LOG.info("[vulkanfish] Entitytest Kamera: Spieler {} xRot {} yRot {}, Kamera {} xRot {} yRot {}", player.position(),
+                    player.getXRot(), player.getYRot(), cam.position(), cam.xRot(), cam.yRot());
+        }
+        if ((f >= 1500 && f < 1508) || (f >= 1900 && f < 1908)) pendingScreenshot = f;
     }
 
     private String fgTestMode;
