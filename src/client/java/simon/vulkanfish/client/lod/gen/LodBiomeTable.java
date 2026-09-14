@@ -143,8 +143,29 @@ public final class LodBiomeTable {
         String path = biome.unwrapKey().map(k -> k.identifier().getPath()).orElse("");
         float grass = !path.contains("ocean") || frozen ? 0f : path.contains("warm") || path.contains("lukewarm") ? 0.35f
                 : path.contains("cold") ? 0.15f : path.startsWith("deep") ? 0.25f : 0.3f;
-        table[base + 11] = (frozen ? 1 : 0) | (Math.round(grass * 255f) << 8);
+        table[base + 11] = (frozenModifier(biome.value()) ? 1 : 0) | (Math.round(grass * 255f) << 8);
         table[base + 12] = LodMaterials.of(Blocks.SEAGRASS.defaultBlockState()).id();
+    }
+
+    /**
+     * Nutzt das Biom Vanillas FROZEN-Temperaturmodifikator (gefrorene Ozeane: offene Flecken im Eis)?
+     * ClimateSettings ist paketprivat -> per Reflection; faellt das aus, bleibt der Name als Hinweis.
+     */
+    public static boolean frozenModifierOf(Biome biome) {
+        return frozenModifier(biome);
+    }
+
+    static boolean frozenModifier(Biome biome) {
+        try {
+            java.lang.reflect.Field f = Biome.class.getDeclaredField("climateSettings");
+            f.setAccessible(true);
+            Object climate = f.get(biome);
+            java.lang.reflect.Method m = climate.getClass().getDeclaredMethod("temperatureModifier");
+            m.setAccessible(true);
+            return String.valueOf(m.invoke(climate)).equalsIgnoreCase("frozen");
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** Musterchunk (flach, optional Wasser darueber / Hang) durch Vanillas Oberflaeche, haeufigster oberster Block. */

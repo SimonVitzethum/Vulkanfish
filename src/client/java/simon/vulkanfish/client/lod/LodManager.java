@@ -109,6 +109,9 @@ public final class LodManager {
                 for (Node n : nodes.values()) n.dirty = true;
                 requeueAll = true;
                 LOG.info("[vulkanfish] LOD: GPU-Generierung aktiv – fehlende Chunks entstehen aus Seed + Worldgen der Welt");
+                LOG.info("[vulkanfish] LOD: Vereisungs-Rauschen (Anker + Offset) vs. Vanilla: max. Abweichung {} / {} (bei 0 / 10 Mio.)",
+                        simon.vulkanfish.client.lod.gen.FreezeNoise.selfCheck(-17, 23),
+                        simon.vulkanfish.client.lod.gen.FreezeNoise.selfCheck(10_000_003, -7_000_011));
             }
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] LOD: GPU-Generierung nicht verfuegbar", t);

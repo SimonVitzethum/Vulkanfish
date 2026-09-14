@@ -33,6 +33,14 @@ static const int BT_FIELDS = 13; // low, high, wet, steep, filler, leaves, log, 
 [[vk::binding(18, 0)]] StructuredBuffer<uint2> gRunHead;    // je Saeule: Start, Anzahl
 [[vk::binding(19, 0)]] StructuredBuffer<uint4> gRuns;       // y | len << 16, Material | Biom << 16, Decker, 0
 [[vk::binding(20, 0)]] StructuredBuffer<float4> gClimateNode; // Huellquader-Baum (ClimateTree): je Knoten 4 x float4
+// Vereisung wie Vanilla (FreezeNoise.java): 2D-Simplex mit festen Seeds. Die CPU liefert je Knoten und
+// Term den Anker im schiefen Gitter (Zelle mod 256, Rest) in double, hier kommen die Spalten-Offsets in FP32
+[[vk::binding(24, 0)]] StructuredBuffer<int> gFrzPerm;      // je Tabelle 256 Eintraege, dahinter 12 Gradienten (x, y)
+[[vk::binding(25, 0)]] StructuredBuffer<float4> gFrzTerm;   // je Term: Skala, Wertfaktor, Tabellen-Offset
+[[vk::binding(26, 0)]] StructuredBuffer<float4> gFrzAnchor; // je Knoten und Term: Zelle u, Rest u, Zelle v, Rest v
+static const uint FRZ_TERMS = 6;
+static const float FRZ_F2 = 0.36602540378;
+static const float FRZ_G2 = 0.21132486540;
 
 struct LodGenParams
 {
@@ -71,6 +79,43 @@ struct Ctx
     float3 f;        // Anteile (V)
     uint nL;         // Gitterpunkte je Achse
 };
+
+int frzP(int table, int i)
+{
+    return gFrzPerm[table + (i & 255)];
+}
+
+float frzCorner(int gi, float x, float y)
+{
+    float t = 0.5 - x * x - y * y;
+    if (t < 0.0)
+        return 0.0;
+    t *= t;
+    return t * t * (float(gFrzPerm[5 * 256 + gi * 2]) * x + float(gFrzPerm[5 * 256 + gi * 2 + 1]) * y);
+}
+
+// Ein Rauschterm (eine Oktave) an der Spalte d Bloecke vom Knoten-Anker, wie Vanillas SimplexNoise.getValue
+float frzSimplex(uint job, uint t, float2 d)
+{
+    float4 st = gFrzTerm[t];
+    float4 an = gFrzAnchor[job * FRZ_TERMS + t];
+    float sk = (d.x + d.y) * FRZ_F2;
+    float u = an.y + st.x * (d.x + sk), v = an.w + st.x * (d.y + sk);
+    float fi = floor(u), fj = floor(v);
+    int ii = int(an.x) + int(fi), jj = int(an.z) + int(fj);
+    float fu = u - fi, fv = v - fj;
+    // Rest im ungeschiefen Gitter haengt nur vom Rest im schiefen ab: h = fu - (fu + fv) * G2
+    float g = (fu + fv) * FRZ_G2;
+    float h = fu - g, k = fv - g;
+    int i1 = h > k ? 1 : 0, j1 = 1 - i1;
+    int tb = int(st.z);
+    int gi0 = frzP(tb, ii + frzP(tb, jj)) % 12;
+    int gi1 = frzP(tb, ii + i1 + frzP(tb, jj + j1)) % 12;
+    int gi2 = frzP(tb, ii + 1 + frzP(tb, jj + 1)) % 12;
+    float n = frzCorner(gi0, h, k) + frzCorner(gi1, h - float(i1) + FRZ_G2, k - float(j1) + FRZ_G2)
+            + frzCorner(gi2, h - 1.0 + 2.0 * FRZ_G2, k - 1.0 + 2.0 * FRZ_G2);
+    return 70.0 * n * st.y;
+}
 
 // Geometrie des Knotens
 int stepOf(int level) { return 1 << level; }
@@ -515,8 +560,17 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
             if (m == 0) continue;
             int y = gP.minY + vy * s + s - 1;
             float temp = float(gBiomeTable[tb + 8]) / 1000.0;
-            if ((gBiomeTable[tb + 11] & 1) != 0) temp = min(temp, 0.0);
-            temp -= float(max(0, y - (gP.seaLevel + 17))) * 0.05 / 40.0;
+            float2 d = float2(float(gx) * float(s), float(gz) * float(s));
+            // FROZEN-Modifikator (gefrorene Ozeane): in Flecken 0,2 -> dort offenes Wasser wie bei Vanilla
+            if ((gBiomeTable[tb + 11] & 1) != 0)
+            {
+                float fr = (frzSimplex(job, 0, d) + frzSimplex(job, 1, d) + frzSimplex(job, 2, d)) * 7.0 + frzSimplex(job, 3, d);
+                if (fr < 0.3 && frzSimplex(job, 4, d) < 0.8)
+                    temp = 0.2;
+            }
+            // Hoehenkorrektur wie Biome.getHeightAdjustedTemperature (mit Temperaturrauschen)
+            if (y > gP.seaLevel + 17)
+                temp -= (frzSimplex(job, 5, d) * 8.0 + float(y - (gP.seaLevel + 17))) * 0.05 / 40.0;
             if (temp < 0.15)
             {
                 if (m == gP.waterMat) gGrid[idx] = uint2(uint(gBiomeTable[tb + 10]) | (cell.x & 0xFFFF0000u), 0);

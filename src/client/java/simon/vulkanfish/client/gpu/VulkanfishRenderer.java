@@ -35,6 +35,7 @@ public final class VulkanfishRenderer {
     private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     private static final boolean NEAR_TEST = Boolean.getBoolean("vulkanfish.nearTest");
     private static final boolean SHADOW_TEST = Boolean.getBoolean("vulkanfish.shadowTest");
+    private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
     private static final int NEAR_Z = Integer.getInteger("vulkanfish.nearZ", -69);
@@ -179,6 +180,8 @@ public final class VulkanfishRenderer {
             caveTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
             iceTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && BIOME_TEST != null) {
+            biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && NEAR_TEST) {
@@ -216,7 +219,7 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && f > 700 && Minecraft.getInstance().player != null) {
+        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && BIOME_TEST == null && f > 700 && Minecraft.getInstance().player != null) {
             // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
             var player = Minecraft.getInstance().player;
             if (f >= 1450 && TEST_WORLD_EDITS) {
@@ -461,6 +464,13 @@ public final class VulkanfishRenderer {
             // Schraeger Schlitz zum Himmel (Sonne um 30 Grad nach Sueden geneigt): hier muss sie auf den Boden fallen
             selfTestCommand("fill 3004 39 3004 3012 90 3040 minecraft:air");
             selfTestCommand("fill 3004 91 3004 3012 140 3070 minecraft:air");
+            // Erze im dunklen Boden (neben dem Lichtschlitz): muessen leicht gluehen
+            selfTestCommand("fill 3001 29 3007 3002 29 3008 minecraft:diamond_ore");
+            selfTestCommand("fill 3007 29 3001 3008 29 3002 minecraft:gold_ore");
+            selfTestCommand("fill 3000 29 3004 3001 29 3005 minecraft:redstone_ore");
+            selfTestCommand("fill 3004 29 3000 3005 29 3001 minecraft:deepslate_lapis_ore");
+            selfTestCommand("fill 2998 29 3007 2999 29 3008 minecraft:iron_ore");
+            selfTestCommand("fill 3007 29 2998 3008 29 2999 minecraft:emerald_ore");
         }
         if (f >= 300 && player != null) {
             // ab 950 unter den Schacht blicken: dort muss die Sonne auf den Boden fallen
@@ -576,6 +586,79 @@ public final class VulkanfishRenderer {
         if (f == 1300) FrameDataCapture.testSunAngle = FrameDataCapture.lastSunAngle; // Sonne einfrieren
         if ((f >= 1200 && f < 1208) || (f >= 1400 && f < 1408)) pendingScreenshot = f;
         if (f == 1500 && nativeRunner != null) LOG.info("[vulkanfish] Schattentest Sonne {} Grad", FrameDataCapture.lastSunAngle);
+    }
+
+    private volatile net.minecraft.core.BlockPos biomeTestPos;
+    private long biomeTestFrame;
+
+    /**
+     * Biom-A/B-Selbsttest (-Dvulkanfish.biomeTest=<biom>): naechstes Vorkommen suchen (Server), aus
+     * 110 Bloecken Hoehe schraeg darauf blicken; mit -Dvulkanfish.testRenderDistance=32 bzw. 8 laufen
+     * lassen -> gleiche Kamera einmal Nahfeld, einmal LOD. Keine Weltaenderung.
+     */
+    private void biomeTest(long f) {
+        var player = Minecraft.getInstance().player;
+        Integer rd = Integer.getInteger("vulkanfish.testRenderDistance");
+        if (f == 200 && rd != null) Minecraft.getInstance().options.renderDistance().set(rd);
+        if (f == 250) {
+            var server = Minecraft.getInstance().getSingleplayerServer();
+            if (server != null) server.execute(() -> {
+                var lvl = server.overworld();
+                var found = lvl.findClosestBiome3d(h -> h.unwrapKey().map(k -> k.identifier().getPath().equals(BIOME_TEST)).orElse(false),
+                        new net.minecraft.core.BlockPos(Integer.getInteger("vulkanfish.biomeFromX", 0), 64,
+                                Integer.getInteger("vulkanfish.biomeFromZ", 0)), 12800, 32, 64);
+                if (found != null) {
+                    biomeTestPos = found.getFirst();
+                    LOG.info("[vulkanfish] Biomtest: {} bei {}", BIOME_TEST, biomeTestPos);
+                } else {
+                    LOG.warn("[vulkanfish] Biomtest: {} nicht gefunden", BIOME_TEST);
+                }
+            });
+        }
+        var pos = biomeTestPos;
+        if (pos != null && biomeTestFrame == 0) { // Suche fertig (dauert je nach Entfernung Sekunden)
+            biomeTestFrame = f;
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p " + (pos.getX() - 150) + " 110 " + pos.getZ() + " -90 25");
+            FrameDataCapture.testSunAngle = 25.0f;
+        }
+        if (biomeTestFrame > 0 && player != null) lockView(player, -90.0f, 25.0f);
+        if (biomeTestFrame > 0 && (f == biomeTestFrame + 2400 || f == biomeTestFrame + 2401)) {
+            pendingScreenshot = f;
+            if (f == biomeTestFrame + 2400) {
+                // Pruefung an echten Bloecken: Eis an der Oberflaeche (Server) gegen die LOD-Formel
+                var server = Minecraft.getInstance().getSingleplayerServer();
+                var at = pos;
+                if (server != null) server.execute(() -> {
+                    var lvl = server.overworld();
+                    int n = 0, same = 0, iceV = 0, iceL = 0;
+                    for (int dz = -128; dz < 128; dz += 2) {
+                        for (int dx = -128; dx < 128; dx += 2) {
+                            int x = at.getX() + dx, z = at.getZ() + dz;
+                            if (!lvl.hasChunk(x >> 4, z >> 4)) continue;
+                            var top = lvl.getHeightmapPos(net.minecraft.world.level.levelgen.Heightmap.Types.MOTION_BLOCKING, new net.minecraft.core.BlockPos(x, 0, z)).below();
+                            var st = lvl.getBlockState(top);
+                            boolean ice = st.is(net.minecraft.world.level.block.Blocks.ICE);
+                            if (!ice && !st.is(net.minecraft.world.level.block.Blocks.WATER)) continue; // nur Wasserflaechen
+                            var biome = lvl.getBiome(top);
+                            if (!biome.unwrapKey().map(k -> k.identifier().getPath().contains("frozen_ocean")).orElse(false)) continue;
+                            boolean ours = simon.vulkanfish.client.lod.gen.FreezeNoise.freezes(biome.value().getBaseTemperature(),
+                                    simon.vulkanfish.client.lod.gen.LodBiomeTable.frozenModifierOf(biome.value()), x, top.getY(), z, lvl.getSeaLevel());
+                            n++;
+                            if (ice) iceV++;
+                            if (ours) iceL++;
+                            if (ours == ice) same++;
+                        }
+                    }
+                    LOG.info("[vulkanfish] Biomtest Vereisung: {} Wasserflaechen, Vanilla Eis {}, Formel Eis {}, gleich {} %", n, iceV, iceL,
+                            n > 0 ? String.format("%.1f", same * 100.0 / n) : "-");
+                });
+            }
+            if (f == biomeTestFrame + 2401) {
+                LOG.info("[vulkanfish] Biomtest fertig bei {}", player != null ? player.blockPosition() : null);
+                Minecraft.getInstance().stop();
+            }
+        }
     }
 
     private void iceTest(long f) {

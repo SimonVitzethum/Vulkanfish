@@ -398,7 +398,8 @@ public final class NativePassRunner {
     private Buf lgFlat, lgInterp, lgSamples, lgColumn, lgGrid, lgTop;
     private final Buf[] lgJobs = new Buf[FRAMES], lgMeshJobs = new Buf[FRAMES], lgCounts = new Buf[FRAMES];
     private final Buf[] lgTmp = new Buf[FRAMES], lgCommit = new Buf[FRAMES];
-    private final Buf[] lgRunHead = new Buf[FRAMES], lgRuns = new Buf[FRAMES];
+    private final Buf[] lgRunHead = new Buf[FRAMES], lgRuns = new Buf[FRAMES], lgFrzAnchor = new Buf[FRAMES];
+    private Buf lgFrzPerm, lgFrzTerm; // Vereisungs-Rauschen (FreezeNoise): Permutationen + Gradienten, Terme
     private int lgSamplesPerJob, lgInterpPerJob, lgFlatPerJob, lgGridPerJob;
     private int lgStoneMat, lgWaterMat, lgLavaMat, lgFallbackBiome, lgClimatePoints;
     private int[] lgClimateRegs = new int[6];
@@ -432,6 +433,12 @@ public final class NativePassRunner {
                 lgColumn = makeBuffer(arena, (long) LOD_BATCH * 34 * 34 * 16, stor, dev);
                 lgGrid = makeBuffer(arena, (long) LOD_BATCH * 34 * 34 * genHeight * 8, stor, dev);
                 lgTop = makeBuffer(arena, (long) LOD_BATCH * 34 * 34 * 4, stor, dev);
+                int[] frzPerm = simon.vulkanfish.client.lod.gen.FreezeNoise.PERM;
+                lgFrzPerm = makeBuffer(arena, Math.max(16, frzPerm.length * 4L), stor, host);
+                MemoryUtil.memIntBuffer(lgFrzPerm.mapped(), frzPerm.length).put(frzPerm);
+                lgFrzTerm = makeBuffer(arena, simon.vulkanfish.client.lod.gen.FreezeNoise.TERMS * 16L, stor, host);
+                simon.vulkanfish.client.lod.gen.FreezeNoise.writeTerms(MemoryUtil.memFloatBuffer(lgFrzTerm.mapped(),
+                        simon.vulkanfish.client.lod.gen.FreezeNoise.TERMS * 4));
                 LongBuffer qp = arena.mallocLong(1);
                 check(VK10.vkCreateQueryPool(this.dev, VkQueryPoolCreateInfo.calloc(arena.stack()).sType$Default()
                         .queryType(VK10.VK_QUERY_TYPE_TIMESTAMP).queryCount(FRAMES * LG_TS), null, qp), "lgQueryPool");
@@ -444,6 +451,7 @@ public final class NativePassRunner {
                     lgCommit[i] = makeBuffer(arena, LOD_BATCH * (long) COMMIT_BYTES, stor | uni, host);
                     lgRunHead[i] = makeBuffer(arena, LOD_BATCH * 34L * 34 * 8, stor | uni, host);
                     lgRuns[i] = makeBuffer(arena, 1L << 20, stor | uni, host);
+                    lgFrzAnchor[i] = makeBuffer(arena, LOD_BATCH * (long) simon.vulkanfish.client.lod.gen.FreezeNoise.TERMS * 16, stor, host);
                 }
             }
             if (lodClimate != null) destroyBuffer(lodClimate);
@@ -752,6 +760,12 @@ public final class NativePassRunner {
                 lgTerms.writeAnchor(MemoryUtil.memByteBuffer(lgJobTerm[a].mapped(), (int) lgJobTerm[a].size()),
                         i * lgTerms.count() * 16, (job.nx() * 32 - 1) << job.level(), (job.nz() * 32 - 1) << job.level());
             }
+            if (job.generate()) {
+                // Vereisung: Anker des Klima-Rauschens in double, die GPU rechnet je Spalte in FP32 weiter
+                simon.vulkanfish.client.lod.gen.FreezeNoise.writeAnchors((job.nx() * 32 - 1) << job.level(), (job.nz() * 32 - 1) << job.level(),
+                        MemoryUtil.memFloatBuffer(lgFrzAnchor[a].mapped(), LOD_BATCH * simon.vulkanfish.client.lod.gen.FreezeNoise.TERMS * 4),
+                        i * simon.vulkanfish.client.lod.gen.FreezeNoise.TERMS * 4);
+            }
             if (job.runHeads() != null) {
                 bt.anyRuns = true;
                 int runBase = runPos / 4;
@@ -780,7 +794,8 @@ public final class NativePassRunner {
                 W.sb(9, lgJobs[a]), W.sb(10, lgFlat), W.sb(11, lgInterp), W.sb(12, lgSamples), W.sb(13, lgColumn),
                 W.sb(14, lgGrid), W.sb(15, lodBiomeTable), W.sb(16, lodClimate), W.sb(17, lodClimateBiome),
                 W.sb(18, lgRunHead[a]), W.sb(19, lgRuns[a]), W.sb(20, lodClimateNode),
-                W.sb(21, lgTermBuf), W.sb(22, lgTermBase), W.sb(23, lgJobTerm[a]));
+                W.sb(21, lgTermBuf), W.sb(22, lgTermBase), W.sb(23, lgJobTerm[a]),
+                W.sb(24, lgFrzPerm), W.sb(25, lgFrzTerm), W.sb(26, lgFrzAnchor[a]));
     }
 
     /** Eine Stufe des Batches aufzeichnen (Knoten first..first+count bei C, sonst alle). */
@@ -1515,8 +1530,8 @@ public final class NativePassRunner {
                     0, FMT_GBUF, VK10.VK_COMPARE_OP_LESS_OR_EQUAL, true);
             if (MeshShaderSupport.float64Enabled()) {
                 int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
-                int[][] lb = new int[24][];
-                for (int i = 0; i < 24; i++) lb[i] = new int[]{i, SB};
+                int[][] lb = new int[27][];
+                for (int i = 0; i < 27; i++) lb[i] = new int[]{i, SB};
                 layoutLodGen = pipelineLayout(arena, setLayout(arena, lb, C), C, 128);
                 pipeLodGen = computePipe(arena, layoutLodGen, module(arena, loader, "lodGenMain"));
                 int[][] mb = new int[11][];
