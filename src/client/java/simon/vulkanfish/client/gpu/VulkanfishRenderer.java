@@ -34,6 +34,7 @@ public final class VulkanfishRenderer {
     private static final boolean CAVE_TEST = Boolean.getBoolean("vulkanfish.caveTest");
     private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     private static final boolean NEAR_TEST = Boolean.getBoolean("vulkanfish.nearTest");
+    private static final boolean SHADOW_TEST = Boolean.getBoolean("vulkanfish.shadowTest");
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
     private static final int NEAR_Z = Integer.getInteger("vulkanfish.nearZ", -69);
@@ -178,6 +179,8 @@ public final class VulkanfishRenderer {
             caveTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && ICE_TEST && TEST_WORLD_EDITS) {
             iceTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
+            shadowTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && NEAR_TEST) {
             nearFieldTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && LOD_RETURN) {
@@ -213,7 +216,7 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && f > 700 && Minecraft.getInstance().player != null) {
+        if (EXIT_AFTER_FRAMES > 0 && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && f > 700 && Minecraft.getInstance().player != null) {
             // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
             var player = Minecraft.getInstance().player;
             if (f >= 1450 && TEST_WORLD_EDITS) {
@@ -546,6 +549,33 @@ public final class VulkanfishRenderer {
                 if (in == 74) NativePassRunner.debugView = 0;
             }
         }
+    }
+
+    /**
+     * Schatten-Flacker-Selbsttest (-Dvulkanfish.shadowTest): Kamera steht ueber Baeumen, je 8 Bilder
+     * in Folge mit laufender Sonne (Vanilla-Zeit) und mit festem Sonnenwinkel; -Dvulkanfish.shadowMove
+     * laesst die Kamera dabei langsam seitlich gleiten. Keine Weltaenderung.
+     */
+    private void shadowTest(long f) {
+        var player = Minecraft.getInstance().player;
+        Integer rd = Integer.getInteger("vulkanfish.testRenderDistance");
+        if (f == 200 && rd != null) Minecraft.getInstance().options.renderDistance().set(rd);
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("time set 2500");
+            selfTestCommand("gamerule minecraft:advance_time true");
+            selfTestCommand("tp @p " + NEAR_X + " 100 " + NEAR_Z + " 0 35");
+        }
+        if (f == 900 && (NEAR_X != 34 || NEAR_Z != -69))
+            selfTestCommand("execute positioned " + NEAR_X + " 0 " + NEAR_Z + " positioned over motion_blocking run tp @p ~ ~10 ~ 0 35");
+        if (f >= 300 && player != null) {
+            lockView(player, 30.0f, 35.0f);
+            if (Boolean.getBoolean("vulkanfish.shadowMove") && f > 1100) player.setPos(player.getX() + 0.02, player.getY(), player.getZ());
+        }
+        if (f == 1150 && Boolean.getBoolean("vulkanfish.shadowDebug")) NativePassRunner.debugView = 1; // nur Schattenfaktor
+        if (f == 1300) FrameDataCapture.testSunAngle = FrameDataCapture.lastSunAngle; // Sonne einfrieren
+        if ((f >= 1200 && f < 1208) || (f >= 1400 && f < 1408)) pendingScreenshot = f;
+        if (f == 1500 && nativeRunner != null) LOG.info("[vulkanfish] Schattentest Sonne {} Grad", FrameDataCapture.lastSunAngle);
     }
 
     private void iceTest(long f) {

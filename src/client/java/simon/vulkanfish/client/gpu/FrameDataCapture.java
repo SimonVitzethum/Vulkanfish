@@ -43,6 +43,7 @@ public final class FrameDataCapture {
     private static final boolean DEBUG_LOG = Boolean.getBoolean("vulkanfish.snapshots");
     /** Nur Selbsttest: fester Sonnenwinkel in Grad (NaN = Vanilla-Wert). */
     static volatile float testSunAngle = Float.NaN;
+    static volatile float lastSunAngle;
 
     private FrameDataCapture() {
     }
@@ -122,6 +123,7 @@ public final class FrameDataCapture {
             float pt = mc.getDeltaTracker().getGameTimeDeltaPartialTick(false);
             EnvironmentAttributeProbe probe = mc.gameRenderer.mainCamera().attributeProbe();
             float sunAngle = Float.isNaN(testSunAngle) ? probe.getValue(EnvironmentAttributes.SUN_ANGLE, pt) : testSunAngle;
+            lastSunAngle = sunAngle;
             double a = Math.toRadians(sunAngle);
             Vector3f sunDir = new Vector3f((float) -Math.sin(a), (float) (Math.cos(a) * Math.cos(SUN_TILT)),
                     (float) (Math.cos(a) * Math.sin(SUN_TILT))).normalize();

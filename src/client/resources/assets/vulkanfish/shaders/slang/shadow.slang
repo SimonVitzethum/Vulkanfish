@@ -1,21 +1,9 @@
-// shadow.slang – Schatten-Sampling (verzerrte Lichtraum-Map, rotiertes 8-Tap-PCF
+// shadow.slang – Schatten-Sampling (verzerrte Lichtraum-Map, stabiles 3x3-PCF
 // mit Hardware-Vergleich). Von Deferred- und Wasser-Pass genutzt.
 #ifndef VULKANFISH_SHADOW_SLANG
 #define VULKANFISH_SHADOW_SLANG
 
 #include "look.slang"
-
-// Interleaved Gradient Noise: rotiert die PCF-Taps pro Pixel
-float ign(float2 p, uint frame)
-{
-    p += float(frame & 63) * 5.588238;
-    return frac(52.9829189 * frac(0.06711056 * p.x + 0.00583715 * p.y));
-}
-
-static const float2 POISSON[8] = {
-    float2(-0.613, 0.617), float2(0.170, -0.040), float2(-0.299, -0.792), float2(0.645, 0.493),
-    float2(-0.651, -0.024), float2(0.421, -0.628), float2(0.036, 0.931), float2(0.975, -0.100)
-};
 
 // Himmelszugang aus Vanillas Himmelslicht (0..1): wo es (fast) 0 ist, fuehrt kein Weg zum Himmel,
 // also auch kein Sonnenstrahl. Sicherheitsnetz fuer Hoehlen, falls der Schattenkarte ein
@@ -39,14 +27,23 @@ float sampleShadowMap(Texture2D<float> map, SamplerComparisonState cmp, FrameUni
         return 1.0;
     uint sw, sh, levels;
     map.GetDimensions(0, sw, sh, levels);
-    float radius = 1.5 / float(sw); // ~1.5 Texel im verzerrten Raum
-    float a = ign(pixel, f.frameIndex) * 2.0 * PI;
-    float2x2 rot = float2x2(cos(a), -sin(a), sin(a), cos(a));
+    // Zeitlich stabiles PCF ohne Rauschen: 3x3 Hardware-Vergleiche (je 2x2 bilinear) im Abstand
+    // von 1,5 Texeln = glatter Filter ueber ~5x5 Texel. Das fruehere, jeden Frame neu gedrehte
+    // Poisson-Muster liess die Schattenkanten flackern (das TAA mittelte es nicht ganz weg).
+    float2 texel = 1.0 / float2(sw, sh);
     float ref = sc.z - 0.0004;
     float lit = 0.0;
-    for (uint i = 0; i < 8; i++)
-        lit += map.SampleCmpLevelZero(cmp, uv + mul(rot, POISSON[i]) * radius, ref);
-    lit /= 8.0;
+    [unroll]
+    for (int y = -1; y <= 1; y++)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; x++)
+        {
+            float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0); // Binomial 1-2-1: weicher Rand
+            lit += map.SampleCmpLevelZero(cmp, uv + float2(x, y) * texel * 1.5, ref) * w;
+        }
+    }
+    lit /= 16.0;
     // Rand der Schattendistanz weich ausblenden
     return lerp(lit, 1.0, saturate((length(center) - 0.85) / 0.15));
 }
