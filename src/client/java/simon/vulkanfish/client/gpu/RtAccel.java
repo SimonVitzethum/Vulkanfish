@@ -51,7 +51,7 @@ final class RtAccel {
     static final int WINDOW_SECTIONS = 5;           // BLAS-Fenster: +-5 Sections (Chebyshev)
     static final int GRID_CELLS = 16;               // Lichtgitter 16^3 Zellen
     static final int CELL_BLOCKS = 8;               // a 8 Bloecke = 128^3 um die Kamera
-    static final int CELL_CAP = 24;                 // Lichter pro Zelle
+    static final int CELL_CAP = 32;                 // Lichter pro Zelle (die staerksten, rt_lights.slang)
     static final int MAX_LIGHTS = 8192;
     static final int LIGHT_BYTES = 16;
     private static final int MAX_INSTANCES = 4096;

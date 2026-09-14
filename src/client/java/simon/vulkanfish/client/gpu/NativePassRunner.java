@@ -1680,7 +1680,8 @@ public final class NativePassRunner {
             pc.putInt(0, rt.gridX() - d.originX() / RtAccel.CELL_BLOCKS).putInt(4, rt.gridY() - d.originY() / RtAccel.CELL_BLOCKS)
                     .putInt(8, rt.gridZ() - d.originZ() / RtAccel.CELL_BLOCKS).putInt(12, n);
             VK10.vkCmdPushConstants(cmd, layoutLightBin, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
-            VK10.vkCmdDispatch(cmd, (n + 63) / 64, 1, 1);
+            int cells = RtAccel.GRID_CELLS * RtAccel.GRID_CELLS * RtAccel.GRID_CELLS; // ein Thread je Zelle
+            VK10.vkCmdDispatch(cmd, (cells + 63) / 64, 1, 1);
         }
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_SHADER_READ_BIT);

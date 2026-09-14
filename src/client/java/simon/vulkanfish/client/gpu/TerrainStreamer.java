@@ -244,7 +244,7 @@ public final class TerrainStreamer {
             long key = e.getLongKey();
             // Reine Schattenwerfer ausserhalb des Schattenradius (plus Rand gegen Hin-und-her) verwerfen
             boolean staleShadow = e.getValue().shadowOnly && !e.getValue().pending
-                    && (!inRadius(key, camSX, camSZ, SHADOW_RADIUS + 2) || SectionPos.y(key) < camSY - SHADOW_BELOW - 2);
+                    && (!inRadius(key, camSX, camSZ, SHADOW_RADIUS + 2) || SectionPos.y(key) < camSY - belowFor(key, camSX, camSZ) - 2);
             if (staleShadow || !inRadius(key, camSX, camSZ, radius)
                     || level.getChunkSource().getChunk(SectionPos.x(key), SectionPos.z(key), ChunkStatus.FULL, false) == null) {
                 remove.add(key);
@@ -307,12 +307,25 @@ public final class TerrainStreamer {
     }
 
     /** Nicht leere Sections im Schattenradius ab knapp unter der Kamera als Schattenwerfer laden. */
+    /**
+     * Wie weit unter der Kamera Sections auch unsichtbar geladen werden: fuer die Sonne 2, im
+     * Raytracing-Fenster so tief wie das Fenster – sonst fehlten dort Lichtquellen und Verdecker
+     * (Fackel in einer nie gesehenen Section darunter: Licht fehlt bzw. leuchtet durch Boeden).
+     */
+    private static int belowFor(long key, int camSX, int camSZ) {
+        return below(SectionPos.x(key) - camSX, SectionPos.z(key) - camSZ);
+    }
+
+    private static int below(int dx, int dz) {
+        boolean rtWindow = Math.max(Math.abs(dx), Math.abs(dz)) <= RtAccel.WINDOW_SECTIONS && !NativePassRunner.rtForceOff;
+        return rtWindow ? Math.max(SHADOW_BELOW, RtAccel.WINDOW_SECTIONS) : SHADOW_BELOW;
+    }
+
     private void syncShadowCasters(int camSX, int camSY, int camSZ, int radius) {
         if (Boolean.getBoolean("vulkanfish.noShadowCasters")) return; // Messung
         int r = Math.min(SHADOW_RADIUS, radius);
         int minSY = level.getMinSectionY();
         int maxSY = level.getMaxSectionY();
-        int sy0 = Math.max(minSY, camSY - SHADOW_BELOW);
         var src = level.getChunkSource();
         for (int dz = -r; dz <= r; dz++) {
             for (int dx = -r; dx <= r; dx++) {
@@ -323,6 +336,7 @@ public final class TerrainStreamer {
                 // wie syncVisible: erst mit geladenen Nachbarn (sonst Kanten gegen "Luft")
                 if (src.getChunk(cx + 1, cz, ChunkStatus.FULL, false) == null || src.getChunk(cx - 1, cz, ChunkStatus.FULL, false) == null
                         || src.getChunk(cx, cz + 1, ChunkStatus.FULL, false) == null || src.getChunk(cx, cz - 1, ChunkStatus.FULL, false) == null) continue;
+                int sy0 = Math.max(minSY, camSY - below(dx, dz));
                 for (int sy = sy0; sy <= maxSY; sy++) {
                     long key = SectionPos.asLong(cx, sy, cz);
                     if (sections.containsKey(key) || airVisible.contains(key)) continue;

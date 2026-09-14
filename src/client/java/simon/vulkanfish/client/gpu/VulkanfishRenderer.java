@@ -39,6 +39,7 @@ public final class VulkanfishRenderer {
     private static final boolean RR_TEST = Boolean.getBoolean("vulkanfish.rrTest");
     private static final boolean BOBBY_TEST = Boolean.getBoolean("vulkanfish.bobbyTest");
     private static final boolean ENTITY_TEST = Boolean.getBoolean("vulkanfish.entityTest");
+    private static final boolean LIGHT_TEST = Boolean.getBoolean("vulkanfish.lightTest");
     private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
@@ -217,6 +218,8 @@ public final class VulkanfishRenderer {
             biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && LIGHT_TEST) {
+            lightTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && ENTITY_TEST && TEST_WORLD_EDITS) {
             entityTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && BOBBY_TEST) {
@@ -260,7 +263,7 @@ public final class VulkanfishRenderer {
                 pendingScreenshot = f;
             }
         }
-        boolean ownCamera = FG_TEST || RR_TEST || BOBBY_TEST || ENTITY_TEST || Boolean.getBoolean("vulkanfish.uiTest");
+        boolean ownCamera = FG_TEST || RR_TEST || BOBBY_TEST || ENTITY_TEST || LIGHT_TEST || Boolean.getBoolean("vulkanfish.uiTest");
         if (EXIT_AFTER_FRAMES > 0 && !ownCamera && !SCENE_TEST && !LOD_TEST && !ICE_TEST && !CAVE_TEST && !SHADOW_TEST && BIOME_TEST == null && f > 700 && Minecraft.getInstance().player != null) {
             // Selbsttest: Kamera drehen/neigen -> Hi-Z-Reprojektion + Frustum unter Bewegung
             var player = Minecraft.getInstance().player;
@@ -804,6 +807,40 @@ public final class VulkanfishRenderer {
                     player.getXRot(), player.getYRot(), cam.position(), cam.xRot(), cam.yRot());
         }
         if ((f >= 1500 && f < 1508) || (f >= 1900 && f < 1908)) pendingScreenshot = f;
+    }
+
+    /**
+     * Licht-Selbsttest (-Dvulkanfish.lightTest): frische Gegend (Chunks laden und leuchten gerade
+     * erst), von oben schraeg; Licht-Debugansicht (4) und normales Bild nach 10 und 25 s. Chunk-
+     * weise falsches Licht zeigt sich als Kacheln im Raster von 16 Bloecken. Keine Weltaenderung.
+     */
+    private void lightTest(long f) {
+        var player = Minecraft.getInstance().player;
+        int x0 = Integer.getInteger("vulkanfish.lightX", 52000), z0 = Integer.getInteger("vulkanfish.lightZ", 52000);
+        if (f == 300) {
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("time set " + Integer.getInteger("vulkanfish.lightTime", 6000));
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("tp @p " + x0 + " 150 " + z0 + " 0 55");
+        }
+        if (f >= 300 && player != null) lockView(player, 0.0f, 55.0f);
+        if (Boolean.getBoolean("vulkanfish.torchField") && TEST_WORLD_EDITS && f == 500) {
+            // viele Fackeln (dichter als ein Lichtgitter-Platz je Zelle fasst) auf einer Steinflaeche
+            int x = x0, y = 100, z = z0 + 40;
+            selfTestCommand("fill " + (x - 32) + " " + (y - 1) + " " + (z - 32) + " " + (x + 32) + " " + (y - 1) + " " + (z + 32) + " minecraft:stone");
+            selfTestCommand("fill " + (x - 32) + " " + y + " " + (z - 32) + " " + (x + 32) + " " + (y + 20) + " " + (z + 32) + " minecraft:air");
+            for (int tx = -30; tx <= 30; tx += 4)
+                for (int tz = -30; tz <= 30; tz += 4)
+                    selfTestCommand("setblock " + (x + tx) + " " + y + " " + (z + tz) + " minecraft:torch");
+            for (int px = -28; px <= 28; px += 8)
+                selfTestCommand("fill " + (x + px) + " " + y + " " + (z - 20) + " " + (x + px) + " " + (y + 3) + " " + (z - 18) + " minecraft:stone_bricks");
+        }
+        if (Boolean.getBoolean("vulkanfish.torchField") && player != null && f > 320) player.setPos(x0 + 0.5, 128, z0 + 5.5);
+        if ((f >= 2000 && f < 2008)) pendingScreenshot = f;
+        if (f == 1300 || f == 2800) NativePassRunner.debugView = 4;
+        if (f == 1320 || f == 2820) pendingScreenshot = f;
+        if (f == 1330 || f == 2830) NativePassRunner.debugView = 0;
+        if (f == 1350 || f == 2850) pendingScreenshot = f;
     }
 
     private String fgTestMode;

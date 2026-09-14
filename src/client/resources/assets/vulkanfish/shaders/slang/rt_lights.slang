@@ -1,6 +1,8 @@
 // rt_lights.slang – sortiert die Lichtquellen um die Kamera in ein 16^3-Zellgitter
-// (8 Bloecke pro Zelle). Ein Thread pro Licht, Atomik-Einfuegen in alle Zellen, die
-// seine Reichweite beruehrt. Das Deferred-Licht liest pro Pixel nur seine Zelle.
+// (8 Bloecke pro Zelle). Ein Thread pro Zelle: prueft alle Lichter und behaelt die LIGHT_CAP
+// staerksten (unverschattete Staerke am naechsten Punkt der Zelle). Deterministisch – vorher
+// fuegte je Licht ein Thread per Atomik ein; bei vollen Zellen fielen dann jedes Bild andere
+// Lichter heraus (Flackern, Kanten im Zellraster bei vielen Fackeln).
 #include "rt_common.slang"
 
 [[vk::binding(0, 0)]] StructuredBuffer<RtLight> gLights;
@@ -17,29 +19,52 @@ struct BinPush
 [NumThreads(64, 1, 1)]
 void lightBin(in uint3 tid : SV_DispatchThreadID)
 {
-    if (tid.x >= uint(gBin.grid.w))
+    uint cell = tid.x;
+    if (cell >= uint(LIGHT_GRID * LIGHT_GRID * LIGHT_GRID))
         return;
-    RtLight l = gLights[tid.x];
-    float range = rtLightEmission(l.packed) + 0.5;
-    int3 origin = gBin.grid.xyz;
-    int3 lo = max(int3(floor((l.pos - range) / float(LIGHT_CELL))) - origin, int3(0, 0, 0));
-    int3 hi = min(int3(floor((l.pos + range) / float(LIGHT_CELL))) - origin, int3(LIGHT_GRID - 1, LIGHT_GRID - 1, LIGHT_GRID - 1));
-    for (int z = lo.z; z <= hi.z; z++)
+    int3 c = int3(int(cell % uint(LIGHT_GRID)), int((cell / uint(LIGHT_GRID)) % uint(LIGHT_GRID)), int(cell / uint(LIGHT_GRID * LIGHT_GRID)));
+    float3 bmin = float3((c + gBin.grid.xyz) * LIGHT_CELL);
+    float3 bmax = bmin + float(LIGHT_CELL);
+    uint idx[LIGHT_CAP];
+    float wgt[LIGHT_CAP];
+    uint n = 0;
+    uint lightCount = uint(gBin.grid.w);
+    for (uint i = 0; i < lightCount; i++)
     {
-        for (int y = lo.y; y <= hi.y; y++)
+        RtLight l = gLights[i];
+        float e = rtLightEmission(l.packed);
+        float3 q = clamp(l.pos, bmin, bmax);
+        float d = distance(q, l.pos);
+        if (d > e + 0.5)
+            continue; // Kugel beruehrt die Zelle nicht
+        float w = rtLightFalloff(d, e) + 1e-4; // auch Randlichter vor ganz fernen
+        if (n < LIGHT_CAP)
         {
-            for (int x = lo.x; x <= hi.x; x++)
+            // einsortieren (absteigend)
+            uint k = n++;
+            while (k > 0 && wgt[k - 1] < w)
             {
-                float3 bmin = float3((int3(x, y, z) + origin) * LIGHT_CELL);
-                float3 q = clamp(l.pos, bmin, bmin + float(LIGHT_CELL));
-                if (distance(q, l.pos) > range)
-                    continue; // Kugel beruehrt die Zelle nicht
-                uint cell = uint((z * LIGHT_GRID + y) * LIGHT_GRID + x);
-                uint slot;
-                InterlockedAdd(gCellCount[cell], 1, slot);
-                if (slot < LIGHT_CAP)
-                    gCellLights[cell * LIGHT_CAP + slot] = tid.x;
+                wgt[k] = wgt[k - 1];
+                idx[k] = idx[k - 1];
+                k--;
             }
+            wgt[k] = w;
+            idx[k] = i;
+        }
+        else if (w > wgt[LIGHT_CAP - 1])
+        {
+            uint k = LIGHT_CAP - 1;
+            while (k > 0 && wgt[k - 1] < w)
+            {
+                wgt[k] = wgt[k - 1];
+                idx[k] = idx[k - 1];
+                k--;
+            }
+            wgt[k] = w;
+            idx[k] = i;
         }
     }
+    gCellCount[cell] = n;
+    for (uint j = 0; j < n; j++)
+        gCellLights[cell * LIGHT_CAP + j] = idx[j];
 }

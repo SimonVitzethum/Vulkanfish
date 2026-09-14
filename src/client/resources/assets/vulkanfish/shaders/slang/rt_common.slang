@@ -11,7 +11,7 @@ struct RtLight
 
 static const int LIGHT_GRID = 16;   // Zellen pro Achse (RtAccel.GRID_CELLS)
 static const int LIGHT_CELL = 8;    // Bloecke pro Zelle
-static const uint LIGHT_CAP = 24;   // Lichter pro Zelle (RtAccel.CELL_CAP)
+static const uint LIGHT_CAP = 32;   // Lichter pro Zelle (RtAccel.CELL_CAP), die staerksten
 
 float rtLightEmission(uint p) { return float(p & 0xF); }
 float rtLightRadius(uint p) { return float((p >> 4) & 0xF) / 30.0; }
