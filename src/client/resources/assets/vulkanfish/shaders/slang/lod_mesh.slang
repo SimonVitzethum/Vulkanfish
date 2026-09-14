@@ -77,10 +77,10 @@ uint nearBits(int2 c)
 }
 
 // Section-Bits von y0..y1 (Bloecke); unter/ueber dem Bereich liegt nichts -> gilt als abgedeckt
-uint sectionRange(float y0, float y1)
+uint sectionRange(float y0, float y1) // y relativ
 {
-    int s0 = max(int(floor(y0 / 16.0)) - gLod.minSectionY, 0);
-    int s1 = min(int(floor(y1 / 16.0)) - gLod.minSectionY, 31);
+    int s0 = max(worldSectionY(gFrame, y0) - gLod.minSectionY, 0);
+    int s1 = min(worldSectionY(gFrame, y1) - gLod.minSectionY, 31);
     if (s1 < s0)
         return 0u;
     uint hi = s1 >= 31 ? 0xFFFFFFFFu : ((1u << uint(s1 + 1)) - 1u);
@@ -92,7 +92,7 @@ bool nearCoveredBox(float3 mn, float3 mx)
 {
     if (gLod.maskValid == 0)
         return false;
-    int2 c0 = int2(floor(mn.xz / 16.0)), c1 = int2(floor(mx.xz / 16.0));
+    int2 c0 = worldChunk(gFrame, mn.xz), c1 = worldChunk(gFrame, mx.xz); // relativ -> Welt-Chunks
     if (any(c1 - c0 > 3))
         return false;
     uint need = sectionRange(mn.y, mx.y);
@@ -106,8 +106,8 @@ bool nearCoveredBox(float3 mn, float3 mx)
 // Punkt in einer gezeichneten Section?
 bool nearCoveredPoint(float3 p)
 {
-    uint b = nearBits(int2(floor(p.xz / 16.0)));
-    int s = int(floor(p.y / 16.0)) - gLod.minSectionY;
+    uint b = nearBits(worldChunk(gFrame, p.xz)); // p relativ
+    int s = worldSectionY(gFrame, p.y) - gLod.minSectionY;
     return s >= 0 && s < 32 && ((b >> uint(s)) & 1u) != 0;
 }
 
@@ -131,7 +131,7 @@ void lodMesh(
     uint2 q = gQuads[mh.vertexStart + lt];
     uint level = mh.indexStart;
     float scale = float(1u << level);
-    float3 origin = float3(mh.originX, mh.originY, mh.originZ);
+    float3 origin = relOrigin(f, mh.originX, mh.originY, mh.originZ);
 
     uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
     uint face = (q.x >> 19) & 7;
@@ -235,7 +235,7 @@ void lodShadowMesh(
     {
         uint2 q = gQuads[mh.vertexStart + first + lt];
         float scale = float(1u << mh.indexStart);
-        float3 origin = float3(mh.originX, mh.originY, mh.originZ);
+        float3 origin = relOrigin(f, mh.originX, mh.originY, mh.originZ);
         uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
         uint face = (q.x >> 19) & 7;
         float su = float(((q.x >> 22) & 31) + 1), sv = float(((q.x >> 27) & 31) + 1);

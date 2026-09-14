@@ -97,6 +97,7 @@ final class RtAccel {
     private int lightVersion;
     private boolean lightsDirty = true;
     private long lightCellKey = Long.MIN_VALUE;
+    private int lightOX, lightOY, lightOZ; // Render-Ursprung der hochgeladenen (relativen) Lichtpositionen
     private int gridX, gridY, gridZ;
     private boolean poolFullWarned;
     private long builtTotal;
@@ -235,8 +236,9 @@ final class RtAccel {
      * BLAS fuer neue/geaenderte Sections im Fenster bauen, ausserhalb freigeben, TLAS neu bauen.
      * Muss NACH den Vertex-Uploads des Frames aufgenommen werden (Barriere davor: Transfer -> AS-Build).
      */
+    /** Kamera in Welt-Koordinaten (double); TLAS und Lichter relativ zum Render-Ursprung (ox, oy, oz). */
     void record(Arena arena, VkCommandBuffer cmd, int slot, double camX, double camY, double camZ,
-                long completedValue, long retireValue) {
+                int ox, int oy, int oz, long completedValue, long retireValue) {
         // 1) Abgelaufene BLAS zerstoeren (GPU ist mit allen Frames, die sie nutzen konnten, fertig)
         for (int i = destroyQueue.size() - 1; i >= 0; i--) {
             long[] d = destroyQueue.get(i);
@@ -290,22 +292,23 @@ final class RtAccel {
             Entry e = entries.get(k);
             if (e == null || e.as == 0L || n >= MAX_INSTANCES || cheb(e.key, csx, csy, csz) > WINDOW_SECTIONS) continue;
             long o = base + (long) n * INSTANCE_BYTES;
-            float ox = SectionPos.sectionToBlockCoord(SectionPos.x(e.key)) - 8f;
-            float oy = SectionPos.sectionToBlockCoord(SectionPos.y(e.key)) - 8f;
-            float oz = SectionPos.sectionToBlockCoord(SectionPos.z(e.key)) - 8f;
+            // Section-Ursprung relativ zum Render-Ursprung (ganzzahlig -> exakt)
+            float tx = SectionPos.sectionToBlockCoord(SectionPos.x(e.key)) - ox - 8f;
+            float ty = SectionPos.sectionToBlockCoord(SectionPos.y(e.key)) - oy - 8f;
+            float tz = SectionPos.sectionToBlockCoord(SectionPos.z(e.key)) - oz - 8f;
             // 3x4 zeilenweise: unorm16-Position * (65535/2048) + (Ursprung - 8)
             MemoryUtil.memPutFloat(o, QUANT_SCALE);
             MemoryUtil.memPutFloat(o + 4, 0f);
             MemoryUtil.memPutFloat(o + 8, 0f);
-            MemoryUtil.memPutFloat(o + 12, ox);
+            MemoryUtil.memPutFloat(o + 12, tx);
             MemoryUtil.memPutFloat(o + 16, 0f);
             MemoryUtil.memPutFloat(o + 20, QUANT_SCALE);
             MemoryUtil.memPutFloat(o + 24, 0f);
-            MemoryUtil.memPutFloat(o + 28, oy);
+            MemoryUtil.memPutFloat(o + 28, ty);
             MemoryUtil.memPutFloat(o + 32, 0f);
             MemoryUtil.memPutFloat(o + 36, 0f);
             MemoryUtil.memPutFloat(o + 40, QUANT_SCALE);
-            MemoryUtil.memPutFloat(o + 44, oz);
+            MemoryUtil.memPutFloat(o + 44, tz);
             // Custom-Index = erstes Cutout-Quad (Alpha-Test), Maske 0xFF
             MemoryUtil.memPutInt(o + 48, ((e.quadStart + e.solid) & 0xFFFFFF) | (0xFF << 24));
             MemoryUtil.memPutInt(o + 52, KHRAccelerationStructure.VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR << 24);
@@ -320,7 +323,10 @@ final class RtAccel {
         int gy = gridOrigin(camY);
         int gz = gridOrigin(camZ);
         long cellKey = ((long) gx & 0x1FFFFF) | (((long) gy & 0x1FFFFF) << 21) | (((long) gz & 0x1FFFFF) << 42);
-        if (lightsDirty || cellKey != lightCellKey) {
+        if (lightsDirty || cellKey != lightCellKey || ox != lightOX || oy != lightOY || oz != lightOZ) {
+            lightOX = ox;
+            lightOY = oy;
+            lightOZ = oz;
             gridX = gx;
             gridY = gy;
             gridZ = gz;
@@ -484,9 +490,9 @@ final class RtAccel {
 
     /** Alle Lichter der Sections im Fenster, die das Gitter (+Reichweite) beruehren. Naechste zuerst bei Ueberlauf. */
     private void gatherLights(int csx, int csy, int csz) {
-        float minX = gridX * CELL_BLOCKS - 15f, maxX = (gridX + GRID_CELLS) * CELL_BLOCKS + 15f;
-        float minY = gridY * CELL_BLOCKS - 15f, maxY = (gridY + GRID_CELLS) * CELL_BLOCKS + 15f;
-        float minZ = gridZ * CELL_BLOCKS - 15f, maxZ = (gridZ + GRID_CELLS) * CELL_BLOCKS + 15f;
+        double minX = gridX * CELL_BLOCKS - 15.0, maxX = (gridX + GRID_CELLS) * CELL_BLOCKS + 15.0;
+        double minY = gridY * CELL_BLOCKS - 15.0, maxY = (gridY + GRID_CELLS) * CELL_BLOCKS + 15.0;
+        double minZ = gridZ * CELL_BLOCKS - 15.0, maxZ = (gridZ + GRID_CELLS) * CELL_BLOCKS + 15.0;
         List<Entry> near = new ArrayList<>();
         int w = WINDOW_SECTIONS;
         for (int dy = -w; dy <= w; dy++) {
@@ -502,11 +508,19 @@ final class RtAccel {
         outer:
         for (Entry e : near) {
             int[] l = e.lights;
+            // Lichter sind section-lokal: Welt = Section-Ursprung + lokal, hochgeladen relativ zum Render-Ursprung
+            int sx = SectionPos.sectionToBlockCoord(SectionPos.x(e.key));
+            int sy = SectionPos.sectionToBlockCoord(SectionPos.y(e.key));
+            int sz = SectionPos.sectionToBlockCoord(SectionPos.z(e.key));
             for (int i = 0; i + 3 < l.length; i += SectionMesher.LIGHT_INTS) {
-                float x = Float.intBitsToFloat(l[i]), y = Float.intBitsToFloat(l[i + 1]), z = Float.intBitsToFloat(l[i + 2]);
+                float lx = Float.intBitsToFloat(l[i]), ly = Float.intBitsToFloat(l[i + 1]), lz = Float.intBitsToFloat(l[i + 2]);
+                double x = sx + lx, y = sy + ly, z = sz + lz;
                 if (x < minX || x > maxX || y < minY || y > maxY || z < minZ || z > maxZ) continue;
                 if (n >= MAX_LIGHTS) break outer;
-                System.arraycopy(l, i, lightData, n * 4, 4);
+                lightData[n * 4] = Float.floatToRawIntBits((sx - lightOX) + lx);
+                lightData[n * 4 + 1] = Float.floatToRawIntBits((sy - lightOY) + ly);
+                lightData[n * 4 + 2] = Float.floatToRawIntBits((sz - lightOZ) + lz);
+                lightData[n * 4 + 3] = l[i + 3];
                 n++;
             }
         }

@@ -34,6 +34,9 @@ public final class VulkanfishRenderer {
     private static final boolean CAVE_TEST = Boolean.getBoolean("vulkanfish.caveTest");
     private static final boolean LOD_RETURN = Boolean.getBoolean("vulkanfish.lodReturn");
     private static final boolean NEAR_TEST = Boolean.getBoolean("vulkanfish.nearTest");
+    // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
+    private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
+    private static final int NEAR_Z = Integer.getInteger("vulkanfish.nearZ", -69);
     // Vanilla baut SOLID/CUTOUT nicht mehr, solange wir das Opaque-Terrain liefern (SectionCompilerMixin)
     private static volatile boolean vanillaOpaqueDisabled;
     private final GpuDrivenConfig config;
@@ -518,14 +521,17 @@ public final class VulkanfishRenderer {
         if (f == 200 && rd != null) Minecraft.getInstance().options.renderDistance().set(rd);
         if (f == 300) {
             selfTestCommand("gamemode spectator @p");
-            selfTestCommand("tp @p 34 100 -69 0 10");
+            selfTestCommand("tp @p " + NEAR_X + " 100 " + NEAR_Z + " 0 10");
             FrameDataCapture.testSunAngle = 25.0f;
         }
         // Einschwingzeit vor dem Umsehen (-Dvulkanfish.nearSettle, Standard 1100 Frames; hohe Sichtweiten laden lange)
         int settle = Integer.getInteger("vulkanfish.nearSettle", 1100);
         long jump = settle + 800L;
-        if (f == jump) selfTestCommand("tp @p 634 100 331 0 10");
+        if (f == jump) selfTestCommand("tp @p " + (NEAR_X + 600) + " 100 " + (NEAR_Z + 400) + " 0 10");
         long phase = f >= jump ? f - jump : f;
+        // ferne Startorte: nach dem Generieren knapp ueber die Oberflaeche setzen
+        if (f == settle - 600 && (NEAR_X != 34 || NEAR_Z != -69))
+            selfTestCommand("execute positioned " + NEAR_X + " 0 " + NEAR_Z + " positioned over motion_blocking run tp @p ~ ~12 ~ 0 10");
         // GPU-Zeiten im Stand (vor dem Umsehen), Nahfeld und Fernfeld eingeschwungen
         if (phase == settle - 300 && nativeRunner != null) nativeRunner.passTimings();
         if (phase == settle - 1 && nativeRunner != null) LOG.info("[vulkanfish] Nahfeldtest GPU-Zeit im Stand: {}", nativeRunner.passTimings());

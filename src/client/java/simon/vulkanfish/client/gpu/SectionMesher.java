@@ -227,9 +227,10 @@ final class SectionMesher {
         }
         if (lightCount * LIGHT_INTS + LIGHT_INTS > lights.length) lights = Arrays.copyOf(lights, lights.length * 2);
         int o = lightCount++ * LIGHT_INTS;
-        lights[o] = Float.floatToRawIntBits(scratch.getX() + ox);
-        lights[o + 1] = Float.floatToRawIntBits(scratch.getY() + oy);
-        lights[o + 2] = Float.floatToRawIntBits(scratch.getZ() + oz);
+        // section-lokal (0..16): RtAccel rechnet sie je Frame in den kamerarelativen Raum um
+        lights[o] = Float.floatToRawIntBits((scratch.getX() & 15) + ox);
+        lights[o + 1] = Float.floatToRawIntBits((scratch.getY() & 15) + oy);
+        lights[o + 2] = Float.floatToRawIntBits((scratch.getZ() & 15) + oz);
         int rCode = Math.min(15, Math.round(radius * 30f)); // 0..0.5 Bloecke
         lights[o + 3] = Math.min(emission, 15) | (rCode << 4) | (lightColor(block) << 8);
     }
@@ -408,9 +409,11 @@ final class SectionMesher {
 
     private void writeVertex(int slot, float rx, float ry, float rz, float u, float v, int argb, int lightCoords, int material) {
         int pb = quads * 12 + slot * 3;
-        pos[pb] = originX + rx;
-        pos[pb + 1] = originY + ry;
-        pos[pb + 2] = originZ + rz;
+        // section-lokal: Meshlet-Kugeln und Ebenen-Cutoffs relativ zum Section-Ursprung (die GPU
+        // rechnet sie gegen den Render-Ursprung um -> genau auch bei riesigen Koordinaten)
+        pos[pb] = rx;
+        pos[pb + 1] = ry;
+        pos[pb + 2] = rz;
         int w = quads * WORDS_PER_QUAD + slot * 4;
         words[w] = quantize(rx) | (quantize(ry) << 16);
         int block = Math.min(lightCoords & 0xFFFF, 255);

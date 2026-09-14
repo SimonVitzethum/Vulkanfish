@@ -202,8 +202,8 @@ uint lodNearBits(int2 c)
 
 bool lodNearCoveredPoint(float3 p)
 {
-    uint b = lodNearBits(int2(floor(p.xz / 16.0)));
-    int s = int(floor(p.y / 16.0)) - gLodW.minSectionY;
+    uint b = lodNearBits(worldChunk(gFrame, p.xz)); // p relativ
+    int s = worldSectionY(gFrame, p.y) - gLodW.minSectionY;
     return s >= 0 && s < 32 && ((b >> uint(s)) & 1u) != 0;
 }
 
@@ -234,7 +234,7 @@ void lodWaterMesh(
     uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
     float su = float(((q.x >> 22) & 31) + 1), sv = float(((q.x >> 27) & 31) + 1);
     // Oberseite; Vanillas Quellwasser steht 8/9 Block hoch -> gleiche Hoehe wie das Nahwasser
-    float3 p0 = float3(mh.originX, mh.originY, mh.originZ) + float3(px, py + 1, pz) * scale - float3(0.0, 1.0 / 9.0, 0.0);
+    float3 p0 = relOrigin(f, mh.originX, mh.originY, mh.originZ) + float3(px, py + 1, pz) * scale - float3(0.0, 1.0 / 9.0, 0.0);
     float3 du = float3(su * scale, 0.0, 0.0), dv = float3(0.0, 0.0, sv * scale);
     uint biome = (q.y >> 13) & 0xFFu;
     uint wc = gLodBiomeCol[biome].w;
@@ -258,8 +258,8 @@ void lodWaterMesh(
     if (!cull && gLodW.maskValid != 0)
     {
         float3 mn = p0 - float3(0.0, 0.5, 0.0), mx = p0 + du + dv - float3(0.0, 0.5, 0.0);
-        int2 c0 = int2(floor((mn.xz + 0.01) / 16.0)), c1 = int2(floor((mx.xz - 0.01) / 16.0));
-        int sy = int(floor(mn.y / 16.0)) - gLodW.minSectionY;
+        int2 c0 = worldChunk(f, mn.xz + 0.01), c1 = worldChunk(f, mx.xz - 0.01);
+        int sy = worldSectionY(f, mn.y) - gLodW.minSectionY;
         bool covered = all(c1 - c0 <= 3) && sy >= 0 && sy < 32;
         for (int z = c0.y; covered && z <= c1.y; z++)
             for (int x = c0.x; covered && x <= c1.x; x++)
@@ -311,7 +311,7 @@ float4 shadeWaterSurface(WaterVertOut input)
     float3 N = Nf;
     if (top && !iface)
     {
-        float2 g = waveGradient(wp.xz, f.time, f.rainFactor) / (1.0 + dist * 0.06);
+        float2 g = waveGradient(wp.xz + f.worldWrap.xz, f.time, f.rainFactor) / (1.0 + dist * 0.06);
         N = normalize(float3(-g.x, 1.0, -g.y));
         if (below) N = -N;
     }
@@ -350,7 +350,7 @@ float4 shadeWaterSurface(WaterVertOut input)
         // Kaustiken auf dem beleuchteten Grund
         if (sceneD > 0.0 && f.dimension == 0)
         {
-            float c = causticPattern(scenePos.xz + scenePos.y * 0.3, f.time);
+            float c = causticPattern(scenePos.xz + f.worldWrap.xz + (scenePos.y + f.worldWrap.y) * 0.3, f.time);
             refr *= 1.0 + (c - 0.35) * 0.55 * shadow * lightFade * saturate(thickness) * exp(-thickness * 0.25);
         }
         // Klar in Ufernaehe, Rot/Gruen verschwinden mit der Tiefe; Streulicht leicht tuerkis

@@ -18,7 +18,7 @@ groupshared float3 sQuadNormal[16];
 // Welt-Position inkl. Wind, Normale aus dem Quad-Cache.
 void loadVertex(MeshletHeader mh, uint lt, FrameUniforms f, out TerrainVertex tv, out float3 wp, out float3 n)
 {
-    float3 origin = float3(mh.originX, mh.originY, mh.originZ);
+    float3 origin = relOrigin(f, mh.originX, mh.originY, mh.originZ);
     tv = gVertices[mh.vertexStart + lt];
     wp = tvPos(tv, origin);
     n = sQuadNormal[lt >> 2];
@@ -26,7 +26,7 @@ void loadVertex(MeshletHeader mh, uint lt, FrameUniforms f, out TerrainVertex tv
     if (isFoliage(mat))
     {
         float amount = mat == MAT_PLANT_TOP ? 0.10 : (mat == MAT_PLANT ? 0.0 : 0.035);
-        wp += windOffset(wp, f.time, amount, f.rainFactor);
+        wp += windOffset(wp + f.worldWrap.xyz, f.time, amount, f.rainFactor);
     }
 }
 
@@ -35,7 +35,7 @@ void computeQuadNormals(MeshletHeader mh, uint lt, uint vCount)
 {
     if (lt < vCount && (lt & 3) == 0)
     {
-        float3 origin = float3(mh.originX, mh.originY, mh.originZ);
+        float3 origin = float3(0.0); // nur Differenzen: lokal rechnen (genau bei jeder Koordinate)
         uint q0 = mh.vertexStart + lt;
         float3 p0 = tvPos(gVertices[q0], origin);
         float3 p1 = tvPos(gVertices[q0 + 1], origin);

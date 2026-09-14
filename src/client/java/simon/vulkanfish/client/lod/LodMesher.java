@@ -299,7 +299,9 @@ public final class LodMesher {
 
     private Mesh buildMeshlets(int level, int nodeX, int nodeZ, int minY, int h, int[] dirCount) {
         int scale = 1 << level;
-        float ox = (float) (nodeX * 32) * scale, oz = (float) (nodeZ * 32) * scale, oy = minY;
+        // Meshlet-Kugeln/Cutoffs relativ zum Knoten-Ursprung (Header-origin), AABB in Weltkoordinaten
+        double wox = (double) nodeX * 32 * scale, woz = (double) nodeZ * 32 * scale, woy = minY;
+        float ox = 0f, oz = 0f, oy = 0f;
         int meshlets = 0;
         for (int d = 0; d < 7; d++) meshlets += (dirCount[d] + QUADS_PER_MESHLET - 1) / QUADS_PER_MESHLET;
         boolean[] water = new boolean[meshlets];
@@ -355,8 +357,10 @@ public final class LodMesher {
                 planes[mi * 4 + 1] = DY[d];
                 planes[mi * 4 + 2] = DZ[d];
                 planes[mi * 4 + 3] = cutoff;
-                aabb[0] = Math.min(aabb[0], minX); aabb[1] = Math.min(aabb[1], minYw); aabb[2] = Math.min(aabb[2], minZ);
-                aabb[3] = Math.max(aabb[3], maxX); aabb[4] = Math.max(aabb[4], maxYw); aabb[5] = Math.max(aabb[5], maxZ);
+                aabb[0] = (float) Math.min(aabb[0], minX + wox); aabb[1] = (float) Math.min(aabb[1], minYw + woy);
+                aabb[2] = (float) Math.min(aabb[2], minZ + woz);
+                aabb[3] = (float) Math.max(aabb[3], maxX + wox); aabb[4] = (float) Math.max(aabb[4], maxYw + woy);
+                aabb[5] = (float) Math.max(aabb[5], maxZ + woz);
                 mi++;
             }
             q = end;

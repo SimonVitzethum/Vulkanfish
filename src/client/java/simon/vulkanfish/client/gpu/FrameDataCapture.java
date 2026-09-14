@@ -100,13 +100,20 @@ public final class FrameDataCapture {
             ClientLevel level = mc.level;
             if (level == null || cam == null) return null;
 
-            // ViewProj = Level-Projektion * (Rotation * Translation), Welt-Raum
+            // Render-Ursprung: Ursprung der Kamera-Section (ganzzahlig, Vielfaches von 16). Alle GPU-
+            // Positionen sind relativ dazu -> float bleibt auch bei Koordinaten in Millionenhoehe genau
+            int ox = Math.floorDiv((int) Math.floor(cam.pos.x), 16) * 16;
+            int oy = Math.floorDiv((int) Math.floor(cam.pos.y), 16) * 16;
+            int oz = Math.floorDiv((int) Math.floor(cam.pos.z), 16) * 16;
+            float rx = (float) (cam.pos.x - ox), ry = (float) (cam.pos.y - oy), rz = (float) (cam.pos.z - oz);
+            // ViewProj = Level-Projektion * (Rotation * Translation), relativer Raum
             Matrix4f view = new Matrix4f().set(cam.viewRotationMatrix);
-            view.translate((float) -cam.pos.x, (float) -cam.pos.y, (float) -cam.pos.z);
+            view.translate(-rx, -ry, -rz);
             Matrix4f viewProj = new Matrix4f(haveProjection ? LEVEL_PROJECTION : cam.projectionMatrix).mul(view);
             float[] vp = viewProj.get(new float[16]); // JOML: column-major (wie das Shader-Layout)
-            float[] vpUnjittered = new Matrix4f(haveProjection ? LEVEL_PROJECTION_UNJITTERED : cam.projectionMatrix)
-                    .mul(view).get(new float[16]);
+            Matrix4f projRotUnj = new Matrix4f(haveProjection ? LEVEL_PROJECTION_UNJITTERED : cam.projectionMatrix)
+                    .mul(new Matrix4f().set(cam.viewRotationMatrix));
+            float[] vpUnjittered = new Matrix4f(projRotUnj).translate(-rx, -ry, -rz).get(new float[16]);
             float[] invVp = new Matrix4f(viewProj).invert().get(new float[16]);
 
             int dimension = level.dimension() == Level.OVERWORLD ? 0 : level.dimension() == Level.NETHER ? 1 : 2;
@@ -153,11 +160,10 @@ public final class FrameDataCapture {
             float[] shadowFrustum = new float[24];
             float[] shadowEye = new float[3];
             if (shadows) {
-                Matrix4f sv = shadowViewProj(light, cam.pos.x, cam.pos.y, cam.pos.z, shadowResolution);
+                Matrix4f sv = shadowViewProj(light, cam.pos.x, cam.pos.y, cam.pos.z, ox, oy, oz, shadowResolution);
                 sv.get(shadowVp);
                 shadowFrustum = extractFrustum(transpose(shadowVp));
-                shadowEye = new float[]{(float) cam.pos.x + light.x * 1e4f, (float) cam.pos.y + light.y * 1e4f,
-                        (float) cam.pos.z + light.z * 1e4f};
+                shadowEye = new float[]{rx + light.x * 1e4f, ry + light.y * 1e4f, rz + light.z * 1e4f};
             }
 
             if (DEBUG_LOG && frameIndex % 120 == 0) {
@@ -168,11 +174,12 @@ public final class FrameDataCapture {
             float time = (float) (((System.nanoTime() - T0) / 1e9) % 3600.0);
             return new NativePassRunner.FrameUniformsData(
                     vp, invVp, shadowVp,
-                    (float) cam.pos.x, (float) cam.pos.y, (float) cam.pos.z, time,
+                    rx, ry, rz, time,
                     new float[]{sunDir.x, sunDir.y, sunDir.z}, dimension == 0 ? vis : 0.0f, lightDir, noon,
                     skyRgb, renderDist, fog, rain, thunder, shadows ? SHADOW_DISTANCE : 0.0f,
                     dimension, fogType, moon, caveSmoothed, exposure, frameIndex,
-                    extractFrustum(transpose(vp)), shadowFrustum, shadowEye, vpUnjittered);
+                    extractFrustum(transpose(vp)), shadowFrustum, shadowEye, vpUnjittered,
+                    cam.pos.x, cam.pos.y, cam.pos.z, ox, oy, oz, projRotUnj.get(new float[16]));
         } catch (Throwable th) {
             if (!warned) {
                 warned = true;
@@ -183,18 +190,27 @@ public final class FrameDataCapture {
     }
 
     /**
-     * Ortho-Lichtraum um die Kamera. Die Kameraposition wird im Lichtraum auf
-     * das Texelraster der (verzerrten) Map-Mitte gerastet -> kein Flimmern der
-     * Schattenkanten beim Laufen.
+     * Ortho-Lichtraum um die Kamera (im relativen Raum um den Render-Ursprung o). Die Kamera wird
+     * im Lichtraum auf das Texelraster der (verzerrten) Map-Mitte gerastet -> kein Flimmern der
+     * Schattenkanten beim Laufen. Gerastet wird in double-Weltkoordinaten: gleiche Raster-
+     * position unabhaengig vom Ursprung (kein Sprung, wenn der Ursprung wechselt) und bei hohen
+     * Koordinaten keine float-Rundung, die das Raster springen laesst.
      */
-    private static Matrix4f shadowViewProj(Vector3f light, double cx, double cy, double cz, int res) {
+    private static Matrix4f shadowViewProj(Vector3f light, double cx, double cy, double cz, int ox, int oy, int oz, int res) {
         Vector3f up = Math.abs(light.y) > 0.99f ? new Vector3f(1, 0, 0) : new Vector3f(0, 1, 0);
         Matrix4f rot = new Matrix4f().lookAt(0, 0, 0, -light.x, -light.y, -light.z, up.x, up.y, up.z);
-        Vector3f pc = rot.transformPosition(new Vector3f((float) cx, (float) cy, (float) cz));
-        float texel = 2.0f * SHADOW_DISTANCE / res * 0.14f; // Texelgroesse in der Map-Mitte (Verzerrung 0.86)
-        float sx = (float) Math.floor(pc.x / texel) * texel;
-        float sy = (float) Math.floor(pc.y / texel) * texel;
-        Matrix4f viewL = new Matrix4f().translation(-sx, -sy, -pc.z).mul(rot);
+        // Lichtraum-Position der Kamera und des Ursprungs in double (rot ist orthonormal, ohne Translation)
+        double pcx = rot.m00() * cx + rot.m10() * cy + rot.m20() * cz;
+        double pcy = rot.m01() * cx + rot.m11() * cy + rot.m21() * cz;
+        double pcz = rot.m02() * cx + rot.m12() * cy + rot.m22() * cz;
+        double pox = rot.m00() * ox + rot.m10() * oy + rot.m20() * oz;
+        double poy = rot.m01() * ox + rot.m11() * oy + rot.m21() * oz;
+        double poz = rot.m02() * ox + rot.m12() * oy + rot.m22() * oz;
+        double texel = 2.0 * SHADOW_DISTANCE / res * 0.14; // Texelgroesse in der Map-Mitte (Verzerrung 0.86)
+        double sx = Math.floor(pcx / texel) * texel;
+        double sy = Math.floor(pcy / texel) * texel;
+        // relativer Punkt p: Lichtraum = rot*p + rot*o; verschoben um die gerastete Kamera
+        Matrix4f viewL = new Matrix4f().translation((float) (pox - sx), (float) (poy - sy), (float) (poz - pcz)).mul(rot);
         return new Matrix4f().setOrtho(-SHADOW_DISTANCE, SHADOW_DISTANCE, -SHADOW_DISTANCE, SHADOW_DISTANCE,
                 -SHADOW_DEPTH, SHADOW_DEPTH, true).mul(viewL);
     }

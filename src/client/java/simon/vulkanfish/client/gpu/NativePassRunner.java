@@ -122,7 +122,7 @@ public final class NativePassRunner {
     public static final int TARGET_LOD_QUADS = 4;
     public static final int TARGET_LOD_MESHLETS = 5;
     public static final int TARGET_LOD_CLUSTERS = 6;
-    private static final int UBO_BYTES = 528;
+    private static final int UBO_BYTES = 560;
     private static final int FRAMES = 3;
     private static final long STAGING_BYTES = 16L << 20;
     private static final long WAIT_TIMEOUT_NS = 2_000_000_000L;
@@ -134,6 +134,8 @@ public final class NativePassRunner {
     private static final int TS_TERRAIN = PASS_NAMES.length + 1;
     private static final int TS_PER_FRAME = TS_TERRAIN + 7; // + Wasser-Zwischenstempel (3) // + Wasser/Glas (Start/Ende) + TAA (Start/Ende)
     private static final int TAA_UBO_BYTES = 160;
+    /** Periode der gewickelten Weltlage fuer Shader-Rauschen (ein unsichtbarer Sprung alle 4096 Bloecke). */
+    private static final int WORLD_WRAP = 4096;
 
     private final BlazeDeviceInterop blaze;
     private VkDevice dev;
@@ -177,7 +179,9 @@ public final class NativePassRunner {
     private Img taaOut;
     private int historyIndex;
     private boolean historyValid;
-    private float[] prevViewProjUnjittered;
+    // Vorframe fuer die TAA-Reprojektion: Projektion*Rotation (ohne Translation) + Welt-Kamera
+    private float[] prevProjRot;
+    private double[] prevCamW;
     private FrameUniformsData frameData; // Daten des aktuellen Frames (fuer TAA)
     private int waterSlot = -1; // Slot, dessen Terrain-Frame gerade aufgenommen wurde (Wasser folgt)
 
@@ -1618,7 +1622,8 @@ public final class NativePassRunner {
             completed = v.get(0);
         }
         long t0 = System.nanoTime();
-        rt.record(arena, cmd, slot, d.camX(), d.camY(), d.camZ(), completed, timelineValue + 1);
+        rt.record(arena, cmd, slot, d.camWX(), d.camWY(), d.camWZ(), d.originX(), d.originY(), d.originZ(),
+                completed, timelineValue + 1);
         rtCpuNanos += System.nanoTime() - t0;
         rtCpuFrames++;
         VK10.vkCmdFillBuffer(cmd, cellCount.buffer(), 0, cellCount.size(), 0);
@@ -1631,7 +1636,9 @@ public final class NativePassRunner {
                     W.raw(0, rt.lightBuffer(slot), (long) RtAccel.MAX_LIGHTS * RtAccel.LIGHT_BYTES),
                     W.sb(1, cellCount), W.sb(2, cellLights));
             ByteBuffer pc = arena.malloc(16);
-            pc.putInt(0, rt.gridX()).putInt(4, rt.gridY()).putInt(8, rt.gridZ()).putInt(12, n);
+            // Gitter relativ zum Render-Ursprung (Vielfaches von 16 -> ganze Zellen), wie die Lichtpositionen
+            pc.putInt(0, rt.gridX() - d.originX() / RtAccel.CELL_BLOCKS).putInt(4, rt.gridY() - d.originY() / RtAccel.CELL_BLOCKS)
+                    .putInt(8, rt.gridZ() - d.originZ() / RtAccel.CELL_BLOCKS).putInt(12, n);
             VK10.vkCmdPushConstants(cmd, layoutLightBin, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
             VK10.vkCmdDispatch(cmd, (n + 63) / 64, 1, 1);
         }
@@ -1856,6 +1863,11 @@ public final class NativePassRunner {
     // ---------- Frame ----------
 
     /** CPU-seitige Frame-Treiber (skalar, O(1) – kein Szenen-Content auf CPU). */
+    /**
+     * Alle Positionen/Matrizen relativ zum Render-Ursprung (originX/Y/Z = Ursprung der Kamera-Section,
+     * ganzzahlig): camX/Y/Z ist die Kamera darin (0..16), camWX/Y/Z die Welt-Kamera in double.
+     * So bleibt float-Genauigkeit auch bei Koordinaten in Millionenhoehe erhalten.
+     */
     public record FrameUniformsData(float[] viewProj, float[] invViewProj, float[] shadowViewProj,
                                     float camX, float camY, float camZ, float time,
                                     float[] sunDir, float sunVisibility, float[] lightDir, float noonFactor,
@@ -1863,7 +1875,9 @@ public final class NativePassRunner {
                                     float rainFactor, float thunderFactor, float shadowDistance,
                                     int dimension, int fogType, float moonBrightness, float caveFactor,
                                     float exposure, long frameIndex, float[] frustum,
-                                    float[] shadowFrustum, float[] shadowEye, float[] viewProjUnjittered) {
+                                    float[] shadowFrustum, float[] shadowEye, float[] viewProjUnjittered,
+                                    double camWX, double camWY, double camWZ, int originX, int originY, int originZ,
+                                    float[] projRotUnjittered) {
     }
 
     /**
@@ -1942,7 +1956,8 @@ public final class NativePassRunner {
                 recordCull(arena, cmd, shadowUniforms[slot], visShadow, visShadowCount, shadowIndirect, 0);
                 // Fernfeld als Schattenwerfer nur ab der Hoehe, ab der das Nahfeld sie selbst laedt
                 // (TerrainStreamer.syncShadowCasters): dort fuellt es Luecken, bis die Sections gemesht sind
-                float shadowFloor = (Math.floorDiv((int) Math.floor(d.camY()), 16) - TerrainStreamer.SHADOW_BELOW) * 16f;
+                // relativ zum Render-Ursprung (= Ursprung der Kamera-Section)
+                float shadowFloor = -TerrainStreamer.SHADOW_BELOW * 16f;
                 if (pipeLodShadow != 0L && !NO_LOD_SHADOW) recordLodCull(arena, cmd, shadowUniforms[slot], lodVisShadow, lodShadowIndirect, 0,
                         shadowFloor, lodMaskData != null ? TerrainStreamer.SHADOW_RADIUS * 16f : 1e30f); // Mitte = Masken-Chunk
             }
@@ -2184,9 +2199,13 @@ public final class NativePassRunner {
         try (Arena arena = new Arena()) {
             ByteBuffer ub = MemoryUtil.memByteBuffer(taaUniforms[slot].mapped(), TAA_UBO_BYTES);
             putMat(ub, 0, d.invViewProj());
-            putMat(ub, 64, prevViewProjUnjittered != null ? prevViewProjUnjittered : d.viewProjUnjittered());
+            // Vorframe-Matrix im relativen Raum DIESES Frames (der Render-Ursprung kann gewechselt haben)
+            float[] prevVp = prevProjRot == null ? null : new org.joml.Matrix4f().set(prevProjRot)
+                    .translate((float) (d.originX() - prevCamW[0]), (float) (d.originY() - prevCamW[1]), (float) (d.originZ() - prevCamW[2]))
+                    .get(new float[16]);
+            putMat(ub, 64, prevVp != null ? prevVp : d.viewProjUnjittered());
             ub.putFloat(128, width).putFloat(132, height);
-            ub.putInt(136, historyValid && prevViewProjUnjittered != null ? 1 : 0);
+            ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
             ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
 
             Img histIn = history[historyIndex];
@@ -2217,7 +2236,8 @@ public final class NativePassRunner {
             slotValue[slot] = timelineValue;
             historyIndex ^= 1;
             historyValid = true;
-            prevViewProjUnjittered = d.viewProjUnjittered();
+            prevProjRot = d.projRotUnjittered();
+            prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] TAA-Pass deaktiviert, native Submission aus", t);
             ready = false;
@@ -2336,9 +2356,15 @@ public final class NativePassRunner {
         bb.putInt(484, shadowPass ? 1 : 0); // cullFlags: Schatten-Cull ohne Wasser
         bb.putInt(488, rt != null && !rtForceOff ? 1 : 0);
         bb.putInt(492, rt != null ? rt.lightCount() : 0);
-        bb.putInt(496, RtAccel.gridOrigin(d.camX())).putInt(500, RtAccel.gridOrigin(d.camY()))
-                .putInt(504, RtAccel.gridOrigin(d.camZ())).putInt(508, 0);
+        // Lichtgitter relativ zum Render-Ursprung (dort liegen auch Lichter und TLAS)
+        bb.putInt(496, RtAccel.gridOrigin(d.camWX()) - d.originX() / RtAccel.CELL_BLOCKS)
+                .putInt(500, RtAccel.gridOrigin(d.camWY()) - d.originY() / RtAccel.CELL_BLOCKS)
+                .putInt(504, RtAccel.gridOrigin(d.camWZ()) - d.originZ() / RtAccel.CELL_BLOCKS).putInt(508, 0);
         bb.putFloat(512, simon.vulkanfish.client.VulkanfishSettings.fullbright());
+        // Render-Ursprung (Welt, Bloecke) + gewickelte Weltlage fuer Rauschen (Wind, Wellen, Kaustik)
+        bb.putInt(528, d.originX()).putInt(532, d.originY()).putInt(536, d.originZ()).putInt(540, 0);
+        bb.putFloat(544, Math.floorMod(d.originX(), WORLD_WRAP)).putFloat(548, Math.floorMod(d.originY(), WORLD_WRAP))
+                .putFloat(552, Math.floorMod(d.originZ(), WORLD_WRAP)).putFloat(556, 0f);
     }
 
     /** Selbsttest/A-B: Raytracing-Blocklicht abschalten (Vanilla-Blocklicht, gleiche Pipeline). */

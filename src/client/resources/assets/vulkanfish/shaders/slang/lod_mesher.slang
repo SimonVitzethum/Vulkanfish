@@ -352,7 +352,9 @@ void lodMeshMain(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID, in
         for (uint d = 0; d < bucket; d++) dstQuad += job.dirQuads[d];
         dstQuad += q0;
         int s = 1 << job.level;
-        float3 origin = float3(float(job.nx * 32 * s), float(job.minY), float(job.nz * 32 * s));
+        // Kugel und Ebenen-Cutoff relativ zum Knoten-Ursprung (h.origin), wie im Nahfeld:
+        // die Draw-Shader rechnen sie gegen den Render-Ursprung um (genau bei jeder Koordinate)
+        float3 origin = float3(0.0);
         float3 mn = float3(1e30), mx = float3(-1e30);
         float cutoff = 1e30;
         int3 dvec = DIRS[dir];

@@ -101,17 +101,17 @@ bool hizVisible(float3 c, float r, FrameUniforms f)
     return zNearest >= d;
 }
 
-// LOD: liegt die Box komplett in Sections, die das Nahfeld zeichnet? (dann bringt LOD nichts)
-bool nearCoveredBox(float3 mn, float3 mx)
+// LOD: liegt die Box (relativer Raum) komplett in Sections, die das Nahfeld zeichnet? (dann bringt LOD nichts)
+bool nearCoveredBox(FrameUniforms f, float3 mn, float3 mx)
 {
     if ((gCull.nearMode & 1u) == 0)
         return false;
-    int2 c0 = int2(floor(mn.xz / 16.0)), c1 = int2(floor(mx.xz / 16.0));
+    int2 c0 = worldChunk(f, mn.xz), c1 = worldChunk(f, mx.xz);
     if (any(c1 - c0 > 3))
         return false;
     int minSY = int(gCull.nearMode >> 1) - 2048;
-    int s0 = max(int(floor(mn.y / 16.0)) - minSY, 0);
-    int s1 = min(int(floor(mx.y / 16.0)) - minSY, 31);
+    int s0 = max(worldSectionY(f, mn.y) - minSY, 0);
+    int s1 = min(worldSectionY(f, mx.y) - minSY, 31);
     if (s1 < s0)
         return true; // ganz unter/ueber der Welt
     uint need = (s1 >= 31 ? 0xFFFFFFFFu : ((1u << uint(s1 + 1)) - 1u)) & ~((1u << uint(s0)) - 1u);
@@ -150,13 +150,16 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
             Cluster cl = gClusters[clusterIdx];
             if (cl.meshletCount > 0)
             {
-                float boundR = length(cl.extent) + cl.lodError;
-                pass = sphereFrustum(cl.center, boundR, f.frustumPlanes) ? 1u : 0u;
-                if (pass != 0 && nearCoveredBox(cl.center - cl.extent, cl.center + cl.extent))
+                // Cluster-Mitte liegt in Weltkoordinaten vor (float, ganzzahlig bis 16 Mio. exakt);
+                // der kleine Zuschlag deckt Rundung jenseits davon
+                float3 center = cl.center - float3(f.renderOrigin.xyz);
+                float boundR = length(cl.extent) + cl.lodError + 2.0;
+                pass = sphereFrustum(center, boundR, f.frustumPlanes) ? 1u : 0u;
+                if (pass != 0 && nearCoveredBox(f, center - cl.extent, center + cl.extent))
                     pass = 0u;
                 if (pass != 0)
                 {
-                    float dist = max(distance(cl.center, f.camPos), 0.001);
+                    float dist = max(distance(center, f.camPos), 0.001);
                     float sse = cl.lodError * f.screenSize.y / (2.0 * dist * 0.866);
                     float limit = ((cl.flags & 2) != 0) ? f.lodErrorThreshold * 4.0 : f.lodErrorThreshold;
                     pass = sse <= limit ? 1u : 0u;
@@ -178,6 +181,9 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
         MeshletHeader mh = gMeshlets[idx];
         if (mh.triCount == 0)
             continue; // freier/ersetzter Slot
+        // Kugel und Ebenen-Cutoff sind relativ zum Meshlet-Ursprung -> in den relativen Raum
+        float3 org = relOrigin(f, mh.originX, mh.originY, mh.originZ);
+        float3 bc = org + mh.boundCenter;
         bool water = (mh.clusterIdx & WATER_BIT) != 0;
         bool trans = (mh.clusterIdx & TRANS_BIT) != 0;
         if ((water || trans) && ((f.cullFlags & 1) != 0 || phase == 1))
@@ -185,14 +191,15 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
 
         // Meshlet-Feinfilter: Frustum + Backface-Ebene (+ Hi-Z in Phase 2)
         // Abdeckung nur fuer den Teil ueber minTopY pruefen (darunter ist das Meshlet ohnehin nicht gefragt)
-        float3 bmn = mh.boundCenter - mh.boundRadius, bmx = mh.boundCenter + mh.boundRadius;
+        float3 bmn = bc - mh.boundRadius, bmx = bc + mh.boundRadius;
         bmn.y = max(bmn.y, gCull.minTopY);
-        bool pass = sphereFrustum(mh.boundCenter, mh.boundRadius, f.frustumPlanes)
+        float2 camChunkRel = float2(int2(gCull.camChunkX, gCull.camChunkZ) - (f.renderOrigin.xz >> 4));
+        bool pass = sphereFrustum(bc, mh.boundRadius, f.frustumPlanes)
                  && bmx.y >= gCull.minTopY
-                 && length(mh.boundCenter.xz - (float2(gCull.camChunkX, gCull.camChunkZ) + 0.5) * 16.0) - mh.boundRadius <= gCull.maxDistXZ
-                 && !nearCoveredBox(bmn, bmx);
+                 && length(bc.xz - (camChunkRel + 0.5) * 16.0) - mh.boundRadius <= gCull.maxDistXZ
+                 && !nearCoveredBox(f, bmn, bmx);
         if (pass && dot(mh.coneAxis, mh.coneAxis) > 0.5)
-            pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff - 0.01;
+            pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff + dot(org, mh.coneAxis) - 0.01;
         if (phase == 1)
         {
             if (!pass || gVisBits[idx] == 0)
@@ -201,7 +208,7 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
         else if (phase == 2)
         {
             if (pass)
-                pass = hizVisible(mh.boundCenter, mh.boundRadius, f);
+                pass = hizVisible(bc, mh.boundRadius, f);
             if (!water && !trans)
             {
                 bool drawnInPhase1 = gVisBits[idx] != 0;

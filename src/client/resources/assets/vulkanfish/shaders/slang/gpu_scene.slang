@@ -40,8 +40,29 @@ struct FrameUniforms
     uint rtLightCount;        // 492
     int4 lightGrid;           // 496  xyz = Ursprung des Lichtgitters (Zellen a 8 Bloecke)
     float fullbright;         // 512  0 aus .. 1 (Videoeinstellungen)
-    float3 pad512;
-};                            // 528 Byte
+    float pad516, pad520, pad524; // einzeln: ein float3 hier landet je nach Packregel auf 516 oder 528
+    // Alle Positionen (Matrizen, camPos, Lichter, TLAS) sind relativ zu diesem Render-Ursprung
+    // (Welt, Bloecke, Vielfaches von 16): float bleibt auch bei Koordinaten in Millionenhoehe genau
+    int4 renderOrigin;        // 528
+    float4 worldWrap;         // 544  renderOrigin mod 4096: Weltlage fuer Rauschen (Wind, Wellen, Kaustik)
+};                            // 560 Byte
+
+// Ganzzahliger Welt-Ursprung (Section, LOD-Knoten) -> relativer Raum (exakt)
+float3 relOrigin(FrameUniforms f, int x, int y, int z)
+{
+    return float3(int3(x, y, z) - f.renderOrigin.xyz);
+}
+
+// Relativer Punkt -> Welt-Chunk (x, z) bzw. Welt-Section-Y (fuer die Nahfeld-Abdeckung des LOD)
+int2 worldChunk(FrameUniforms f, float2 relXZ)
+{
+    return int2(floor(relXZ / 16.0)) + (f.renderOrigin.xz >> 4);
+}
+
+int worldSectionY(FrameUniforms f, float relY)
+{
+    return int(floor(relY / 16.0)) + (f.renderOrigin.y >> 4);
+}
 
 // ---- Chunk-Cluster (LOD-Einheit, 2x2 Sections nah, groesser fern) ----
 struct Cluster
@@ -67,10 +88,10 @@ struct MeshletHeader
     int originX;         // Section-Ursprung (Bloecke) fuer TerrainVertex-Positionen;
     int originY;         // belegt das std430-Padding vor boundCenter (Offsets 20/24/28)
     int originZ;
-    float3 boundCenter;
+    float3 boundCenter;  // relativ zum Ursprung origin (nicht Welt)
     float boundRadius;
     // Backface-Test fuer achsenparallele Face-Gruppen: sichtbar gdw.
-    // dot(camPos, coneAxis) >= coneCutoff (= min dot(p, n) aller Quads).
+    // dot(camPos, coneAxis) >= coneCutoff (= min dot(p, n) aller Quads, p relativ zu origin).
     // coneAxis = 0 -> kein Test.
     float3 coneAxis;
     float coneCutoff;
