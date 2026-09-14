@@ -10,6 +10,8 @@
   "options.vulkanfish.raytracing.tooltip": "Torches, lanterns and other light sources cast real shadows (hardware ray tracing). Off: vanilla block light.",
   "options.vulkanfish.taa": "Temporal Anti-Aliasing",
   "options.vulkanfish.taa.tooltip": "Smooth edges and stable details over several frames.",
+  "options.vulkanfish.dlss": "DLSS 4 (DLAA)",
+  "options.vulkanfish.dlss.tooltip": "NVIDIA's AI anti-aliasing (DLSS 4, transformer model) instead of the built-in TAA. NVIDIA RTX only; otherwise TAA is used.",
   "options.vulkanfish.lodDistance": "Far Field Distance",
   "options.vulkanfish.lodDistance.tooltip": "How far the simplified far field reaches. Within your render distance the normal world is shown.",
   "options.vulkanfish.lodDetail": "Far Field Detail",

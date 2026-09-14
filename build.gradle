@@ -48,6 +48,8 @@ tasks.named("runClient") {
 		args("--quickPlaySingleplayer", project.property("quickWorld"),
 			"--width", project.findProperty("vfWidth") ?: "640", "--height", project.findProperty("vfHeight") ?: "480")
 	}
+	// DLSS 4: Shim + Snippets aus buildNgx (fehlt die Datei, bleibt DLSS aus); FFM ohne Warnung
+	jvmArgs("-Dvulkanfish.ngxDir=${buildDir}/native", "--enable-native-access=ALL-UNNAMED")
 	// Vulkan erzwingen (Mojangs Crash-Guard faellt sonst nach SIGSEGVs auf OpenGL zurueck)
 	args("--graphicsBackend", "vulkan")
 	// Validierungs-Layer fuer unsere nativen Calls (nur Diagnose, kostet FPS)
@@ -139,6 +141,35 @@ tasks.register("compileSlang") {
 }
 
 processResources.dependsOn("compileSlang")
+
+// ---- DLSS 4 (NVIDIA NGX) ----
+// Baut den nativen Shim src/client/native/vfngx.cpp gegen das DLSS-SDK (Header + libnvsdk_ngx.a)
+// und kopiert die DLSS-Snippets (libnvidia-ngx-dlss*.so) in ein beschreibbares Verzeichnis
+// (NGX legt dort Caches an). SDK-Ort: -PngxSdk=<pfad> (Standard: RenderFX-Vendor-Verzeichnis).
+// Ohne SDK wird nichts gebaut, DLSS bleibt dann aus.
+def ngxSdk = file(project.findProperty("ngxSdk") ?: "${rootDir}/../Native NvOFVk frame-gen/renderfx/vendor/ngx")
+def ngxOut = file("$buildDir/native")
+tasks.register("buildNgx") {
+	inputs.file("src/client/native/vfngx.cpp")
+	outputs.dir(ngxOut)
+	onlyIf { file("$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a").exists() }
+	doLast {
+		ngxOut.mkdirs()
+		def cmd = ["g++", "-std=c++17", "-O2", "-fPIC", "-shared", "-o", "$ngxOut/libvfngx.so",
+			file("src/client/native/vfngx.cpp").toString(), "-I$ngxSdk/include",
+			"-Wl,--whole-archive", "$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a", "-Wl,--no-whole-archive",
+			"-ldl", "-Wl,--exclude-libs,ALL"].collect { it.toString() }
+		def proc = new ProcessBuilder(cmd).redirectErrorStream(true).start()
+		def log = proc.inputStream.text
+		proc.waitFor()
+		if (proc.exitValue() != 0) throw new GradleException("vfngx-Shim: g++ fehlgeschlagen\n${log}")
+		copy {
+			from("$ngxSdk/lib/Linux_x86_64/rel") { include "libnvidia-ngx-dlss*.so.*" }
+			into "$ngxOut/ngx"
+		}
+	}
+}
+tasks.named("runClient") { dependsOn("buildNgx") }
 
 tasks.withType(JavaCompile).configureEach {
 	it.options.release = 25

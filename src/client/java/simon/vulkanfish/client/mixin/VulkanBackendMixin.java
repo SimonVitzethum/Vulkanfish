@@ -25,5 +25,6 @@ public class VulkanBackendMixin {
                                                      Set<VulkanFeature> vulkanFeatures,
                                                      CallbackInfoReturnable<VkDevice> cir) {
         MeshShaderSupport.augment(deviceExtensions, physicalDevice, vulkanFeatures);
+        simon.vulkanfish.client.gpu.NgxBridge.augment(deviceExtensions, physicalDevice); // DLSS 4 (NGX)
     }
 }

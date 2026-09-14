@@ -10,6 +10,8 @@
   "options.vulkanfish.raytracing.tooltip": "Fackeln, Laternen und andere Lichtquellen werfen echte Schatten (Hardware-Raytracing). Aus: Vanilla-Blocklicht.",
   "options.vulkanfish.taa": "Temporales Anti-Aliasing",
   "options.vulkanfish.taa.tooltip": "Glatte Kanten und ruhige Details über mehrere Bilder.",
+  "options.vulkanfish.dlss": "DLSS 4 (DLAA)",
+  "options.vulkanfish.dlss.tooltip": "NVIDIAs KI-Kantenglättung (DLSS 4, Transformer-Modell) statt des eigenen TAA. Nur mit NVIDIA-RTX-GPU; sonst gilt das TAA.",
   "options.vulkanfish.lodDistance": "Fernfeld-Weite",
   "options.vulkanfish.lodDistance.tooltip": "Wie weit das vereinfachte Fernfeld reicht. Innerhalb der Sichtweite siehst du die normale Welt.",
   "options.vulkanfish.lodDetail": "Fernfeld-Detail",

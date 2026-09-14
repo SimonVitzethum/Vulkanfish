@@ -32,6 +32,11 @@ public final class VulkanfishOptions {
                 VulkanfishSettings.taa(), VulkanfishSettings::setTaa);
     }
 
+    public static OptionInstance<Boolean> dlss() {
+        return OptionInstance.createBoolean("options.vulkanfish.dlss", tip("options.vulkanfish.dlss"),
+                VulkanfishSettings.dlss(), VulkanfishSettings::setDlss);
+    }
+
     /** Fernfeld-Radius in Schritten zu 32 Chunks (32..1024). */
     public static OptionInstance<Integer> lodDistance() {
         return new OptionInstance<>("options.vulkanfish.lodDistance", tip("options.vulkanfish.lodDistance"),

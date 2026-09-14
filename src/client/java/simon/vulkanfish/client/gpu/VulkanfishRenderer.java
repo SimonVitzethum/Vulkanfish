@@ -244,6 +244,7 @@ public final class VulkanfishRenderer {
 
     private void applyLiveSettings() {
         NativePassRunner.rtForceOff = !simon.vulkanfish.client.VulkanfishSettings.raytracing() || Boolean.getBoolean("vulkanfish.rtOff");
+        NativePassRunner.dlaaWanted = simon.vulkanfish.client.VulkanfishSettings.dlss() && !"false".equals(System.getProperty("vulkanfish.dlss"));
         if (lod != null) {
             lod.setDistanceChunks(simon.vulkanfish.client.VulkanfishSettings.lodChunks());
             lod.setPixelError(simon.vulkanfish.client.VulkanfishSettings.lodPixelError());

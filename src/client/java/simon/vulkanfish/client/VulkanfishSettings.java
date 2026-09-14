@@ -24,7 +24,7 @@ public final class VulkanfishSettings {
 
     /** Fullbright in Prozent (0 = aus). */
     private static volatile int fullbright;
-    private static volatile Boolean taa, raytracing;
+    private static volatile Boolean taa, raytracing, dlss;
     private static volatile Integer lodChunks;
     private static volatile Float lodPixelError, lodGpuMs;
     /** Bekannte Seeds je Serveradresse (Mehrspieler-LOD-Generierung). */
@@ -74,6 +74,17 @@ public final class VulkanfishSettings {
     public static void setTaa(boolean on) {
         taa = on;
         SET.add("taa");
+        save();
+    }
+
+    /** DLSS 4 (DLAA) statt des eigenen TAA, wenn NGX verfuegbar ist. */
+    public static boolean dlss() {
+        return dlss == null || dlss;
+    }
+
+    public static void setDlss(boolean on) {
+        dlss = on;
+        SET.add("dlss");
         save();
     }
 
@@ -150,11 +161,12 @@ public final class VulkanfishSettings {
         }
         try {
             fullbright = clamp(Integer.parseInt(p.getProperty("fullbright", "0").trim()), 0, 100);
-            for (String k : new String[]{"taa", "raytracing", "lodDistance", "lodPixelError", "lodGpuBudgetMs"}) {
+            for (String k : new String[]{"taa", "dlss", "raytracing", "lodDistance", "lodPixelError", "lodGpuBudgetMs"}) {
                 if (p.containsKey(k)) SET.add(k);
             }
             if (p.containsKey("taa")) taa = Boolean.parseBoolean(p.getProperty("taa").trim());
             if (p.containsKey("raytracing")) raytracing = Boolean.parseBoolean(p.getProperty("raytracing").trim());
+            if (p.containsKey("dlss")) dlss = Boolean.parseBoolean(p.getProperty("dlss").trim());
             if (p.containsKey("lodDistance")) lodChunks = clamp(Integer.parseInt(p.getProperty("lodDistance").trim()), 32, 1024);
             if (p.containsKey("lodPixelError")) lodPixelError = Float.parseFloat(p.getProperty("lodPixelError").trim());
             if (p.containsKey("lodGpuBudgetMs")) lodGpuMs = Float.parseFloat(p.getProperty("lodGpuBudgetMs").trim());
@@ -176,6 +188,7 @@ public final class VulkanfishSettings {
         p.setProperty("fullbright", Integer.toString(fullbright));
         if (SET.contains("taa")) p.setProperty("taa", Boolean.toString(taa()));
         if (SET.contains("raytracing")) p.setProperty("raytracing", Boolean.toString(raytracing()));
+        if (SET.contains("dlss")) p.setProperty("dlss", Boolean.toString(dlss()));
         if (SET.contains("lodDistance")) p.setProperty("lodDistance", Integer.toString(lodChunks()));
         if (SET.contains("lodPixelError")) p.setProperty("lodPixelError", Float.toString(lodPixelError()));
         if (SET.contains("lodGpuBudgetMs")) p.setProperty("lodGpuBudgetMs", Float.toString(lodGpuMs()));

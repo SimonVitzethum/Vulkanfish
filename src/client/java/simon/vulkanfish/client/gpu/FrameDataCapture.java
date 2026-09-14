@@ -52,6 +52,8 @@ public final class FrameDataCapture {
     /** TAA aktiv (vom Renderer gesetzt): dann wird die Level-Projektion gejittert. */
     public static volatile boolean taaJitter;
     private static int jitterIndex;
+    /** Jitter dieses Frames in Pixeln (x nach rechts, y nach unten), fuer DLSS. */
+    public static volatile float jitterPxX, jitterPxY;
 
     /**
      * Aus dem GameRenderer-Mixin (Render-Thread): Projektion merken und bei aktivem TAA
@@ -67,6 +69,10 @@ public final class FrameDataCapture {
             // Clip-Offset proportional zu w (Perspektive: w = -z_view) -> konstanter NDC-Versatz
             projection.m20(projection.m20() - jx * 2.0f / target.width);
             projection.m21(projection.m21() - jy * 2.0f / target.height);
+            jitterPxX = jx;
+            jitterPxY = jy;
+        } else {
+            jitterPxX = jitterPxY = 0f;
         }
         LEVEL_PROJECTION.set(projection);
         haveProjection = true;

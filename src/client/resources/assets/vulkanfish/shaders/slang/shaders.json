@@ -156,6 +156,12 @@
       "spv": "lod_frag.spv"
     },
     {
+      "file": "motion.slang",
+      "entry": "motionMain",
+      "stage": "compute",
+      "spv": "motion.spv"
+    },
+    {
       "file": "lod_mesh.slang",
       "entry": "lodShadowMesh",
       "stage": "mesh",
