@@ -156,6 +156,8 @@ public final class NativePassRunner {
     private final List<Buf> buffers = new ArrayList<>();
     private long linearSampler;
     private long atlasSampler;
+    private long atlasSamplerBase;  // ohne Mip-Bias; atlasSampler = der des aktuellen Frames
+    private final it.unimi.dsi.fastutil.ints.Int2LongOpenHashMap biasSamplers = new it.unimi.dsi.fastutil.ints.Int2LongOpenHashMap();
     private long shadowSampler;
     private long pool;
     private long timeline;
@@ -184,6 +186,11 @@ public final class NativePassRunner {
     private Img motion;
     // DLSS Frame Generation: Tiefe + Szene ohne Hand/GUI, am Ende von renderTaa gesichert
     private Img fgDepth, fgHud;
+    // Ausgabe von DLSS/DLAA in Bildschirmaufloesung (bei DLSS Super Resolution groesser als width x height)
+    private Img upOut;
+    private int outW, outH;
+    private boolean outInitPending;
+    private long frameStartValue;
     // Bewegte Entities fuer die Bewegungsvektoren (je Frame-Slot, 48 Byte je Entity)
     private final Buf[] entityMotion = new Buf[FRAMES];
     private float[] entityMotionData = new float[0];
@@ -1053,6 +1060,31 @@ public final class NativePassRunner {
 
     // ---------- Erstellung ----------
 
+    /**
+     * Block-Atlas mit negativem Mip-Bias bei DLSS Super Resolution (log2 der Skalierung, NVIDIAs
+     * Empfehlung ohne das zusaetzliche -1, das bei Nearest-Pixeln flimmert): sonst waehlt die
+     * kleinere Renderaufloesung zu grobe Mips und Texturen werden matschig.
+     */
+    private long atlasSamplerFor(float scale) {
+        if (scale >= 0.999f) return atlasSamplerBase;
+        int key = Math.round((float) (Math.log(scale) / Math.log(2.0)) * 100.0f);
+        long cached = biasSamplers.get(key);
+        if (cached != 0L) return cached;
+        try (Arena arena = new Arena()) {
+            VkSamplerCreateInfo si = VkSamplerCreateInfo.calloc(arena.stack()).sType$Default()
+                    .magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST)
+                    .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_NEAREST)
+                    .addressModeU(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeV(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .addressModeW(VK10.VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE)
+                    .minLod(0).maxLod(16).maxAnisotropy(1.0f).mipLodBias(key / 100.0f);
+            LongBuffer p = arena.mallocLong(1);
+            check(VK10.vkCreateSampler(dev, si, null, p), "atlasSamplerBias");
+            biasSamplers.put(key, p.get(0));
+            return p.get(0);
+        }
+    }
+
     private void createSamplers(Arena arena) {
         VkSamplerCreateInfo si = VkSamplerCreateInfo.calloc(arena.stack()).sType$Default()
                 .magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR)
@@ -1067,7 +1099,7 @@ public final class NativePassRunner {
         // Block-Atlas: Pixel-Look wie Vanilla (Nearest), Mips gegen Flimmern in der Ferne
         si.magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_NEAREST);
         check(VK10.vkCreateSampler(dev, si, null, p), "atlasSampler");
-        atlasSampler = p.get(0);
+        atlasSampler = atlasSamplerBase = p.get(0);
         // Schatten: Hardware-Vergleich + bilinear = 2x2-PCF pro Tap
         si.magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR).maxLod(0)
                 .compareEnable(true).compareOp(VK10.VK_COMPARE_OP_LESS_OR_EQUAL);
@@ -1776,11 +1808,9 @@ public final class NativePassRunner {
                 rrSpecular = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R8G8B8A8_UNORM, stor | sampled, ca);
                 rrNormals = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, stor | sampled, ca);
                 rrColor = makeImage(arena, w, h, 1, FMT_HDR, stor | sampled, ca);
-                rrOut = makeImage(arena, w, h, 1, FMT_HDR, stor | sampled | dst, ca); // dst: NGX leert beim Reset
             }
             if (FgPresenter.instance() != null) {
                 fgDepth = makeImage(arena, w, h, 1, FMT_DEPTH, sampled | dst, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
-                fgHud = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
             }
         }
         dlaaHistory = false;
@@ -1800,7 +1830,8 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, fgHud, rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, rrDiffuse, rrSpecular, rrNormals, rrColor}) destroyImg(img);
+        destroyOutput();
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = motion = null;
         fgDepth = fgHud = null;
         rrDiffuse = rrSpecular = rrNormals = rrColor = rrOut = null;
@@ -1953,6 +1984,8 @@ public final class NativePassRunner {
             long tw0 = System.nanoTime();
             if (!waitValue(slotValue[slot])) return false;
             slotWaitNs += System.nanoTime() - tw0;
+            frameStartValue = timelineValue; // bis hierher alles abgeschickt (ensureOutput darf darauf warten)
+            atlasSampler = atlasSamplerFor(RenderScale.current());
             collectTimestamps(slot);
             ensureSize(main.width, main.height);
             if (snapshotSource >= 0) {
@@ -2242,6 +2275,14 @@ public final class NativePassRunner {
      * aktuelles Bild + History -> neue History + nachgeschaerfte Ausgabe -> Main-Target.
      */
     public void renderTaa(RenderTarget main) {
+        renderTaa(main, null);
+    }
+
+    /**
+     * @param out Ziel in Bildschirmaufloesung, wenn die Welt kleiner gerendert wurde (DLSS Super
+     *            Resolution, RenderScale); null = Ergebnis zurueck ins Main-Target
+     */
+    public void renderTaa(RenderTarget main, RenderTarget out) {
         int slot = waterSlot;
         waterSlot = -1;
         FrameUniformsData d = frameData;
@@ -2252,8 +2293,14 @@ public final class NativePassRunner {
                 || !(main.getDepthTextureView() instanceof VulkanGpuTextureView depthView)
                 || main.width != width || main.height != height) {
             historyValid = false;
+            if (out != null) upscaleFallback(main, out);
             return;
         }
+        RenderTarget target = out != null ? out : main;
+        if (!(target.getColorTexture() instanceof VulkanGpuTexture targetColor)) return;
+        int ow = target.width, oh = target.height;
+        boolean scaled = ow != width || oh != height;
+        ensureOutput(ow, oh);
         try (Arena arena = new Arena()) {
             ByteBuffer ub = MemoryUtil.memByteBuffer(taaUniforms[slot].mapped(), TAA_UBO_BYTES);
             putMat(ub, 0, d.invViewProj());
@@ -2271,7 +2318,7 @@ public final class NativePassRunner {
             boolean fg = fgWanted(main);
             if (fg) fgCamera = fgCameraParams(d, prevVp);
             if (dlaaActive()) {
-                if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null, fg)) {
+                if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null, fg, target, targetColor)) {
                     prevProjRot = d.projRotUnjittered();
                     prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
                     historyValid = false; // TAA-History ist veraltet, falls spaeter zurueckgeschaltet wird
@@ -2287,6 +2334,7 @@ public final class NativePassRunner {
             check(VK10.vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo.calloc(arena.stack()).sType$Default()
                     .flags(VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)), "beginTaa");
             int q = slot * TS_PER_FRAME + TS_TERRAIN + 2;
+            initOutput(arena, cmd);
             fullBarrier(arena, cmd); // alle Level-Passes (auch Vanilla) fertig
             VK10.vkCmdWriteTimestamp(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, q);
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeTaa);
@@ -2297,7 +2345,8 @@ public final class NativePassRunner {
             barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT,
                     VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_SHADER_READ_BIT,
                     VK10.VK_ACCESS_TRANSFER_READ_BIT | VK10.VK_ACCESS_TRANSFER_WRITE_BIT);
-            blit(arena, cmd, taaOut.image(), mainColor.vkImage(), width, height);
+            // TAA kann nicht hochskalieren: bei kleinerer Renderaufloesung linear aufziehen (Notweg)
+            blitScaled(arena, cmd, taaOut.image(), width, height, targetColor.vkImage(), ow, oh);
             if (fg) {
                 // Bewegungsvektoren braucht sonst nur DLAA
                 fullBarrier(arena, cmd);
@@ -2306,7 +2355,7 @@ public final class NativePassRunner {
                         W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]),
                         W.si(3, depth.view()), W.sb(4, entityMotion[slot]));
                 VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
-                fgCapture(arena, cmd, main);
+                fgCapture(arena, cmd, main, target);
             }
             stamp(cmd, q + 1);
             fullBarrier(arena, cmd);
@@ -2327,6 +2376,76 @@ public final class NativePassRunner {
         }
     }
 
+    // ---------- Ausgabe in Bildschirmaufloesung (DLSS Super Resolution) ----------
+
+    /** Ausgabebilder (DLSS-Ergebnis, RR-Ergebnis, Szene fuer die FG) fuer ow x oh; Layout folgt im Befehlspuffer. */
+    private void ensureOutput(int ow, int oh) {
+        if (upOut != null && outW == ow && outH == oh) return;
+        // alte Bilder koennen noch in Arbeit sein – nur auf Abgeschicktes warten (dieser Frame ist es noch nicht)
+        if (timeline != 0L) waitValue(frameStartValue);
+        destroyOutput();
+        try (Arena arena = new Arena()) {
+            int ca = VK10.VK_IMAGE_ASPECT_COLOR_BIT, stor = VK10.VK_IMAGE_USAGE_STORAGE_BIT, sampled = VK10.VK_IMAGE_USAGE_SAMPLED_BIT;
+            int src = VK10.VK_IMAGE_USAGE_TRANSFER_SRC_BIT, dst = VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            upOut = makeImage(arena, ow, oh, 1, FMT_LDR, stor | sampled | src | dst, ca); // dst: NGX leert beim Reset
+            if (pipeRrGuide != 0L) rrOut = makeImage(arena, ow, oh, 1, FMT_HDR, stor | sampled | dst, ca);
+            if (FgPresenter.instance() != null) fgHud = makeImage(arena, ow, oh, 1, FMT_LDR, sampled | dst, ca);
+        }
+        outW = ow;
+        outH = oh;
+        outInitPending = true;
+        dlaaHistory = false;
+    }
+
+    private void destroyOutput() {
+        for (Img img : new Img[]{upOut, rrOut, fgHud}) destroyImg(img);
+        upOut = rrOut = fgHud = null;
+        outW = outH = 0;
+    }
+
+    private void initOutput(Arena arena, VkCommandBuffer cmd) {
+        if (!outInitPending) return;
+        for (Img img : new Img[]{upOut, rrOut, fgHud}) {
+            if (img != null) toGeneral(arena, cmd, img.image(), 1, VK10.VK_IMAGE_ASPECT_COLOR_BIT);
+        }
+        outInitPending = false;
+    }
+
+    /**
+     * Notweg ohne DLSS-Ergebnis in diesem Frame (Groessenwechsel, Pass aus): das kleinere Bild
+     * linear auf das Ziel in Bildschirmaufloesung ziehen – in Mojangs Submission.
+     */
+    public void upscaleFallback(RenderTarget main, RenderTarget out) {
+        if (dev == null || !(main.getColorTexture() instanceof VulkanGpuTexture mc) || !(out.getColorTexture() instanceof VulkanGpuTexture oc)) return;
+        VulkanCommandEncoder encoder = blaze.commandEncoder();
+        VkCommandBuffer cmd = encoder.allocateAndBeginTransientCommandBuffer();
+        try (Arena arena = new Arena()) {
+            fullBarrier(arena, cmd);
+            blitScaled(arena, cmd, mc.vkImage(), main.width, main.height, oc.vkImage(), out.width, out.height);
+            fullBarrier(arena, cmd);
+        }
+        check(VK10.vkEndCommandBuffer(cmd), "endUpscaleFallback");
+        encoder.execute(cmd);
+    }
+
+    /** Kann dieser Frame hochskaliert werden (DLSS verfuegbar und an)? */
+    public boolean canUpscale() {
+        return ready && dlaaActive();
+    }
+
+    /** Skalierender Blit (linear), z. B. TAA-Ergebnis in Renderaufloesung -> Bildschirm. */
+    private static void blitScaled(Arena arena, VkCommandBuffer cmd, long src, int sw, int sh, long dst, int dw, int dh) {
+        VkImageBlit.Buffer region = VkImageBlit.calloc(1, arena.stack());
+        region.get(0).srcSubresource().set(VK10.VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
+        region.get(0).dstSubresource().set(VK10.VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
+        region.get(0).srcOffsets(0).set(0, 0, 0);
+        region.get(0).srcOffsets(1).set(sw, sh, 1);
+        region.get(0).dstOffsets(0).set(0, 0, 0);
+        region.get(0).dstOffsets(1).set(dw, dh, 1);
+        VK10.vkCmdBlitImage(cmd, src, VK10.VK_IMAGE_LAYOUT_GENERAL, dst, VK10.VK_IMAGE_LAYOUT_GENERAL, region,
+                sw == dw && sh == dh ? VK10.VK_FILTER_NEAREST : VK10.VK_FILTER_LINEAR);
+    }
+
     // ---------- DLSS 4: DLAA ----------
 
     private void initDlss(Arena arena, SlangShaderLoader loader) {
@@ -2340,6 +2459,7 @@ public final class NativePassRunner {
         }
         pipeMotion = computePipe(arena, layoutMotion, module(arena, loader, "motionMain"));
         if (ngx.has(NgxBridge.FEATURE_RAY_RECONSTRUCTION)) {
+            ngx.option(1, Integer.getInteger("vulkanfish.rrPreset", 5)); // 4 = D, 5 = E (gleich schnell gemessen)
             layoutRrGuide = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, SI}, {2, SI}, {3, SI}, {4, SI},
                     {5, ST}, {6, ST}, {7, ST}, {8, UB}, {9, ST}}, C), 0, 0);
             pipeRrGuide = computePipe(arena, layoutRrGuide, module(arena, loader, "rrGuide"));
@@ -2375,13 +2495,15 @@ public final class NativePassRunner {
      * -> taaOut -> Main-Target. Uniforms stehen schon in taaUniforms[slot]. @return false: TAA nehmen
      */
     private boolean recordDlaa(Arena arena, int slot, VulkanGpuTexture mainColor, VulkanGpuTextureView colorView,
-                               RenderTarget main, VulkanGpuTextureView depthView, boolean haveHistory, boolean fg) {
+                               RenderTarget main, VulkanGpuTextureView depthView, boolean haveHistory, boolean fg,
+                               RenderTarget target, VulkanGpuTexture targetColor) {
         if (!(main.getDepthTexture() instanceof VulkanGpuTexture mainDepth)) return false;
         VkCommandBuffer cmd = taaCmds[slot];
         check(VK10.vkResetCommandBuffer(cmd, 0), "resetDlaa");
         check(VK10.vkBeginCommandBuffer(cmd, VkCommandBufferBeginInfo.calloc(arena.stack()).sType$Default()
                 .flags(VK10.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT)), "beginDlaa");
         int q = slot * TS_PER_FRAME + TS_TERRAIN + 2;
+        initOutput(arena, cmd);
         fullBarrier(arena, cmd); // alle Level-Passes (auch Vanilla) fertig
         VK10.vkCmdWriteTimestamp(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, queryPool, q);
         VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeMotion);
@@ -2394,10 +2516,10 @@ public final class NativePassRunner {
         if (rr) recordRrGuide(arena, cmd, slot, colorView, depthView);
         fullBarrier(arena, cmd);
         int r = rr ? rayReconstruction(cmd, mainColor, colorView, mainDepth, depthView, reset) : ngx.dlaa(cmd.address(), width, height,
-                mainColor.vkImage(), colorView.vkImageView(), vkFormat(mainColor),
+                outW, outH, mainColor.vkImage(), colorView.vkImageView(), vkFormat(mainColor),
                 mainDepth.vkImage(), depthView.vkImageView(), vkFormat(mainDepth),
                 motion.image(), motion.view(), VK10.VK_FORMAT_R16G16_SFLOAT,
-                taaOut.image(), taaOut.view(), FMT_LDR,
+                upOut.image(), upOut.view(), FMT_LDR,
                 FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN, reset || lastWasRr);
         if (r != 0 && rr) {
             // Ray Reconstruction nicht nutzbar: ab dem naechsten Frame DLAA
@@ -2414,15 +2536,15 @@ public final class NativePassRunner {
             return false;
         }
         fullBarrier(arena, cmd);
-        if (rr) { // HDR-Ergebnis zurueck ins LDR (taaOut)
+        if (rr) { // HDR-Ergebnis zurueck ins LDR
             VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeRrResolve);
-            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutRrResolve, W.si(0, rrOut.view()), W.st(1, taaOut.view()),
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutRrResolve, W.si(0, rrOut.view()), W.st(1, upOut.view()),
                     W.ub(2, rrUniforms[slot]));
-            VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+            VK10.vkCmdDispatch(cmd, (outW + 7) / 8, (outH + 7) / 8, 1);
             fullBarrier(arena, cmd);
         }
-        blit(arena, cmd, taaOut.image(), mainColor.vkImage(), width, height);
-        if (fg) fgCapture(arena, cmd, main);
+        blit(arena, cmd, upOut.image(), targetColor.vkImage(), outW, outH);
+        if (fg) fgCapture(arena, cmd, main, target);
         stamp(cmd, q + 1);
         fullBarrier(arena, cmd);
         check(VK10.vkEndCommandBuffer(cmd), "endDlaa");
@@ -2484,7 +2606,7 @@ public final class NativePassRunner {
                 rrNormals.view(), rrOut.view()};
         int[] fmt = {FMT_HDR, vkFormat(mainDepth), VK10.VK_FORMAT_R16G16_SFLOAT, VK10.VK_FORMAT_R8G8B8A8_UNORM,
                 VK10.VK_FORMAT_R8G8B8A8_UNORM, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, FMT_HDR};
-        return ngx.rayReconstruction(cmd.address(), width, height, img, vw, fmt, m,
+        return ngx.rayReconstruction(cmd.address(), width, height, outW, outH, img, vw, fmt, m,
                 FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN,
                 reset || !lastWasRr);
     }
@@ -2510,31 +2632,31 @@ public final class NativePassRunner {
 
     /** Eingaben der Frame Generation fuer das zuletzt gerenderte Level-Bild. */
     public record FgInputs(long depthImage, long depthView, long motionImage, long motionView,
-                           long hudImage, long hudView, float[] camera, boolean reset) {}
+                           long hudImage, long hudView, float[] camera, boolean reset, int renderW, int renderH) {}
 
     private boolean fgWanted(RenderTarget main) {
         FgPresenter fp = FgPresenter.instance();
-        return fp != null && fp.frameActive() && pipeMotion != 0L && motion != null && fgDepth != null
+        return fp != null && fp.frameActive() && pipeMotion != 0L && motion != null && fgDepth != null && fgHud != null
                 && main.getDepthTexture() instanceof VulkanGpuTexture;
     }
 
     /** Tiefe + Szene (nach AA, vor Hand/GUI) sichern: Mojang leert die Tiefe fuer die Hand. */
-    private void fgCapture(Arena arena, VkCommandBuffer cmd, RenderTarget main) {
+    private void fgCapture(Arena arena, VkCommandBuffer cmd, RenderTarget main, RenderTarget target) {
         fullBarrier(arena, cmd);
-        copyDepth(arena, cmd, ((VulkanGpuTexture) main.getDepthTexture()).vkImage(), fgDepth.image());
-        blit(arena, cmd, ((VulkanGpuTexture) main.getColorTexture()).vkImage(), fgHud.image(), width, height);
+        copyDepth(arena, cmd, ((VulkanGpuTexture) main.getDepthTexture()).vkImage(), fgDepth.image()); // Renderaufloesung
+        blit(arena, cmd, ((VulkanGpuTexture) target.getColorTexture()).vkImage(), fgHud.image(), outW, outH);
         fullBarrier(arena, cmd);
         fgCaptured = true;
     }
 
     /** Vom FgPresenter bei Mojangs Blit (gleicher Frame). null: kein Level-Bild in diesem Frame. */
     FgInputs fgInputs(int w, int h) {
-        if (!fgCaptured || w != width || h != height || fgCamera == null) return null;
+        if (!fgCaptured || w != outW || h != outH || fgCamera == null || fgHud == null) return null;
         fgCaptured = false;
         boolean reset = fgJump;
         fgJump = false;
         return new FgInputs(fgDepth.image(), fgDepth.view(), motion.image(), motion.view(),
-                fgHud.image(), fgHud.view(), fgCamera, reset);
+                fgHud.image(), fgHud.view(), fgCamera, reset, width, height);
     }
 
     /**
@@ -2744,7 +2866,7 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront, oitFrontDepth, motion, fgHud, rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut}) {
+                oitHead, oitFront, oitFrontDepth, motion, rrDiffuse, rrSpecular, rrNormals, rrColor}) {
             if (img != null) toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -3272,6 +3394,9 @@ public final class NativePassRunner {
         if (queryPool != 0L) VK10.vkDestroyQueryPool(dev, queryPool, null);
         if (lgQueryPool != 0L) VK10.vkDestroyQueryPool(dev, lgQueryPool, null);
         lgQueryPool = 0L;
+        for (long b : biasSamplers.values()) VK10.vkDestroySampler(dev, b, null);
+        biasSamplers.clear();
+        atlasSampler = atlasSamplerBase;
         for (long s : new long[]{linearSampler, atlasSampler, shadowSampler}) {
             if (s != 0L) VK10.vkDestroySampler(dev, s, null);
         }

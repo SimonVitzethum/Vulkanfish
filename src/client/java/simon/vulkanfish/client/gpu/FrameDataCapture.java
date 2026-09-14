@@ -63,7 +63,10 @@ public final class FrameDataCapture {
         LEVEL_PROJECTION_UNJITTERED.set(projection);
         if (taaJitter) {
             var target = Minecraft.getInstance().gameRenderer.mainRenderTarget();
-            int i = (jitterIndex++ & 7) + 1;
+            // Folge laenger bei kleinerer Renderaufloesung (DLSS: 8 x Skalierung^2 Phasen)
+            float s = RenderScale.current();
+            int phases = Math.max(8, Math.min(64, Math.round(8.0f / (s * s))));
+            int i = (jitterIndex++ % phases) + 1;
             float jx = halton(i, 2) - 0.5f;
             float jy = halton(i, 3) - 0.5f;
             // Clip-Offset proportional zu w (Perspektive: w = -z_view) -> konstanter NDC-Versatz

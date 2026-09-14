@@ -37,6 +37,13 @@ public final class VulkanfishOptions {
                 VulkanfishSettings.dlss(), VulkanfishSettings::setDlss);
     }
 
+    /** DLSS-Modus (Renderaufloesung): DLAA, Qualitaet, Ausgewogen, Leistung, Ultra-Leistung. */
+    public static OptionInstance<Integer> dlssMode() {
+        return new OptionInstance<>("options.vulkanfish.dlssMode", tip("options.vulkanfish.dlssMode"),
+                (caption, value) -> CommonComponents.optionNameValue(caption, Component.translatable("options.vulkanfish.dlssMode." + value)),
+                new OptionInstance.IntRange(0, 4), VulkanfishSettings.dlssMode(), VulkanfishSettings::setDlssMode);
+    }
+
     public static OptionInstance<Boolean> rayReconstruction() {
         return OptionInstance.createBoolean("options.vulkanfish.rayReconstruction", tip("options.vulkanfish.rayReconstruction"),
                 VulkanfishSettings.rayReconstruction(), VulkanfishSettings::setRayReconstruction);

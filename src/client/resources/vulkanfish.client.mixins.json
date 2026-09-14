@@ -12,6 +12,7 @@
 		"ExampleClientMixin",
 		"FeatureRenderDispatcherAccessor",
 		"GameRendererMixin",
+		"GameRendererScaleMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"LightmapExtractorMixin",

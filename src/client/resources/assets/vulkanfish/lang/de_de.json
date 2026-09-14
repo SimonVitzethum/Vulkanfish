@@ -12,7 +12,7 @@
   "options.vulkanfish.taa.tooltip": "Glatte Kanten und ruhige Details über mehrere Bilder.",
   "options.vulkanfish.dlss": "DLSS 4 (DLAA)",
   "options.vulkanfish.rayReconstruction": "DLSS Ray Reconstruction",
-  "options.vulkanfish.rayReconstruction.tooltip": "NVIDIAs KI-Entrauscher (DLSS 4) statt DLAA: Fackelschatten bleiben auch in Bewegung ruhig. Braucht DLSS und Raytracing. In voller Auflösung teuer (etwa 20 ms bei 2560x1600 auf einer RTX 5070 Laptop).",
+  "options.vulkanfish.rayReconstruction.tooltip": "NVIDIAs KI-Entrauscher (DLSS 4) statt DLAA: Fackelschatten bleiben auch in Bewegung ruhig. Braucht DLSS und Raytracing. Teuer bei voller Auflösung (DLAA: etwa 21 ms bei 2560x1600 auf einer RTX 5070 Laptop) – mit DLSS-Modus Leistung etwa 5 ms.",
   "options.vulkanfish.frameGen": "DLSS Frame Gen",
   "options.vulkanfish.frameGen.tooltip": "NVIDIAs KI-Bildgenerierung (DLSS 4): zeigt bis zu 5 erzeugte Bilder zwischen zwei gerenderten. Braucht eine RTX-40/50-GPU (6x: RTX 50) und wirkt am besten ab 60 gerenderten FPS ohne VSync.",
   "options.vulkanfish.times": "%s: %sx",
@@ -36,5 +36,12 @@
   "options.vulkanfish.seed.match": "Seed passt zum Server – das Fernfeld wird generiert.",
   "options.vulkanfish.seed.mismatch": "Seed passt NICHT zum Server (falscher Seed oder der Server verschleiert ihn).",
   "manageServer.vulkanfish.seed.hint": "Welt-Seed für das LOD (optional)",
-  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: mit dem Welt-Seed des Servers erzeugt das LOD auch Gegenden, die du noch nie besucht hast. Zahl oder Text wie bei der Welterstellung; leer = nur besuchte Chunks."
+  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: mit dem Welt-Seed des Servers erzeugt das LOD auch Gegenden, die du noch nie besucht hast. Zahl oder Text wie bei der Welterstellung; leer = nur besuchte Chunks.",
+  "options.vulkanfish.dlssMode": "DLSS-Modus",
+  "options.vulkanfish.dlssMode.tooltip": "Renderauflösung der Welt, DLSS rechnet auf Bildschirmauflösung hoch (GUI und Hand bleiben scharf). DLAA = volle Auflösung, beste Qualität; Qualität 67 %, Ausgewogen 58 %, Leistung 50 %, Ultra-Leistung 33 %. Macht auch Ray Reconstruction deutlich schneller.",
+  "options.vulkanfish.dlssMode.0": "DLAA",
+  "options.vulkanfish.dlssMode.1": "Qualität",
+  "options.vulkanfish.dlssMode.2": "Ausgewogen",
+  "options.vulkanfish.dlssMode.3": "Leistung",
+  "options.vulkanfish.dlssMode.4": "Ultra-Leistung"
 }

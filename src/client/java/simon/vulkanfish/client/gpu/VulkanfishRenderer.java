@@ -191,6 +191,13 @@ public final class VulkanfishRenderer {
         if (EXIT_AFTER_FRAMES > 0 && f == 300 && !FG_TEST && Boolean.getBoolean("vulkanfish.fgNoVsync")) {
             Minecraft.getInstance().options.enableVsync().set(false); // Frame Generation ohne Anzeige-Takt pruefen
         }
+        if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.dlssModeCycle") && f > 400 && f % 150 == 0) {
+            // DLSS-Modi im laufenden Spiel durchschalten (Zielgroessen, NGX-Neuanlage)
+            int m = (int) ((f / 150) % 5);
+            System.setProperty("vulkanfish.dlssMode", Integer.toString(m));
+            pendingScreenshot = f + 60;
+            LOG.info("[vulkanfish] DLSS-Modus-Test: Modus {}", m);
+        }
         if (EXIT_AFTER_FRAMES > 0 && Boolean.getBoolean("vulkanfish.uiTest")) {
             // Menues mit Vulkanfish-Zusaetzen: Server bearbeiten (Seed-Feld), Vulkanfish-Einstellungen
             Minecraft mc = Minecraft.getInstance();
@@ -353,6 +360,12 @@ public final class VulkanfishRenderer {
         nativeRunner.setEntityMotion(entityMotion, n);
     }
 
+    /** Notweg aus GameRendererScaleMixin: niemand hat hochskaliert -> linear aufziehen. */
+    public static void upscaleFallback(com.mojang.blaze3d.pipeline.RenderTarget low, com.mojang.blaze3d.pipeline.RenderTarget full) {
+        var r = simon.vulkanfish.client.VulkanfishClient.RENDERER;
+        if (r != null && r.nativeRunner != null) r.nativeRunner.upscaleFallback(low, full);
+    }
+
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
         if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
@@ -364,9 +377,18 @@ public final class VulkanfishRenderer {
         if (initialized && nativeRunner != null && nativeRunner.isReady() && taaOn) {
             long t0 = System.nanoTime();
             if (!"false".equals(System.getProperty("vulkanfish.entityMV"))) gatherMovingEntities();
-            nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget());
+            // DLSS Super Resolution: aus dem kleinen Ziel ins echte (danach gilt wieder das grosse)
+            nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget(), RenderScale.active() ? RenderScale.full() : null);
+            RenderScale.endLevel();
             cpuNanosTaa += System.nanoTime() - t0;
         }
+        // naechster Frame: kleiner rendern nur, wenn DLSS das Ergebnis hochrechnen kann
+        int mode = simon.vulkanfish.client.VulkanfishSettings.dlssMode();
+        String forced = System.getProperty("vulkanfish.dlssMode");
+        if (forced != null) mode = Integer.parseInt(forced.trim());
+        boolean upscale = initialized && nativeRunner != null && taaOn && nativeRunner.canUpscale()
+                && mode > 0 && mode < RenderScale.MODE_SCALE.length;
+        RenderScale.setWanted(upscale ? RenderScale.MODE_SCALE[mode] : 1.0f);
         if (initialized) logCpu();
         FrameDataCapture.taaJitter = initialized && nativeRunner != null && nativeRunner.isReady() && simon.vulkanfish.client.VulkanfishSettings.taa();
         if (pendingScreenshot < 0) return;
@@ -1180,6 +1202,7 @@ public final class VulkanfishRenderer {
                 LOG.warn("[vulkanfish] Freigabe der nativen Ressourcen fehlgeschlagen", t);
             }
         }
+        RenderScale.destroy();
     }
 
     public boolean useGpuDrivenPath() {

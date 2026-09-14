@@ -25,7 +25,7 @@ public final class VulkanfishSettings {
     /** Fullbright in Prozent (0 = aus). */
     private static volatile int fullbright;
     private static volatile Boolean taa, raytracing, dlss, rayReconstruction;
-    private static volatile Integer lodChunks, frameGen;
+    private static volatile Integer lodChunks, frameGen, dlssMode;
     private static volatile Float lodPixelError, lodGpuMs;
     /** Bekannte Seeds je Serveradresse (Mehrspieler-LOD-Generierung). */
     private static final Map<String, Long> SEEDS = new ConcurrentHashMap<>();
@@ -96,6 +96,17 @@ public final class VulkanfishSettings {
     public static void setFrameGeneration(int images) {
         frameGen = clamp(images, 1, 6);
         SET.add("frameGen");
+        save();
+    }
+
+    /** DLSS-Modus: 0 = DLAA (volle Aufloesung), 1 Qualitaet, 2 Ausgewogen, 3 Leistung, 4 Ultra-Leistung. */
+    public static int dlssMode() {
+        return dlssMode == null ? 0 : dlssMode;
+    }
+
+    public static void setDlssMode(int mode) {
+        dlssMode = clamp(mode, 0, 4);
+        SET.add("dlssMode");
         save();
     }
 
@@ -197,12 +208,13 @@ public final class VulkanfishSettings {
         }
         try {
             fullbright = clamp(Integer.parseInt(p.getProperty("fullbright", "0").trim()), 0, 100);
-            for (String k : new String[]{"taa", "dlss", "rayReconstruction", "frameGen", "raytracing", "lodDistance", "lodPixelError", "lodGpuBudgetMs"}) {
+            for (String k : new String[]{"taa", "dlss", "dlssMode", "rayReconstruction", "frameGen", "raytracing", "lodDistance", "lodPixelError", "lodGpuBudgetMs"}) {
                 if (p.containsKey(k)) SET.add(k);
             }
             if (p.containsKey("taa")) taa = Boolean.parseBoolean(p.getProperty("taa").trim());
             if (p.containsKey("raytracing")) raytracing = Boolean.parseBoolean(p.getProperty("raytracing").trim());
             if (p.containsKey("dlss")) dlss = Boolean.parseBoolean(p.getProperty("dlss").trim());
+            if (p.containsKey("dlssMode")) dlssMode = clamp(Integer.parseInt(p.getProperty("dlssMode").trim()), 0, 4);
             if (p.containsKey("rayReconstruction")) rayReconstruction = Boolean.parseBoolean(p.getProperty("rayReconstruction").trim());
             if (p.containsKey("frameGen")) frameGen = clamp(Integer.parseInt(p.getProperty("frameGen").trim()), 1, 6);
             if (p.containsKey("lodDistance")) lodChunks = clamp(Integer.parseInt(p.getProperty("lodDistance").trim()), 32, 1024);
@@ -227,6 +239,7 @@ public final class VulkanfishSettings {
         if (SET.contains("taa")) p.setProperty("taa", Boolean.toString(taa()));
         if (SET.contains("raytracing")) p.setProperty("raytracing", Boolean.toString(raytracing()));
         if (SET.contains("dlss")) p.setProperty("dlss", Boolean.toString(dlss()));
+        if (SET.contains("dlssMode")) p.setProperty("dlssMode", Integer.toString(dlssMode()));
         if (SET.contains("rayReconstruction")) p.setProperty("rayReconstruction", Boolean.toString(rayReconstruction()));
         if (SET.contains("frameGen")) p.setProperty("frameGen", Integer.toString(frameGeneration()));
         if (SET.contains("lodDistance")) p.setProperty("lodDistance", Integer.toString(lodChunks()));

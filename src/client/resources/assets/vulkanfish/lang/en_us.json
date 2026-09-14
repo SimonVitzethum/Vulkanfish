@@ -12,7 +12,7 @@
   "options.vulkanfish.taa.tooltip": "Smooth edges and stable details over several frames.",
   "options.vulkanfish.dlss": "DLSS 4 (DLAA)",
   "options.vulkanfish.rayReconstruction": "DLSS Ray Reconstruction",
-  "options.vulkanfish.rayReconstruction.tooltip": "NVIDIA's AI denoiser (DLSS 4) instead of DLAA: keeps torch shadows clean while moving. Needs DLSS and ray tracing. Expensive at native resolution (about 20 ms at 2560x1600 on an RTX 5070 Laptop).",
+  "options.vulkanfish.rayReconstruction.tooltip": "NVIDIA's AI denoiser (DLSS 4) instead of DLAA: keeps torch shadows clean while moving. Needs DLSS and ray tracing. Expensive at full resolution (DLAA: about 21 ms at 2560x1600 on an RTX 5070 Laptop) – about 5 ms with DLSS mode Performance.",
   "options.vulkanfish.frameGen": "DLSS Frame Gen",
   "options.vulkanfish.frameGen.tooltip": "NVIDIA's AI frame generation (DLSS 4): shows up to 5 generated frames between two rendered ones. Needs an RTX 40/50 GPU (6x: RTX 50) and works best at 60+ rendered FPS without VSync.",
   "options.vulkanfish.times": "%s: %sx",
@@ -36,5 +36,12 @@
   "options.vulkanfish.seed.match": "Seed matches the server – the far field will be generated.",
   "options.vulkanfish.seed.mismatch": "Seed does NOT match the server (wrong seed, or the server hides it).",
   "manageServer.vulkanfish.seed.hint": "World seed for the LOD (optional)",
-  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: with the server's world seed the LOD also generates areas you have never visited. Number or text as in world creation; empty = visited chunks only."
+  "manageServer.vulkanfish.seed.tooltip": "Vulkanfish: with the server's world seed the LOD also generates areas you have never visited. Number or text as in world creation; empty = visited chunks only.",
+  "options.vulkanfish.dlssMode": "DLSS Mode",
+  "options.vulkanfish.dlssMode.tooltip": "Resolution the world is rendered at; DLSS upscales to screen resolution (GUI and hand stay sharp). DLAA = full resolution, best quality; Quality 67%, Balanced 58%, Performance 50%, Ultra Performance 33%. Also makes Ray Reconstruction much faster.",
+  "options.vulkanfish.dlssMode.0": "DLAA",
+  "options.vulkanfish.dlssMode.1": "Quality",
+  "options.vulkanfish.dlssMode.2": "Balanced",
+  "options.vulkanfish.dlssMode.3": "Performance",
+  "options.vulkanfish.dlssMode.4": "Ultra Performance"
 }

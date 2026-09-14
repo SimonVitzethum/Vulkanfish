@@ -332,7 +332,7 @@ public final class FgPresenter {
             int fmt = VK10.VK_FORMAT_R8G8B8A8_UNORM, bbFmt = NativePassRunner.vkFormat(tex);
             for (int i = 1; i < images; i++) {
                 NativePassRunner.Img out = ring[slot][i - 1];
-                int r = ngx.frameGen(cmd.address(), w, h, tex.vkImage(), viewHandle, bbFmt,
+                int r = ngx.frameGen(cmd.address(), w, h, in.renderW(), in.renderH(), tex.vkImage(), viewHandle, bbFmt,
                         in.depthImage(), in.depthView(), VK10.VK_FORMAT_D32_SFLOAT,
                         in.motionImage(), in.motionView(), VK10.VK_FORMAT_R16G16_SFLOAT,
                         in.hudImage(), in.hudView(), fmt, out.image(), out.view(), fmt,
