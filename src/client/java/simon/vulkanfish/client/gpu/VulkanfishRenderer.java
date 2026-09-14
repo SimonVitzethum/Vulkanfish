@@ -36,6 +36,7 @@ public final class VulkanfishRenderer {
     private static final boolean NEAR_TEST = Boolean.getBoolean("vulkanfish.nearTest");
     private static final boolean SHADOW_TEST = Boolean.getBoolean("vulkanfish.shadowTest");
     private static final boolean FG_TEST = Boolean.getBoolean("vulkanfish.fgTest");
+    private static final boolean RR_TEST = Boolean.getBoolean("vulkanfish.rrTest");
     private static final String BIOME_TEST = System.getProperty("vulkanfish.biomeTest"); // z. B. deep_frozen_ocean
     // Startort des Nahfeld-Tests (-Dvulkanfish.nearX/Z, z. B. 10000000 fuer die Genauigkeit bei hohen Koordinaten)
     private static final int NEAR_X = Integer.getInteger("vulkanfish.nearX", 34);
@@ -185,6 +186,8 @@ public final class VulkanfishRenderer {
             biomeTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && SHADOW_TEST) {
             shadowTest(f);
+        } else if (EXIT_AFTER_FRAMES > 0 && RR_TEST && TEST_WORLD_EDITS) {
+            rrTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && FG_TEST) {
             fgTest(f);
         } else if (EXIT_AFTER_FRAMES > 0 && LOD_TEST && NEAR_TEST) {
@@ -249,6 +252,8 @@ public final class VulkanfishRenderer {
         NativePassRunner.rtForceOff = !simon.vulkanfish.client.VulkanfishSettings.raytracing() || Boolean.getBoolean("vulkanfish.rtOff");
         NativePassRunner.dlaaWanted = simon.vulkanfish.client.VulkanfishSettings.dlss() && !"false".equals(System.getProperty("vulkanfish.dlss"))
                 && !"false".equals(System.getProperty("vulkanfish.dlaa")); // nur DLAA aus (Selbsttest TAA + FG)
+        NativePassRunner.rrWanted = simon.vulkanfish.client.VulkanfishSettings.rayReconstruction()
+                || "true".equals(System.getProperty("vulkanfish.rr"));
         if (lod != null) {
             lod.setDistanceChunks(simon.vulkanfish.client.VulkanfishSettings.lodChunks());
             lod.setPixelError(simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
@@ -598,6 +603,40 @@ public final class VulkanfishRenderer {
      * dreht gleichmaessig; zwei Pakete (erzeugte + echte Bilder) landen als PNG in run/, dazu die
      * Takt-Statistik des Present-Threads. -Dvulkanfish.fgYawStep = Grad je Frame. Keine Weltaenderung.
      */
+    /**
+     * Ray-Reconstruction-Selbsttest (-Dvulkanfish.rrTest, nur Test-Welt): Hoehlenraum mit Fackeln und
+     * Saeulen (RT-Halbschatten = verrauschte Schattenstrahlen), je 8 Bilder in Folge mit stehender und
+     * mit langsam gleitender Kamera. Mit/ohne -Dvulkanfish.rr=true laufen lassen -> Vergleich.
+     */
+    private void rrTest(long f) {
+        var player = Minecraft.getInstance().player;
+        if (f == 300) {
+            selfTestCommand("gamerule minecraft:random_tick_speed 0");
+            selfTestCommand("gamerule minecraft:advance_time false");
+            selfTestCommand("time set 18000");
+            selfTestCommand("gamemode spectator @p");
+            selfTestCommand("tp @p 5000.5 24 5000.5 -45 25");
+        }
+        if (f == 500) {
+            selfTestCommand("fill 4990 20 4990 5012 30 5012 minecraft:stone");
+            selfTestCommand("fill 4991 21 4991 5011 29 5011 minecraft:air");
+            for (int[] t : new int[][]{{5004, 5004}, {5008, 4996}, {4996, 5008}, {5006, 5009}})
+                selfTestCommand("setblock " + t[0] + " 21 " + t[1] + " minecraft:torch");
+            for (int[] c : new int[][]{{5003, 5006}, {5006, 5002}, {5002, 5002}, {5008, 5007}})
+                selfTestCommand("fill " + c[0] + " 21 " + c[1] + " " + c[0] + " 25 " + c[1] + " minecraft:cobblestone");
+            selfTestCommand("fill 4999 21 5005 5000 22 5006 minecraft:oak_planks");
+        }
+        if (f >= 300 && player != null) {
+            double slide = f > 1550 ? (f - 1550) * Double.parseDouble(System.getProperty("vulkanfish.rrSlide", "0.01")) : 0.0; // vorher: Belichtung eingeschwungen
+            if (f > 320) player.setPos(4995.5 + slide, 26.5, 4995.5);
+            lockView(player, -45.0f, 30.0f);
+        }
+        if ((f >= 1500 && f < 1508) || (f >= 1600 && f < 1608)) pendingScreenshot = f;
+        if (f == 1520 && Boolean.getBoolean("vulkanfish.rrGuideDump") && nativeRunner != null) nativeRunner.requestSnapshot(3);
+        if (f == 1510 && nativeRunner != null)
+            LOG.info("[vulkanfish] RR-Test: Ray Reconstruction {}, GPU {}", nativeRunner.rayReconstructionActive(), nativeRunner.passTimings());
+    }
+
     private String fgTestMode;
 
     private void fgTest(long f) {

@@ -183,6 +183,13 @@ public final class NativePassRunner {
     private Img motion;
     // DLSS Frame Generation: Tiefe + Szene ohne Hand/GUI, am Ende von renderTaa gesichert
     private Img fgDepth, fgHud;
+    // DLSS Ray Reconstruction: Hilfspuffer aus dem G-Buffer (rr_guide.slang)
+    private long layoutRrGuide, pipeRrGuide, layoutRrResolve, pipeRrResolve;
+    private Img rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut; // rrColor/rrOut: HDR (RR verlangt HDR)
+    private final Buf[] rrUniforms = new Buf[FRAMES];
+    private boolean rrFailed;
+    /** Ray Reconstruction statt DLAA (Einstellung, nur mit DLSS). */
+    public static volatile boolean rrWanted = "true".equals(System.getProperty("vulkanfish.rr"));
     private boolean fgCaptured, fgJump;
     private float[] fgCamera;
     private double[] fgAnchor;
@@ -1758,6 +1765,13 @@ public final class NativePassRunner {
             history[1] = makeImage(arena, w, h, 1, FMT_HDR, sampled | stor, ca);
             taaOut = makeImage(arena, w, h, 1, FMT_LDR, stor | src | dst, ca); // dst: NGX leert die DLAA-Ausgabe beim Reset
             if (pipeMotion != 0L) motion = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R16G16_SFLOAT, stor | sampled, ca);
+            if (pipeRrGuide != 0L) {
+                rrDiffuse = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R8G8B8A8_UNORM, stor | sampled | src, ca); // src: Debug-Snapshot
+                rrSpecular = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R8G8B8A8_UNORM, stor | sampled, ca);
+                rrNormals = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, stor | sampled, ca);
+                rrColor = makeImage(arena, w, h, 1, FMT_HDR, stor | sampled, ca);
+                rrOut = makeImage(arena, w, h, 1, FMT_HDR, stor | sampled | dst, ca); // dst: NGX leert beim Reset
+            }
             if (FgPresenter.instance() != null) {
                 fgDepth = makeImage(arena, w, h, 1, FMT_DEPTH, sampled | dst, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
                 fgHud = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
@@ -1780,9 +1794,10 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, fgHud}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, fgHud, rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut}) destroyImg(img);
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = motion = null;
         fgDepth = fgHud = null;
+        rrDiffuse = rrSpecular = rrNormals = rrColor = rrOut = null;
         fgCaptured = false;
         oitHead = oitFront = oitFrontDepth = null;
         if (oitNodes != null) destroyBuffer(oitNodes);
@@ -2311,6 +2326,17 @@ public final class NativePassRunner {
         int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
         layoutMotion = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, ST}, {2, UB}}, C), 0, 0);
         pipeMotion = computePipe(arena, layoutMotion, module(arena, loader, "motionMain"));
+        if (ngx.has(NgxBridge.FEATURE_RAY_RECONSTRUCTION)) {
+            layoutRrGuide = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, SI}, {2, SI}, {3, SI}, {4, SI},
+                    {5, ST}, {6, ST}, {7, ST}, {8, UB}, {9, ST}}, C), 0, 0);
+            pipeRrGuide = computePipe(arena, layoutRrGuide, module(arena, loader, "rrGuide"));
+            layoutRrResolve = pipelineLayout(arena, setLayout(arena, new int[][]{{0, SI}, {1, ST}, {2, UB}}, C), 0, 0);
+            pipeRrResolve = computePipe(arena, layoutRrResolve, module(arena, loader, "rrResolve"));
+            for (int i = 0; i < FRAMES; i++) {
+                rrUniforms[i] = makeBuffer(arena, 96, VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                        VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            }
+        }
         FgPresenter.create(this, ngx);
     }
 
@@ -2349,14 +2375,23 @@ public final class NativePassRunner {
         push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutMotion,
                 W.si(0, depthView.vkImageView()), W.st(1, motion.view()), W.ub(2, taaUniforms[slot]));
         VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
-        fullBarrier(arena, cmd);
         boolean reset = !dlaaHistory || !haveHistory;
-        int r = ngx.dlaa(cmd.address(), width, height,
+        boolean rr = rrActive();
+        if (rr) recordRrGuide(arena, cmd, slot, colorView, depthView);
+        fullBarrier(arena, cmd);
+        int r = rr ? rayReconstruction(cmd, mainColor, colorView, mainDepth, depthView, reset) : ngx.dlaa(cmd.address(), width, height,
                 mainColor.vkImage(), colorView.vkImageView(), vkFormat(mainColor),
                 mainDepth.vkImage(), depthView.vkImageView(), vkFormat(mainDepth),
                 motion.image(), motion.view(), VK10.VK_FORMAT_R16G16_SFLOAT,
                 taaOut.image(), taaOut.view(), FMT_LDR,
-                FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN, reset);
+                FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN, reset || lastWasRr);
+        if (r != 0 && rr) {
+            // Ray Reconstruction nicht nutzbar: ab dem naechsten Frame DLAA
+            rrFailed = true;
+            LOG.warn("[vulkanfish] DLSS: Ray Reconstruction fehlgeschlagen ({}: {}) – zurueck auf DLAA", r, ngx.lastError());
+            VK10.vkEndCommandBuffer(cmd);
+            return false;
+        }
         if (r != 0) {
             // NGX nicht nutzbar: diesen und alle weiteren Frames per TAA (Puffer wird neu aufgenommen)
             dlaaFailed = true;
@@ -2365,6 +2400,13 @@ public final class NativePassRunner {
             return false;
         }
         fullBarrier(arena, cmd);
+        if (rr) { // HDR-Ergebnis zurueck ins LDR (taaOut)
+            VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeRrResolve);
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutRrResolve, W.si(0, rrOut.view()), W.st(1, taaOut.view()),
+                    W.ub(2, rrUniforms[slot]));
+            VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+            fullBarrier(arena, cmd);
+        }
         blit(arena, cmd, taaOut.image(), mainColor.vkImage(), width, height);
         if (fg) fgCapture(arena, cmd, main);
         stamp(cmd, q + 1);
@@ -2375,7 +2417,62 @@ public final class NativePassRunner {
         encoder.signalSemaphore(timeline, ++timelineValue, STAGE2_ALL_COMMANDS);
         slotValue[slot] = timelineValue;
         dlaaHistory = true;
+        lastWasRr = rr;
         return true;
+    }
+
+    private boolean lastWasRr;
+
+    private boolean rtActive() {
+        return rt != null && !rtForceOff;
+    }
+
+    private boolean rrActive() {
+        return rrWanted && !rrFailed && pipeRrGuide != 0L && rrNormals != null && rtActive();
+    }
+
+    /** Laeuft diesen Frame die Ray Reconstruction (Anzeige/Test)? */
+    public boolean rayReconstructionActive() {
+        return lastWasRr && dlaaHistory;
+    }
+
+    public boolean rayReconstructionAvailable() {
+        return pipeRrGuide != 0L && !rrFailed;
+    }
+
+    private void recordRrGuide(Arena arena, VkCommandBuffer cmd, int slot, VulkanGpuTextureView colorView, VulkanGpuTextureView depthView) {
+        FrameUniformsData d = frameData;
+        ByteBuffer ub = MemoryUtil.memByteBuffer(rrUniforms[slot].mapped(), 96);
+        putMat(ub, 0, d.invViewProj());
+        ub.putFloat(64, width).putFloat(68, height).putFloat(72, d.exposure());
+        ub.putFloat(80, d.camX()).putFloat(84, d.camY()).putFloat(88, d.camZ()).putFloat(92, 1f);
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeRrGuide);
+        push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutRrGuide,
+                W.si(0, gAlbedo.view()), W.si(1, gNormal.view()), W.si(2, depth.view()), W.si(3, depthView.vkImageView()),
+                W.si(4, colorView.vkImageView()), W.st(5, rrDiffuse.view()), W.st(6, rrSpecular.view()),
+                W.st(7, rrNormals.view()), W.ub(8, rrUniforms[slot]), W.st(9, rrColor.view()));
+        VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+    }
+
+    private int rayReconstruction(VkCommandBuffer cmd, VulkanGpuTexture mainColor, VulkanGpuTextureView colorView,
+                                  VulkanGpuTexture mainDepth, VulkanGpuTextureView depthView, boolean reset) {
+        FrameUniformsData d = frameData;
+        org.joml.Matrix4f proj = FrameDataCapture.levelProjectionUnjittered();
+        // Welt->Sicht im relativen Raum: Rotation (proj^-1 * proj*rot) mal Verschiebung zur Kamera
+        org.joml.Matrix4f view = new org.joml.Matrix4f(proj).invert().mul(new org.joml.Matrix4f().set(d.projRotUnjittered()))
+                .translate(-d.camX(), -d.camY(), -d.camZ());
+        float[] m = new float[32];
+        view.get(m, 0);
+        proj.get(m, 16);
+        long[] img = {rrColor.image(), mainDepth.vkImage(), motion.image(), rrDiffuse.image(), rrSpecular.image(),
+                rrNormals.image(), rrOut.image()};
+        long[] vw = {rrColor.view(), depthView.vkImageView(), motion.view(), rrDiffuse.view(), rrSpecular.view(),
+                rrNormals.view(), rrOut.view()};
+        int[] fmt = {FMT_HDR, vkFormat(mainDepth), VK10.VK_FORMAT_R16G16_SFLOAT, VK10.VK_FORMAT_R8G8B8A8_UNORM,
+                VK10.VK_FORMAT_R8G8B8A8_UNORM, VK10.VK_FORMAT_R16G16B16A16_SFLOAT, FMT_HDR};
+        return ngx.rayReconstruction(cmd.address(), width, height, img, vw, fmt, m,
+                FrameDataCapture.jitterPxX * DLSS_JITTER_SIGN, FrameDataCapture.jitterPxY * DLSS_JITTER_SIGN,
+                reset || !lastWasRr);
     }
 
     // ---------- DLSS 4: Frame Generation (Eingaben fuer FgPresenter) ----------
@@ -2616,7 +2713,7 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront, oitFrontDepth, motion, fgHud}) {
+                oitHead, oitFront, oitFrontDepth, motion, fgHud, rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut}) {
             if (img != null) toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -3029,11 +3126,13 @@ public final class NativePassRunner {
         Img src = switch (source) {
             case 1 -> gAlbedo;
             case 2 -> gNormal;
+            case 3 -> rrDiffuse != null ? rrDiffuse : ldr;
             default -> ldr;
         };
         String name = switch (source) {
             case 1 -> "vulkanfish-albedo.png";
             case 2 -> "vulkanfish-normallight.png";
+            case 3 -> "vulkanfish-rrdiffuse.png";
             default -> "vulkanfish-frame.png";
         };
         waitAll();

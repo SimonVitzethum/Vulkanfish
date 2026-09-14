@@ -23,7 +23,7 @@ public final class VulkanfishSettingsScreen extends OptionsSubScreen {
     protected void addOptions() {
         list.addHeader(Component.translatable("options.vulkanfish.image.header"));
         list.addSmall(VulkanfishOptions.fullbright(), VulkanfishOptions.raytracing(), VulkanfishOptions.taa(), VulkanfishOptions.dlss(),
-                VulkanfishOptions.frameGeneration());
+                VulkanfishOptions.rayReconstruction(), VulkanfishOptions.frameGeneration());
         list.addHeader(Component.translatable("options.vulkanfish.lod.header"));
         list.addSmall(VulkanfishOptions.lodDistance(), VulkanfishOptions.lodDetail(), VulkanfishOptions.lodBudget());
         addSeedRow();

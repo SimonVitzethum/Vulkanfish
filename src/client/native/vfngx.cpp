@@ -1,4 +1,4 @@
-// vfngx.cpp – schlanker NVIDIA-NGX-Shim fuer Vulkanfish (DLSS 4: DLAA; Frame Generation folgt).
+// vfngx.cpp – schlanker NVIDIA-NGX-Shim fuer Vulkanfish (DLSS 4: DLAA, Ray Reconstruction, Frame Generation).
 // Aus Java per FFM aufgerufen (NgxBridge.java): flache C-Funktionen, Vulkan-Handles als 64 Bit.
 // Nutzt die Inline-Helper des DLSS-SDK (NGX_VULKAN_CREATE/EVALUATE_DLSS_EXT), damit die Parameter
 // genau wie in NVIDIAs Referenz gepackt werden; Init nach denselben Regeln wie RenderFX (ngx.cpp):
@@ -9,6 +9,7 @@
 #include "nvsdk_ngx_helpers_vk.h"
 #include "nvsdk_ngx_helpers_dlssg_vk.h"
 #include "nvsdk_ngx_params_dlssg.h"
+#include "nvsdk_ngx_helpers_dlssd_vk.h"
 
 #include <condition_variable>
 #include <cstdint>
@@ -75,6 +76,10 @@ NVSDK_NGX_Parameter* gDlaaParams = nullptr;
 NVSDK_NGX_Handle* gDlaa = nullptr;
 uint32_t gDlaaW = 0, gDlaaH = 0;
 char gLastError[256] = {0};
+// Ray Reconstruction (DLSS 4, Transformer-Preset E) in DLAA-Aufloesung
+NVSDK_NGX_Parameter* gRrParams = nullptr;
+NVSDK_NGX_Handle* gRr = nullptr;
+uint32_t gRrW = 0, gRrH = 0;
 // DLSS Frame Generation (DLSS 4, bis 6x): Handle lazy beim ersten Aufruf, neu bei Groessen-/Formatwechsel
 NVSDK_NGX_Parameter* gFgParams = nullptr;
 NVSDK_NGX_Handle* gFg = nullptr;
@@ -214,6 +219,80 @@ static int dlaaImpl(uint64_t cmd, uint32_t w, uint32_t h,
     return 0;
 }
 
+// Ray Reconstruction: entrauscht + glaettet in einem Schritt. img/view/fmt je Ressource in der
+// Reihenfolge Farbe, Tiefe, Bewegung, diffuse Albedo, spekulare Albedo, Normale(+Rauheit in w), Ausgabe.
+// m: 16 worldToView, 16 viewToClip (wie bei der FG: JOML-Spalten = NGX-Zeilen).
+static int rrImpl(uint64_t cmd, uint32_t w, uint32_t h, const uint64_t* img, const uint64_t* view, const int* fmt,
+                  const float* m, float jitterX, float jitterY, int reset) {
+    if (!gInit) return -1;
+    VkCommandBuffer cb = (VkCommandBuffer)cmd;
+    if (gRr && (gRrW != w || gRrH != h)) {
+        NVSDK_NGX_VULKAN_ReleaseFeature(gRr);
+        gRr = nullptr;
+    }
+    if (!gRr) {
+        if (!gRrParams && NVSDK_NGX_FAILED(NVSDK_NGX_VULKAN_AllocateParameters(&gRrParams))) return -2;
+        NVSDK_NGX_DLSSD_Create_Params cp;
+        std::memset(&cp, 0, sizeof(cp));
+        cp.InWidth = w;
+        cp.InHeight = h;
+        cp.InTargetWidth = w;
+        cp.InTargetHeight = h;
+        cp.InPerfQualityValue = NVSDK_NGX_PerfQuality_Value_DLAA;
+        cp.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+        cp.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed; // Rauheit in normals.w
+        cp.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;
+        // RR verlangt HDR-Farbe (der Aufrufer spreizt sein LDR-Bild umkehrbar auf)
+        cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes | NVSDK_NGX_DLSS_Feature_Flags_DepthInverted
+                                | NVSDK_NGX_DLSS_Feature_Flags_IsHDR;
+        NVSDK_NGX_Parameter_SetUI(gRrParams, NVSDK_NGX_Parameter_RayReconstruction_Hint_Render_Preset_DLAA,
+                                  NVSDK_NGX_RayReconstruction_Hint_Render_Preset_E);
+        NVSDK_NGX_Result r = NGX_VULKAN_CREATE_DLSSD_EXT1(gDevice, cb, 1, 1, &gRr, gRrParams, &cp);
+        if (NVSDK_NGX_FAILED(r)) {
+            err("CreateFeature Ray Reconstruction", r);
+            gRr = nullptr;
+            return -3;
+        }
+        gRrW = w;
+        gRrH = h;
+        reset = 1;
+    }
+    NVSDK_NGX_Resource_VK color = wrap(img[0], view[0], fmt[0], w, h, false, false);
+    NVSDK_NGX_Resource_VK depth = wrap(img[1], view[1], fmt[1], w, h, true, false);
+    NVSDK_NGX_Resource_VK motion = wrap(img[2], view[2], fmt[2], w, h, false, false);
+    NVSDK_NGX_Resource_VK diffuse = wrap(img[3], view[3], fmt[3], w, h, false, false);
+    NVSDK_NGX_Resource_VK specular = wrap(img[4], view[4], fmt[4], w, h, false, false);
+    NVSDK_NGX_Resource_VK normals = wrap(img[5], view[5], fmt[5], w, h, false, false);
+    NVSDK_NGX_Resource_VK out = wrap(img[6], view[6], fmt[6], w, h, false, true);
+    float w2v[16], v2c[16];
+    std::memcpy(w2v, m, sizeof(w2v));
+    std::memcpy(v2c, m + 16, sizeof(v2c));
+    NVSDK_NGX_VK_DLSSD_Eval_Params ep;
+    std::memset(&ep, 0, sizeof(ep));
+    ep.pInColor = &color;
+    ep.pInOutput = &out;
+    ep.pInDepth = &depth;
+    ep.pInMotionVectors = &motion;
+    ep.pInDiffuseAlbedo = &diffuse;
+    ep.pInSpecularAlbedo = &specular;
+    ep.pInNormals = &normals;
+    ep.pInWorldToViewMatrix = w2v;
+    ep.pInViewToClipMatrix = v2c;
+    ep.InJitterOffsetX = jitterX;
+    ep.InJitterOffsetY = jitterY;
+    ep.InRenderSubrectDimensions.Width = w;
+    ep.InRenderSubrectDimensions.Height = h;
+    ep.InReset = reset ? 1 : 0;
+    ep.InMVScaleX = 1.0f;
+    ep.InMVScaleY = 1.0f;
+    NVSDK_NGX_Result r = NGX_VULKAN_EVALUATE_DLSSD_EXT(cb, gRr, gRrParams, &ep);
+    if (NVSDK_NGX_FAILED(r)) {
+        err("EvaluateFeature Ray Reconstruction", r);
+        return -4;
+    }
+    return 0;
+}
+
 // Ein generiertes Bild (Index frameIndex von frameCount, 1-basiert) in den offenen Command-Buffer.
 // p: 16 viewToClip, 16 clipToPrevClip (beide zeilenweise fuer Zeilenvektoren, ohne Jitter),
 // 2 Jitter (Pixel), 3 Kamera-Position, 3 rechts, 3 oben, 3 vorn, near, far, FOV (rad), Seitenverhaeltnis.
@@ -329,6 +408,10 @@ static void shutdownImpl() {
     if (gFgParams) NVSDK_NGX_VULKAN_DestroyParameters(gFgParams);
     gFg = nullptr;
     gFgParams = nullptr;
+    if (gRr) NVSDK_NGX_VULKAN_ReleaseFeature(gRr);
+    if (gRrParams) NVSDK_NGX_VULKAN_DestroyParameters(gRrParams);
+    gRr = nullptr;
+    gRrParams = nullptr;
     if (gDlaa) NVSDK_NGX_VULKAN_ReleaseFeature(gDlaa);
     if (gDlaaParams) NVSDK_NGX_VULKAN_DestroyParameters(gDlaaParams);
     NVSDK_NGX_VULKAN_Shutdown1(gDevice);
@@ -355,6 +438,13 @@ int vfngx_dlaa(uint64_t cmd, uint32_t w, uint32_t h,
         r = dlaaImpl(cmd, w, h, colorImage, colorView, colorFormat, depthImage, depthView, depthFormat,
                      mvImage, mvView, mvFormat, outImage, outView, outFormat, jitterX, jitterY, reset);
     });
+    return r;
+}
+
+int vfngx_rr(uint64_t cmd, uint32_t w, uint32_t h, const uint64_t* img, const uint64_t* view, const int* fmt,
+             const float* m, float jitterX, float jitterY, int reset) {
+    int r = -1;
+    onBigStack([&] { r = rrImpl(cmd, w, h, img, view, fmt, m, jitterX, jitterY, reset); });
     return r;
 }
 

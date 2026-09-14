@@ -3,6 +3,18 @@
   "slangVersion": "2026.17.1",
   "modules": [
     {
+      "file": "rr_guide.slang",
+      "entry": "rrGuide",
+      "stage": "compute",
+      "spv": "rr_guide.spv"
+    },
+    {
+      "file": "rr_guide.slang",
+      "entry": "rrResolve",
+      "stage": "compute",
+      "spv": "rr_resolve.spv"
+    },
+    {
       "file": "meshlet_cull.slang",
       "entry": "meshletCull",
       "stage": "compute",

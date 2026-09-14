@@ -11,6 +11,8 @@
   "options.vulkanfish.taa": "Temporales Anti-Aliasing",
   "options.vulkanfish.taa.tooltip": "Glatte Kanten und ruhige Details über mehrere Bilder.",
   "options.vulkanfish.dlss": "DLSS 4 (DLAA)",
+  "options.vulkanfish.rayReconstruction": "DLSS Ray Reconstruction",
+  "options.vulkanfish.rayReconstruction.tooltip": "NVIDIAs KI-Entrauscher (DLSS 4) statt DLAA: Fackelschatten bleiben auch in Bewegung ruhig. Braucht DLSS und Raytracing. In voller Auflösung teuer (etwa 20 ms bei 2560x1600 auf einer RTX 5070 Laptop).",
   "options.vulkanfish.frameGen": "DLSS Frame Gen",
   "options.vulkanfish.frameGen.tooltip": "NVIDIAs KI-Bildgenerierung (DLSS 4): zeigt bis zu 5 erzeugte Bilder zwischen zwei gerenderten. Braucht eine RTX-40/50-GPU (6x: RTX 50) und wirkt am besten ab 60 gerenderten FPS ohne VSync.",
   "options.vulkanfish.times": "%s: %sx",

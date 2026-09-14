@@ -37,6 +37,11 @@ public final class VulkanfishOptions {
                 VulkanfishSettings.dlss(), VulkanfishSettings::setDlss);
     }
 
+    public static OptionInstance<Boolean> rayReconstruction() {
+        return OptionInstance.createBoolean("options.vulkanfish.rayReconstruction", tip("options.vulkanfish.rayReconstruction"),
+                VulkanfishSettings.rayReconstruction(), VulkanfishSettings::setRayReconstruction);
+    }
+
     /** DLSS Frame Generation: aus, 2x..6x. */
     public static OptionInstance<Integer> frameGeneration() {
         return new OptionInstance<>("options.vulkanfish.frameGen", tip("options.vulkanfish.frameGen"),
