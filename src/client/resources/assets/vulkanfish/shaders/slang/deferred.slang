@@ -273,11 +273,14 @@ void deferredMain(in uint3 tid : SV_DispatchThreadID)
         float mask = mat == MAT_LAVA ? 1.0 : smoothstep(0.35, 0.8, luma(g0.rgb));
         c += albedo * emission * mask * 3.5;
     }
-    // Erze: gesaettigte Pixel (die Erz-Sprenkel) gluehen dezent
+    // Erze: farbige Pixel (die Erz-Sprenkel) gluehen dezent. Saettigung relativ zur Helligkeit
+    // (HSV): unabhaengig von AO/Schattierung, auch blasse Sprenkel (Eisen, Kupfer) zaehlen;
+    // grauer Stein bleibt dunkel. Glimmen reicht bis in dunkle Hoehlen (unabhaengig vom Licht)
     if (mat == MAT_ORE)
     {
-        float sat = max(g0.r, max(g0.g, g0.b)) - min(g0.r, min(g0.g, g0.b));
-        c += albedo * smoothstep(0.22, 0.45, sat) * 1.6;
+        float hi = max(g0.r, max(g0.g, g0.b)), lo = min(g0.r, min(g0.g, g0.b));
+        float sat = (hi - lo) / max(hi, 0.04);
+        c += albedo * smoothstep(0.16, 0.4, sat) * smoothstep(0.08, 0.2, hi) * 1.6;
     }
 
     float dist = length(wp - f.camPos);
