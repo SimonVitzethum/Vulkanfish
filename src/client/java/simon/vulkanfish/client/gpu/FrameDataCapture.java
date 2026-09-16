@@ -44,6 +44,8 @@ public final class FrameDataCapture {
     /** Nur Selbsttest: fester Sonnenwinkel in Grad (NaN = Vanilla-Wert). */
     static volatile float testSunAngle = Float.NaN;
     static volatile float lastSunAngle;
+    /** Diagnose: Zeit anhalten (siehe capture). */
+    static final boolean FREEZE_TIME = Boolean.getBoolean("vulkanfish.freezeTime");
 
     private FrameDataCapture() {
     }
@@ -190,7 +192,9 @@ public final class FrameDataCapture {
                         sunAngle, elev, vis, noon, rain, skyRgb[0], skyRgb[1], skyRgb[2], moon, fade, dimension, fogType);
             }
             float renderDist = Math.max(mc.options.getEffectiveRenderDistance() * 16.0f, lodFogDistance);
-            float time = (float) (((System.nanoTime() - T0) / 1e9) % 3600.0);
+            // Diagnose (-Dvulkanfish.freezeTime): Zeit anhalten – Wind, Wellen, Kaustik und
+            // Sterne stehen still. Flackert es dann weiter, ist es nicht zeitgetrieben.
+            float time = FREEZE_TIME ? 100.0f : (float) (((System.nanoTime() - T0) / 1e9) % 3600.0);
             return last = new NativePassRunner.FrameUniformsData(
                     vp, invVp, shadowVp,
                     rx, ry, rz, time,

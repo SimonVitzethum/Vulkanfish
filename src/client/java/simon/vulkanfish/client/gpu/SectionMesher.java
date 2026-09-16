@@ -106,6 +106,12 @@ final class SectionMesher {
     private int[] axisKey = new int[1024];
     private float[] planeKey = new float[1024];
     private byte[] category = new byte[1024];
+    // Sortier-Scratch (wiederverwendet pro Thread, nur transient in build()):
+    // primitiver int-Index statt Integer[] + Comparator-Lambda (kein Boxing, kein GC-Druck).
+    private int[] sortIdx = new int[1024];
+    private int[] mStartTmp = new int[72];
+    private int[] mCountTmp = new int[72];
+    private final int[] sortStack = new int[128]; // Quicksort-Tiefe log n, 128 = Reserve bis ~1 Mio. Quads
     private int[] lights = new int[64];
     private int lightCount;
     private int quads;
@@ -460,24 +466,102 @@ final class SectionMesher {
         category = Arrays.copyOf(category, n);
     }
 
+    // ---- Primitiver stabiler Sort (Kategorie, Achse, Ebene, Index) ----
+
+    /** Vergleich zweier Quad-Indices in der Sortierordnung. */
+    private int cmpQuads(int a, int b) {
+        int c = Integer.compare(category[a] & 0xFF, category[b] & 0xFF);
+        if (c != 0) return c;
+        c = Integer.compare(axisKey[a], axisKey[b]);
+        if (c != 0) return c;
+        c = Float.compare(planeKey[a], planeKey[b]);
+        return c != 0 ? c : Integer.compare(a, b);
+    }
+
+    /** Iterativer Quicksort mit Insertion-Fallback (kein Boxing, kein Comparator). */
+    private void sortQuads(int[] order, int n) {
+        // Expliziter Stack statt Rekursion (Tiefe log n, Grow-Schutz inklusive)
+        int[] stack = sortStack;
+        int sp = 0;
+        stack[sp++] = 0;
+        stack[sp++] = n - 1;
+        while (sp > 0) {
+            int hi = stack[--sp], lo = stack[--sp];
+            int size = hi - lo + 1;
+            if (size < 16) {
+                for (int i = lo + 1; i <= hi; i++) {
+                    int v = order[i], j = i - 1;
+                    while (j >= lo && cmpQuads(order[j], v) > 0) {
+                        order[j + 1] = order[j];
+                        j--;
+                    }
+                    order[j + 1] = v;
+                }
+                continue;
+            }
+            int mid = lo + (size >> 1);
+            // Median-of-3 auf lo/mid/hi
+            if (cmpQuads(order[lo], order[mid]) > 0) swapOrder(order, lo, mid);
+            if (cmpQuads(order[mid], order[hi]) > 0) swapOrder(order, mid, hi);
+            if (cmpQuads(order[lo], order[mid]) > 0) swapOrder(order, lo, mid);
+            int pivot = order[mid];
+            int i = lo, j = hi;
+            while (true) {
+                while (cmpQuads(order[i], pivot) < 0) i++;
+                while (cmpQuads(pivot, order[j]) < 0) j--;
+                if (i >= j) break;
+                swapOrder(order, i++, j--);
+            }
+            // Groesseres Intervall zuerst auf den Stack (Stack-Tiefe bleibt klein)
+            if (j - lo > hi - i) {
+                if (lo < j) {
+                    stack[sp++] = lo;
+                    stack[sp++] = j;
+                }
+                if (i < hi) {
+                    stack[sp++] = i;
+                    stack[sp++] = hi;
+                }
+            } else {
+                if (i < hi) {
+                    stack[sp++] = i;
+                    stack[sp++] = hi;
+                }
+                if (lo < j) {
+                    stack[sp++] = lo;
+                    stack[sp++] = j;
+                }
+            }
+        }
+    }
+
+    private static void swapOrder(int[] order, int a, int b) {
+        int t = order[a];
+        order[a] = order[b];
+        order[b] = t;
+    }
+
     // ---- Meshlet-Bau ----
 
     private MeshResult build(long key, int generation, int version) {
-        // Reihenfolge: nach Achse, innerhalb der Achse entlang der Ebene (stabil)
-        Integer[] order = new Integer[quads];
-        for (int i = 0; i < quads; i++) order[i] = i;
-        Arrays.sort(order, (a, b) -> {
-            int c = Integer.compare(category[a], category[b]);
-            if (c != 0) return c;
-            c = Integer.compare(axisKey[a], axisKey[b]);
-            if (c != 0) return c;
-            c = Float.compare(planeKey[a], planeKey[b]);
-            return c != 0 ? c : Integer.compare(a, b);
-        });
+        // Reihenfolge: nach Kategorie, Achse, Ebene (stabil per Originalindex).
+        // Primitiver Quicksort auf wiederverwendetem int[]-Scratch: kein Boxing
+        // (Integer[] + Lambda erzeugte pro Section Müll im Worker-Pool).
+        if (sortIdx.length < quads) sortIdx = new int[Math.max(quads, sortIdx.length * 2)];
+        for (int i = 0; i < quads; i++) sortIdx[i] = i;
+        if (quads > 1) sortQuads(sortIdx, quads);
+        final int[] order = sortIdx;
 
         // Meshlets duerfen keine Achsen mischen (Ebenentest waere sonst falsch)
-        int[] mStart = new int[quads / QUADS_PER_MESHLET + 8];
-        int[] mCount = new int[mStart.length];
+        // (transiente Scratch-Arrays, am Ende kopiert der MeshResult nur den belegten Teil)
+        int need = quads / QUADS_PER_MESHLET + 8;
+        if (mStartTmp.length < need) {
+            int n = Math.max(need, mStartTmp.length * 2);
+            mStartTmp = new int[n];
+            mCountTmp = new int[n];
+        }
+        int[] mStart = mStartTmp;
+        int[] mCount = mCountTmp;
         int meshlets = 0;
         int i = 0;
         while (i < quads) {
@@ -487,8 +571,9 @@ final class SectionMesher {
             while (i + n < quads && n < QUADS_PER_MESHLET && axisKey[order[i + n]] == axis
                     && category[order[i + n]] == cat) n++;
             if (meshlets == mStart.length) {
-                mStart = Arrays.copyOf(mStart, meshlets * 2);
-                mCount = Arrays.copyOf(mCount, meshlets * 2);
+                int grown = meshlets * 2;
+                mStart = mStartTmp = Arrays.copyOf(mStart, grown);
+                mCount = mCountTmp = Arrays.copyOf(mCount, grown);
             }
             mStart[meshlets] = i;
             mCount[meshlets] = n;
@@ -505,10 +590,14 @@ final class SectionMesher {
             float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE, minZ = Float.MAX_VALUE;
             float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
             float cutoff = Float.MAX_VALUE;
+            boolean foliage = false;
             int axis = axisKey[order[mStart[m]]];
             for (int q = 0; q < mCount[m]; q++) {
                 int src = order[mStart[m] + q];
                 int base = src * WORDS_PER_QUAD;
+                // Material steht im Alpha-Byte (low 4 Bit, siehe writeVertex): 1..4 = Laub/Pflanzen/Ranken
+                int mat = (words[base + 3] >>> 24) & 0xF;
+                if (mat >= MAT_LEAVES && mat <= MAT_VINE) foliage = true;
                 for (int w = 0; w < WORDS_PER_QUAD; w++) vb.putInt(words[base + w]);
                 for (int v = 0; v < 4; v++) {
                     float x = pos[src * 12 + v * 3];
@@ -528,7 +617,10 @@ final class SectionMesher {
             bounds[m * 4] = minX + hx;
             bounds[m * 4 + 1] = minY + hy;
             bounds[m * 4 + 2] = minZ + hz;
-            bounds[m * 4 + 3] = (float) Math.sqrt(hx * hx + hy * hy + hz * hz) + 0.01f;
+            // Wind (terrain_common.slang: Laub 0.035, Pflanzenoberkanten 0.10, mal Regenfaktor bis
+            // 2.5) schwingt Vertices aus statischen Cull-Kugeln -> zu knapp = Popping an Kanten.
+            // Nur Laub-Meshlets weiter machen (Cull-Verlust anderswo null).
+            bounds[m * 4 + 3] = (float) Math.sqrt(hx * hx + hy * hy + hz * hz) + (foliage ? 0.30f : 0.01f);
             kind[m] = axis == AXIS_WATER ? KIND_WATER : axis == AXIS_TRANSLUCENT ? KIND_TRANSLUCENT : KIND_OPAQUE;
             if (axis < AXIS_NONE) {
                 planes[m * 4] = AXES[axis][0];

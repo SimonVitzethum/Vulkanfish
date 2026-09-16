@@ -91,23 +91,38 @@ final class BobbySource {
     }
 
     // ---------- ohne Bobby: Cache-Dateien direkt ----------
+    // Alle Seed-Ordner des Servers (Bobby legt je Seed einen an): exakter Seed zuerst,
+    // dann alle anderen — gecachte Chunks werden immer angezeigt, auch ohne eingestellten Seed.
+
+    private record DiskEntry(Path dir, RegionFileStorage storage) {
+    }
+
+    private final java.util.List<DiskEntry> disks = new java.util.ArrayList<>();
 
     private CompletableFuture<Optional<CompoundTag>> loadFromDisk(ClientLevel level, ChunkPos pos) {
         if (level != diskLevel) openDisk(level);
-        RegionFileStorage storage = disk;
-        if (storage == null) return EMPTY;
-        // Nur vorhandene Regionen anfassen: RegionFileStorage legte fehlende sonst leer an
-        if (!Files.isRegularFile(diskDir.resolve("r." + (pos.x() >> 5) + "." + (pos.z() >> 5) + ".mca"))) return EMPTY;
+        if (disks.isEmpty()) return EMPTY;
+        String region = "r." + (pos.x() >> 5) + "." + (pos.z() >> 5) + ".mca";
+        DiskEntry hit = null;
+        for (DiskEntry e : disks) {
+            // Nur vorhandene Regionen anfassen: RegionFileStorage legte fehlende sonst leer an
+            if (Files.isRegularFile(e.dir().resolve(region))) {
+                hit = e;
+                break;
+            }
+        }
+        if (hit == null) return EMPTY;
+        final DiskEntry use = hit;
         CompletableFuture<Optional<CompoundTag>> out = new CompletableFuture<>();
         WorkerPool.submit(WorkerPool.PRIO_LOD, () -> {
             try {
                 CompoundTag tag;
-                synchronized (storage) {
-                    tag = storage.read(pos);
+                synchronized (use.storage()) {
+                    tag = use.storage().read(pos);
                 }
                 // Andere Spielversion: Bobby selbst verlangt dann /bobby upgrade – nicht raten
                 if (tag != null && tag.getIntOr("DataVersion", -1) != SharedConstants.getCurrentVersion().dataVersion().version()) tag = null;
-                if (tag != null && ++diskHits == 1) LOG.info("[vulkanfish] LOD: erster Chunk direkt aus dem Bobby-Cache ({})", diskDir);
+                if (tag != null && ++diskHits == 1) LOG.info("[vulkanfish] LOD: erster Chunk direkt aus dem Bobby-Cache ({})", use.dir());
                 out.complete(Optional.ofNullable(tag));
             } catch (Throwable t) {
                 out.complete(Optional.empty());
@@ -134,13 +149,41 @@ final class BobbySource {
             Path root = mc.gameDirectory.toPath().resolve(".bobby");
             Path serverDir = root.resolve(name);
             if (!Files.isDirectory(serverDir)) serverDir = root.resolve(escape(name));
+            if (!Files.isDirectory(serverDir)) return;
             long seedHash = ((simon.vulkanfish.client.mixin.BiomeManagerAccessor) level.getBiomeManager()).vulkanfish$zoomSeed();
             var id = level.dimension().identifier();
-            Path dir = serverDir.resolve(Long.toString(seedHash)).resolve(id.getNamespace()).resolve(id.getPath());
-            if (!Files.isDirectory(dir)) return;
-            diskDir = dir;
-            disk = new RegionFileStorage(new RegionStorageInfo("bobby", level.dimension(), "chunk"), dir, false);
-            LOG.info("[vulkanfish] LOD: Bobby-Cache ohne Bobby gefunden, lese direkt: {}", dir);
+            // Kandidaten: exakter Seed zuerst, dann alle anderen Seed-Ordner (ohne Seed-Einstellung
+            // trotzdem alles Gecachte nutzen). Jüngste zuerst, damit aktuelle Welt gewinnt.
+            java.util.List<Path> candidates = new java.util.ArrayList<>();
+            Path exact = serverDir.resolve(Long.toString(seedHash)).resolve(id.getNamespace()).resolve(id.getPath());
+            if (Files.isDirectory(exact)) candidates.add(exact);
+            try (var stream = Files.list(serverDir)) {
+                java.util.List<Path> seeds = stream.filter(Files::isDirectory).sorted((a, b) -> {
+                    try {
+                        return Long.compare(Files.getLastModifiedTime(b).toMillis(), Files.getLastModifiedTime(a).toMillis());
+                    } catch (Throwable ignored) {
+                        return 0;
+                    }
+                }).toList();
+                for (Path seedDir : seeds) {
+                    Path dir = seedDir.resolve(id.getNamespace()).resolve(id.getPath());
+                    if (Files.isDirectory(dir) && !candidates.contains(dir)) candidates.add(dir);
+                }
+            } catch (Throwable ignored) {
+            }
+            for (Path dir : candidates) {
+                try {
+                    var storage = new RegionFileStorage(new RegionStorageInfo("bobby", level.dimension(), "chunk"), dir, false);
+                    disks.add(new DiskEntry(dir, storage));
+                } catch (Throwable t) {
+                    LOG.warn("[vulkanfish] LOD: Bobby-Cache {} nicht lesbar ({})", dir, t.toString());
+                }
+            }
+            if (!disks.isEmpty()) {
+                diskDir = disks.get(0).dir();
+                disk = disks.get(0).storage();
+                LOG.info("[vulkanfish] LOD: Bobby-Cache ohne Bobby gefunden, lese direkt aus {} Ordner(n): {}", disks.size(), diskDir);
+            }
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] LOD: Bobby-Cache nicht lesbar ({})", t.toString());
             closeDisk();
@@ -159,6 +202,15 @@ final class BobbySource {
     }
 
     private void closeDisk() {
+        for (DiskEntry e : disks) {
+            try {
+                synchronized (e.storage()) {
+                    e.storage().close();
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        disks.clear();
         if (disk != null) {
             try {
                 synchronized (disk) {

@@ -160,3 +160,13 @@ CompositeOut oitCompositeFrag(FsOut input)
     o.depth = gFrontDepthIn.Load(int3(p, 0));
     return o;
 }
+
+// ---------- Classic-Raster-Fallback: Fullscreen-Dreieck statt Mesh-Shader ----------
+// Dieselben Pixel wie oitFullscreenMesh ((-1,-1),(3,-1),(-1,3)), Frag-Shader unveraendert.
+[shader("vertex")]
+FsOut oitFsTriVert(uint vid : SV_VertexID)
+{
+    FsOut o;
+    o.pos = float4(vid == 1 ? 3.0 : -1.0, vid == 2 ? 3.0 : -1.0, 0.0, 1.0);
+    return o;
+}

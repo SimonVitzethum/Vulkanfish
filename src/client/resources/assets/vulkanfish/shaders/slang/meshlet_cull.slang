@@ -98,7 +98,10 @@ bool hizVisible(float3 c, float r, FrameUniforms f)
     int2 p1 = clamp(px1 >> mip, int2(0, 0), lim);
     float d = min(min(gHiz.Load(int3(p0, mip)), gHiz.Load(int3(p1.x, p0.y, mip))),
                   min(gHiz.Load(int3(p0.x, p1.y, mip)), gHiz.Load(int3(p1, mip))));
-    return zNearest >= d;
+    // Konservativ gegen Flackern: nie wegen eines Texels cullen, das nur knapp
+    // dahinter liegt (TAA-Jitter/HiZ aus Phase 1). 0.0005 NDC reicht, um
+    // Kanten-Popping zu stoppen, ohne sichtbar mehr zu zeichnen.
+    return zNearest + 0.0005 >= d;
 }
 
 // LOD: liegt die Box (relativer Raum) komplett in Sections, die das Nahfeld zeichnet? (dann bringt LOD nichts)
@@ -199,7 +202,10 @@ void meshletCull(in uint3 gid : SV_GroupID, in uint3 ltid : SV_GroupThreadID)
                  && length(bc.xz - (camChunkRel + 0.5) * 16.0) - mh.boundRadius <= gCull.maxDistXZ
                  && !nearCoveredBox(f, bmn, bmx);
         if (pass && dot(mh.coneAxis, mh.coneAxis) > 0.5)
-            pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff + dot(org, mh.coneAxis) - 0.01;
+            // Hysterese gegen Flackern an streifenden Blockseiten: einmal sichtbare
+            // Meshlets nicht schon bei 0.01 wieder verwerfen (TAA-Jitter/Schattenmatrix
+            // wackeln sonst um die Kante). 0.08 entspricht ~4.6 Grad.
+            pass = dot(f.camPos, mh.coneAxis) >= mh.coneCutoff + dot(org, mh.coneAxis) - 0.08;
         if (phase == 1)
         {
             if (!pass || gVisBits[idx] == 0)

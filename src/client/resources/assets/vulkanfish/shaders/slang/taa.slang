@@ -96,9 +96,13 @@ void taaResolve(in uint3 tid : SV_DispatchThreadID)
     float motionPx = length((prevUv - uv) * u.screenSize);
 
     float3 result = cur;
-    if (u.historyValid != 0 && pc.w > 0.0 && all(prevUv > 0.0) && all(prevUv < 1.0))
+    // Rand-Clamp statt Verwerfen: ausserhalb projizierte Pixel bekamen bisher gar keine
+    // History und zeigten das rohe Jitter-Bild (flimmernder Bildschirmrand). Geklemmte
+    // History (Kante gestreckt) ist stabil; das Varianz-Clipping verwirft sie bei Bedarf.
+    if (u.historyValid != 0 && pc.w > 0.0)
     {
-        float3 hist = toYCoCg(sampleHistory(prevUv, u.screenSize));
+        float2 cuv = clamp(prevUv, 0.0, 1.0);
+        float3 hist = toYCoCg(sampleHistory(cuv, u.screenSize));
         // Varianz-Clipping: History auf die Farbverteilung der aktuellen Nachbarschaft ziehen
         float gamma = lerp(1.25, 0.9, saturate(motionPx / 12.0));
         float3 lo = m1 - gamma * sigma, hi = m1 + gamma * sigma;

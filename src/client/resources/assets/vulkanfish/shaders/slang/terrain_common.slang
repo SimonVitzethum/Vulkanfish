@@ -48,4 +48,36 @@ void computeQuadNormals(MeshletHeader mh, uint lt, uint vCount)
     GroupMemoryBarrierWithGroupSync();
 }
 
+// ---------- Classic-Raster-Fallback (ohne Mesh-Shader) ----------
+// Vertex-Pulling aus denselben Meshlet-Puffern: non-indexed Multi-Draw (ein Draw je
+// sichtbarem Meshlet, firstInstance = Listenplatz), 3 Vertices je Dreieck aus gTris.
+// Normale pro Vertex neu gerechnet (statt gruppengeteilt), sonst bitgleich zum Mesh-Pfad
+// (inkl. Wind) – etwas mehr ALU, dafuer null Bandbreiten-Expansion.
+void decodeClassicTerrain(uint iid, uint vid, out TerrainVertex tv, out float3 wp, out float3 n)
+{
+    MeshletHeader mh = gMeshlets[gVisibleMeshlets[iid]];
+    FrameUniforms f = gFrame;
+    uint t = vid / 3, k = vid % 3;
+    uint3 tri = unpackTri(gTris[mh.indexStart + t]);
+    uint lt = k == 0 ? tri.x : (k == 1 ? tri.y : tri.z);
+    uint q0 = mh.vertexStart + (lt & ~3u);
+    float3 o0 = float3(0.0, 0.0, 0.0);
+    float3 p0 = tvPos(gVertices[q0], o0);
+    float3 p1 = tvPos(gVertices[q0 + 1], o0);
+    float3 p2 = tvPos(gVertices[q0 + 2], o0);
+    float3 cn = cross(p1 - p0, p2 - p0);
+    if (dot(cn, cn) < 1e-10)
+        cn = cross(p2 - p0, tvPos(gVertices[q0 + 3], o0) - p0);
+    n = dot(cn, cn) < 1e-10 ? float3(0, 1, 0) : normalize(cn);
+    tv = gVertices[mh.vertexStart + lt];
+    float3 origin = relOrigin(f, mh.originX, mh.originY, mh.originZ);
+    wp = tvPos(tv, origin);
+    uint mat = (tv.color >> 24) & 0xF;
+    if (isFoliage(mat))
+    {
+        float amount = mat == MAT_PLANT_TOP ? 0.10 : (mat == MAT_PLANT ? 0.0 : 0.035);
+        wp += windOffset(wp + f.worldWrap.xyz, f.time, amount, f.rainFactor);
+    }
+}
+
 #endif

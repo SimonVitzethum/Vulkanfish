@@ -31,8 +31,10 @@ float4 entityShadeFrag(FsIn input) : SV_Target0
     int2 px = int2(input.pos.xy);
     float d = gSceneDepth.Load(int3(px, 0));
     float t = gTerrainDepth.Load(int3(px, 0));
-    // Reverse-Z: groesser = naeher. Nur Pixel, die Vanilla vor unser Terrain gezeichnet hat
-    if (f.dimension != 0 || f.shadowDistance <= 0.0 || d <= 0.0 || d <= t * 1.00002 + 1e-7)
+    // Reverse-Z: groesser = naeher. Nur Pixel, die Vanilla vor unser Terrain gezeichnet hat.
+    // Additives Epsilon (statt multiplikativ): multiplikativ flackert in der Ferne
+    // am Schwellwert, weil die absolute Differenz dort kleiner als das Rauschen ist.
+    if (f.dimension != 0 || f.shadowDistance <= 0.0 || d <= 0.0 || d <= t + 2e-4)
         discard;
     float lightFade = length(f.lightDir);
     if (lightFade < 1e-3)

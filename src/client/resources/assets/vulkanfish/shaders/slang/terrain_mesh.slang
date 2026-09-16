@@ -128,3 +128,36 @@ void terrainShadowFrag(ShadowFragIn input)
     if (gAtlas.SampleLevel(gAtlasSamp, input.uv, 0).a < 0.5)
         discard;
 }
+
+// ---------- Classic-Raster-Fallback (ohne Mesh-Shader) ----------
+// Dieselben Frag-Shader (FragIn/ShadowFragIn oben), Vertices per Vertex-Pulling.
+// Draws: non-indexed Multi-DrawIndirectCount, firstInstance = Listenplatz.
+[shader("vertex")]
+FragIn terrainClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    TerrainVertex tv;
+    float3 wp, n;
+    decodeClassicTerrain(iid, vid, tv, wp, n);
+    FragIn o;
+    o.pos = mul(gFrame.viewProj, float4(wp, 1.0));
+    o.uv = tvUv(tv);
+    o.color = tvColor(tv);
+    o.normal = n;
+    o.light = tvLight(tv);
+    o.mat = tv.color >> 24; // Material | Emission << 4
+    return o;
+}
+
+[shader("vertex")]
+ShadowFragIn terrainShadowClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    TerrainVertex tv;
+    float3 wp, n;
+    decodeClassicTerrain(iid, vid, tv, wp, n);
+    float4 clip = mul(gFrame.viewProj, float4(wp, 1.0));
+    clip.xy = distortShadow(clip.xy);
+    ShadowFragIn o;
+    o.pos = clip;
+    o.uv = tvUv(tv);
+    return o;
+}

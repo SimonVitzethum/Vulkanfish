@@ -101,11 +101,17 @@ public final class VulkanfishRenderer {
             initAttempted = false; // spaeter erneut versuchen
             return;
         }
-        // 2. Mesh-Shader muessen auf MOJANGS Device aktiv sein (VulkanBackendMixin)
-        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading()
-                && !Boolean.getBoolean("vulkanfish.vanillaCompare"); // Selbsttest: Vanillas Bild zum Vergleich
-        if (!meshPath) {
-            LOG.warn("[vulkanfish] Mesh-Shading auf Mojangs Device nicht aktiv -> Vanilla-Pfad");
+        // 2. Raster-Pfad: Mesh-Shader wenn moeglich, sonst Classic-Raster-Fallback
+        // (Vertex-Pulling + Multi-DrawIndirectCount, Culling bleibt GPU-driven).
+        // -Dvulkanfish.classicRaster=true erzwingt den Fallback (Test), =false verbietet ihn.
+        boolean vanillaCompare = Boolean.getBoolean("vulkanfish.vanillaCompare"); // Selbsttest: Vanillas Bild zum Vergleich
+        String classicProp = System.getProperty("vulkanfish.classicRaster", "auto");
+        boolean classicForced = "true".equals(classicProp);
+        boolean classicAllowed = !"false".equals(classicProp);
+        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading() && !classicForced && !vanillaCompare;
+        boolean classicPath = !meshPath && !vanillaCompare && classicAllowed && device.supportsIndirectCount();
+        if (!meshPath && !classicPath) {
+            LOG.warn("[vulkanfish] Weder Mesh-Shading noch IndirectCount auf Mojangs Device -> Vanilla-Pfad");
             return;
         }
         // 3. Bobby optional (Fernfeld-Quelle fuer 250-Chunk-LOD).
@@ -119,6 +125,7 @@ public final class VulkanfishRenderer {
         }
         // 5. Native Pipelines/Puffer auf Mojangs Device (Push-Deskriptoren wie Blaze3D).
         nativeRunner = new NativePassRunner(device, config.enableHizCulling());
+        nativeRunner.setClassicRaster(classicPath);
         if (!nativeRunner.init(shaderLoader)) {
             LOG.warn("[vulkanfish] Nativ deaktiviert ({}), Vanilla rendert", nativeRunner.disableReason());
             nativeRunner.destroy(); // bis dahin angelegte Objekte nicht auf Mojangs Device liegen lassen
@@ -141,8 +148,8 @@ public final class VulkanfishRenderer {
         }
         initialized = true;
         vanillaOpaqueDisabled = true;
-        LOG.info("[vulkanfish] GPU-driven renderer init: mesh={} hiz={} rt={} (Pass folgt) bobby={}",
-                meshPath, config.enableHizCulling(), device.supportsRaytracing(), bobbyOn);
+        LOG.info("[vulkanfish] GPU-driven renderer init: mesh={} classic={} hiz={} rt={} (Pass folgt) bobby={}",
+                meshPath, classicPath, config.enableHizCulling(), device.supportsRaytracing(), bobbyOn);
     }
 
     /** Pro Frame aus LevelRendererMixin (Render-Thread, vor Vanillas Frame-Graph). */
@@ -1206,7 +1213,7 @@ public final class VulkanfishRenderer {
     }
 
     public boolean useGpuDrivenPath() {
-        return initialized && config.enableMeshShaders();
+        return initialized; // Mesh- wie Classic-Pfad ersetzen Vanillas Opaque-Terrain
     }
 
 }

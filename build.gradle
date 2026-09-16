@@ -89,10 +89,12 @@ processResources {
 
 // ---- Slang -> SPIR-V ----
 // Baut alle .slang aus src/client/resources/.../slang nach build/slang/*.spv.
-// slangc wird beim ersten Lauf automatisch von GitHub geladen (shader-slang).
+// slangc wird beim ersten Lauf automatisch von GitHub geladen (shader-slang),
+// pro OS das passende Archiv (Linux .tar.gz, Windows .zip mit slangc.exe).
 def slangVersion = "2026.17.1"
 def slangDir = file("$buildDir/slangc")
-def slangcBin = file("$slangDir/bin/slangc")
+def osWindows = System.getProperty("os.name").toLowerCase(java.util.Locale.ROOT).contains("windows")
+def slangcBin = file("$slangDir/bin/" + (osWindows ? "slangc.exe" : "slangc"))
 def slangSrc = file("src/client/resources/assets/vulkanfish/shaders/slang")
 def slangOut = file("$buildDir/slang")
 
@@ -101,12 +103,21 @@ tasks.register("downloadSlangc") {
 	doLast {
 		if (!slangcBin.exists()) {
 			slangDir.mkdirs()
-			def tgz = file("$buildDir/slang-${slangVersion}.tgz")
-			def url = "https://github.com/shader-slang/slang/releases/download/v${slangVersion}/slang-${slangVersion}-linux-x86_64.tar.gz"
-			logger.lifecycle("Lade slangc ${slangVersion} ...")
-			new URL(url).withInputStream { i -> tgz.withOutputStream { it << i } }
-			copy { from tarTree(tgz); into slangDir }
-			slangcBin.setExecutable(true)
+			if (osWindows) {
+				def zip = file("$buildDir/slang-${slangVersion}.zip")
+				def url = "https://github.com/shader-slang/slang/releases/download/v${slangVersion}/slang-${slangVersion}-windows-x86_64.zip"
+				logger.lifecycle("Lade slangc ${slangVersion} (Windows) ...")
+				new URL(url).withInputStream { i -> zip.withOutputStream { it << i } }
+				copy { from zipTree(zip); into slangDir }
+				if (!slangcBin.exists()) throw new GradleException("slangc.exe nicht im Windows-Archiv unter bin/ gefunden (Layout geaendert?)")
+			} else {
+				def tgz = file("$buildDir/slang-${slangVersion}.tgz")
+				def url = "https://github.com/shader-slang/slang/releases/download/v${slangVersion}/slang-${slangVersion}-linux-x86_64.tar.gz"
+				logger.lifecycle("Lade slangc ${slangVersion} ...")
+				new URL(url).withInputStream { i -> tgz.withOutputStream { it << i } }
+				copy { from tarTree(tgz); into slangDir }
+				slangcBin.setExecutable(true)
+			}
 		}
 	}
 }
@@ -143,31 +154,92 @@ tasks.register("compileSlang") {
 processResources.dependsOn("compileSlang")
 
 // ---- DLSS 4 (NVIDIA NGX) ----
-// Baut den nativen Shim src/client/native/vfngx.cpp gegen das DLSS-SDK (Header + libnvsdk_ngx.a)
-// und kopiert die DLSS-Snippets (libnvidia-ngx-dlss*.so) in ein beschreibbares Verzeichnis
+// Baut den nativen Shim src/client/native/vfngx.cpp gegen das DLSS-SDK (Header + NGX-Lib)
+// und kopiert die DLSS-Snippets in ein beschreibbares Verzeichnis
 // (NGX legt dort Caches an). SDK-Ort: -PngxSdk=<pfad> (Standard: RenderFX-Vendor-Verzeichnis).
-// Ohne SDK wird nichts gebaut, DLSS bleibt dann aus.
+// Ohne SDK wird nichts gebaut, DLSS bleibt dann aus (der Rest laeuft ueberall).
+// Windows: MinGW (x86_64-w64-mingw32-g++ oder g++) baut vfngx.dll; ohne Toolchain/SDK
+// wird uebersprungen (niemals build-brechend).
 def ngxSdk = file(project.findProperty("ngxSdk") ?: "${rootDir}/../Native NvOFVk frame-gen/renderfx/vendor/ngx")
 def ngxOut = file("$buildDir/native")
+def findOnPath(String... names) {
+	for (n in names) {
+		try {
+			def probe = osWindows ? ["cmd", "/c", "where", n] : ["which", n]
+			def proc = new ProcessBuilder(probe as List<String>).redirectErrorStream(true).start()
+			proc.waitFor()
+			if (proc.exitValue() == 0) return n
+		} catch (Throwable ignored) {
+		}
+	}
+	return null
+}
 tasks.register("buildNgx") {
 	inputs.file("src/client/native/vfngx.cpp")
 	outputs.dir(ngxOut)
-	onlyIf { file("$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a").exists() }
+	onlyIf {
+		osWindows ? file("$ngxSdk/lib/Windows_x86_64/nvsdk_ngx.lib").exists()
+				|| file("$ngxSdk/lib/Windows_x86_64/nvsdk_ngx_d.lib").exists()
+			: file("$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a").exists()
+	}
 	doLast {
 		ngxOut.mkdirs()
-		def cmd = ["g++", "-std=c++17", "-O2", "-fPIC", "-shared", "-o", "$ngxOut/libvfngx.so",
-			file("src/client/native/vfngx.cpp").toString(), "-I$ngxSdk/include",
-			"-Wl,--whole-archive", "$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a", "-Wl,--no-whole-archive",
-			"-ldl", "-Wl,--exclude-libs,ALL"].collect { it.toString() }
-		def proc = new ProcessBuilder(cmd).redirectErrorStream(true).start()
-		def log = proc.inputStream.text
-		proc.waitFor()
-		if (proc.exitValue() != 0) throw new GradleException("vfngx-Shim: g++ fehlgeschlagen\n${log}")
-		copy {
-			from("$ngxSdk/lib/Linux_x86_64/rel") { include "libnvidia-ngx-dlss*.so.*" }
-			into "$ngxOut/ngx"
+		if (osWindows) {
+			buildNgxWindows(ngxSdk, ngxOut)
+		} else {
+			def cmd = ["g++", "-std=c++17", "-O2", "-fPIC", "-shared", "-o", "$ngxOut/libvfngx.so",
+				file("src/client/native/vfngx.cpp").toString(), "-I$ngxSdk/include",
+				"-Wl,--whole-archive", "$ngxSdk/lib/Linux_x86_64/libnvsdk_ngx.a", "-Wl,--no-whole-archive",
+				"-ldl", "-Wl,--exclude-libs,ALL"].collect { it.toString() }
+			def proc = new ProcessBuilder(cmd).redirectErrorStream(true).start()
+			def log = proc.inputStream.text
+			proc.waitFor()
+			if (proc.exitValue() != 0) throw new GradleException("vfngx-Shim: g++ fehlgeschlagen\n${log}")
+			copy {
+				from("$ngxSdk/lib/Linux_x86_64/rel") { include "libnvidia-ngx-dlss*.so.*" }
+				into "$ngxOut/ngx"
+			}
 		}
 	}
+}
+// Windows: vfngx.dll per MinGW bauen (MSVC cl braucht vcvars-Umgebung und wird nicht versucht).
+// Fehlt Toolchain oder Snippet-DLLs, bleibt DLSS aus – der Build laeuft trotzdem durch.
+def buildNgxWindows(File sdk, File out) {
+	def cxx = findOnPath("x86_64-w64-mingw32-g++", "g++")
+	if (cxx == null) {
+		logger.warn("vfngx: kein MinGW (x86_64-w64-mingw32-g++/g++) im PATH – DLSS bleibt auf Windows aus (Rest geht)")
+		return
+	}
+	def impLib = file("$sdk/lib/Windows_x86_64/nvsdk_ngx.lib")
+	if (!impLib.exists()) impLib = file("$sdk/lib/Windows_x86_64/nvsdk_ngx_d.lib")
+	def cmd = [cxx, "-std=c++17", "-O2", "-shared", "-o", "$out/vfngx.dll",
+		file("src/client/native/vfngx.cpp").toString(), "-I$sdk/include", impLib.toString(),
+		"-static-libgcc", "-static-libstdc++", "-Wl,--exclude-libs,ALL"].collect { it.toString() }
+	def proc = new ProcessBuilder(cmd).redirectErrorStream(true).start()
+	def log = proc.inputStream.text
+	proc.waitFor()
+	if (proc.exitValue() != 0) {
+		logger.warn("vfngx: Windows-Shim fehlgeschlagen (DLSS aus), Log:\n${log}")
+		return
+	}
+	// DLSS-Redist-DLLs neben den Shim (NGX laedt sie von dort); fehlen sie, scheitert spaeter
+	// nur die NGX-Init (DLSS aus), nie der Build oder das Spiel.
+	def copied = []
+	for (pattern in ["lib/Windows_x86_64/**/nvngx_dlss*.dll", "bin/**/nvngx_dlss*.dll", "**/nvngx_dlss*.dll"]) {
+		try {
+			def tree = fileTree(dir: sdk.toString(), include: pattern)
+			if (!tree.isEmpty()) {
+				copy {
+					from tree
+					into "$out/ngx"
+				}
+				copied.addAll(tree.files.collect { it.name })
+			}
+		} catch (Throwable ignored) {
+		}
+	}
+	if (copied.isEmpty()) logger.warn("vfngx: keine nvngx_dlss*.dll im SDK gefunden – DLSS bleibt vorerst aus")
+	else logger.lifecycle("vfngx: Windows-Shim + DLSS-Snippets gebaut ({})", copied.unique().join(", "))
 }
 tasks.named("runClient") { dependsOn("buildNgx") }
 

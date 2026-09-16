@@ -59,10 +59,10 @@ public final class MeshShaderSupport {
     public static void augment(Collection<String> extensions, VulkanPhysicalDevice physicalDevice,
                                Set<VulkanFeature> features) {
         try {
-            if (!physicalDevice.hasDeviceExtension(EXT_MESH) || !physicalDevice.hasDeviceExtension(EXT_SPIRV_14)) {
-                LOG.warn("[vulkanfish] GPU ohne {}/{} – GPU-driven Pfad aus, Vanilla rendert", EXT_MESH, EXT_SPIRV_14);
-                return;
-            }
+            // Basis-Features gelten MIT und OHNE Mesh-Shader (Classic-Raster-Fallback braucht
+            // dieselben Compute-/Fragment-Faehigkeiten, nur keine Mesh-Stage).
+            boolean hasMeshExt = physicalDevice.hasDeviceExtension(EXT_MESH)
+                    && physicalDevice.hasDeviceExtension(EXT_SPIRV_14);
             VulkanPNextStruct meshStruct = new VulkanPNextStruct(
                     EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
                     VkPhysicalDeviceMeshShaderFeaturesEXT.SIZEOF);
@@ -97,15 +97,13 @@ public final class MeshShaderSupport {
                 fMesh.pNext(fAs.address());
                 fAs.pNext(fRq.address());
                 VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), query);
-                if (!mesh.get(query) || !fragmentStores.get(query)) {
-                    LOG.warn("[vulkanfish] meshShader/fragmentStoresAndAtomics nicht unterstuetzt – Vanilla rendert");
+                // Basis zuerst (Classic-Raster + Compute + OIT kommen ohne Mesh-Stage aus)
+                if (!fragmentStores.get(query)) {
+                    LOG.warn("[vulkanfish] fragmentStoresAndAtomics nicht unterstuetzt – Vanilla rendert");
                     return;
                 }
-                extensions.add(EXT_MESH);
-                extensions.add(EXT_SPIRV_14);
-                features.add(mesh);
                 features.add(fragmentStores);
-                meshEnabled = true;
+                meshEnabled = false;
                 if (indirectCount.get(query)) {
                     features.add(indirectCount);
                     indirectCountEnabled = true;
@@ -116,10 +114,20 @@ public final class MeshShaderSupport {
                 }
                 if (storageRead.get(query)) features.add(storageRead);
                 if (storageWrite.get(query)) features.add(storageWrite);
+                // Mesh-Stage nur mit Extension + Feature (sonst Classic-Raster-Fallback)
+                if (hasMeshExt && mesh.get(query)) {
+                    extensions.add(EXT_MESH);
+                    extensions.add(EXT_SPIRV_14);
+                    features.add(mesh);
+                    meshEnabled = true;
+                } else {
+                    LOG.info("[vulkanfish] GPU ohne {}/{} oder meshShader-Feature – Classic-Raster-Fallback (Compute-Culling bleibt)",
+                            EXT_MESH, EXT_SPIRV_14);
+                }
                 augmentRayQuery(extensions, physicalDevice, features, fAs, fRq, f12, arena);
             }
-            LOG.info("[vulkanfish] Mojang-Device erweitert: {} + {} (drawIndirectCount={})",
-                    EXT_MESH, EXT_SPIRV_14, indirectCountEnabled);
+            LOG.info("[vulkanfish] Mojang-Device erweitert: mesh={} (drawIndirectCount={})",
+                    meshEnabled, indirectCountEnabled);
         } catch (Throwable t) {
             meshEnabled = false;
             indirectCountEnabled = false;

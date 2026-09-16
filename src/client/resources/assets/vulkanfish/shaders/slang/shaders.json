@@ -1,213 +1,267 @@
 {
-  "_comment": "Slang->SPIR-V Manifest. Gradle-Task compileSlang baut jedes Modul. Loader laedt .spv aus assets/vulkanfish/shaders/spv/. Look: eigene Implementierung (look.slang), Complementary-inspiriert, kein Code aus dem Pack. Produktionspfad: meshlet_cull (Compute) + Mesh-only + DrawMeshTasksIndirectEXT.",
-  "slangVersion": "2026.17.1",
-  "modules": [
-    {
-      "file": "rr_guide.slang",
-      "entry": "rrGuide",
-      "stage": "compute",
-      "spv": "rr_guide.spv"
-    },
-    {
-      "file": "rr_guide.slang",
-      "entry": "rrResolve",
-      "stage": "compute",
-      "spv": "rr_resolve.spv"
-    },
-    {
-      "file": "meshlet_cull.slang",
-      "entry": "meshletCull",
-      "stage": "compute",
-      "spv": "meshlet_cull.spv"
-    },
-    {
-      "file": "terrain_mesh.slang",
-      "entry": "terrainMeshDirect",
-      "stage": "mesh",
-      "spv": "terrain_mesh_direct.spv"
-    },
-    {
-      "file": "terrain_mesh.slang",
-      "entry": "terrainFrag",
-      "stage": "fragment",
-      "spv": "terrain_frag.spv"
-    },
-    {
-      "file": "hiz_downsample.slang",
-      "entry": "hizDownsample",
-      "stage": "compute",
-      "spv": "hiz.spv"
-    },
-    {
-      "file": "terrain_mesh.slang",
-      "entry": "terrainShadowMesh",
-      "stage": "mesh",
-      "spv": "terrain_shadow_mesh.spv"
-    },
-    {
-      "file": "terrain_mesh.slang",
-      "entry": "terrainShadowFrag",
-      "stage": "fragment",
-      "spv": "terrain_shadow_frag.spv"
-    },
-    {
-      "file": "deferred.slang",
-      "entry": "deferredMain",
-      "stage": "compute",
-      "spv": "deferred.spv"
-    },
-    {
-      "file": "bloom.slang",
-      "entry": "bloomDown",
-      "stage": "compute",
-      "spv": "bloom_down.spv"
-    },
-    {
-      "file": "bloom.slang",
-      "entry": "bloomUp",
-      "stage": "compute",
-      "spv": "bloom_up.spv"
-    },
-    {
-      "file": "final.slang",
-      "entry": "finalMain",
-      "stage": "compute",
-      "spv": "final.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "waterMesh",
-      "stage": "mesh",
-      "spv": "water_mesh.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "waterFrag",
-      "stage": "fragment",
-      "spv": "water_frag.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "lodWaterMesh",
-      "stage": "mesh",
-      "spv": "lod_water_mesh.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "lodWaterFrag",
-      "stage": "fragment",
-      "spv": "lod_water_frag.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "lodWaterDepthFrag",
-      "stage": "fragment",
-      "spv": "lod_water_depth_frag.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "translucentMesh",
-      "stage": "mesh",
-      "spv": "translucent_mesh.spv"
-    },
-    {
-      "file": "water.slang",
-      "entry": "translucentRecordFrag",
-      "stage": "fragment",
-      "spv": "translucent_record_frag.spv"
-    },
-    {
-      "file": "taa.slang",
-      "entry": "taaResolve",
-      "stage": "compute",
-      "spv": "taa.spv"
-    },
-    {
-      "file": "oit.slang",
-      "entry": "oitResolve",
-      "stage": "compute",
-      "spv": "oit_resolve.spv"
-    },
-    {
-      "file": "oit.slang",
-      "entry": "oitFullscreenMesh",
-      "stage": "mesh",
-      "spv": "oit_fullscreen_mesh.spv"
-    },
-    {
-      "file": "oit.slang",
-      "entry": "oitCompositeFrag",
-      "stage": "fragment",
-      "spv": "oit_composite_frag.spv"
-    },
-    {
-      "file": "deferred.slang",
-      "entry": "deferredMainRt",
-      "stage": "compute",
-      "spv": "deferred_main_rt.spv",
-      "defines": [
-        "VF_RT=1"
-      ]
-    },
-    {
-      "file": "rt_lights.slang",
-      "entry": "lightBin",
-      "stage": "compute",
-      "spv": "rt_light_bin.spv"
-    },
-    {
-      "file": "lod_mesh.slang",
-      "entry": "lodMesh",
-      "stage": "mesh",
-      "spv": "lod_mesh.spv"
-    },
-    {
-      "file": "lod_mesh.slang",
-      "entry": "lodFrag",
-      "stage": "fragment",
-      "spv": "lod_frag.spv"
-    },
-    {
-      "file": "motion.slang",
-      "entry": "motionMain",
-      "stage": "compute",
-      "spv": "motion.spv"
-    },
-    {
-      "file": "lod_mesh.slang",
-      "entry": "lodShadowMesh",
-      "stage": "mesh",
-      "spv": "lod_shadow_mesh.spv"
-    },
-    {
-      "file": "lod_mesh.slang",
-      "entry": "lodShadowFrag",
-      "stage": "fragment",
-      "spv": "lod_shadow_frag.spv"
-    },
-    {
-      "file": "lod_gen.slang",
-      "entry": "lodGenMain",
-      "stage": "compute",
-      "spv": "lod_gen.spv"
-    },
-    {
-      "file": "lod_mesher.slang",
-      "entry": "lodMeshMain",
-      "stage": "compute",
-      "spv": "lod_mesher.spv"
-    },
-    {
-      "file": "entity_shadow.slang",
-      "entry": "entityShadowVert",
-      "stage": "vertex",
-      "spv": "entity_shadow_vert.spv"
-    },
-    {
-      "file": "entity_shade.slang",
-      "entry": "entityShadeFrag",
-      "stage": "fragment",
-      "spv": "entity_shade_frag.spv"
-    }
-  ]
+ "_comment": "Slang->SPIR-V Manifest. Gradle-Task compileSlang baut jedes Modul. Loader laedt .spv aus assets/vulkanfish/shaders/spv/. Look: eigene Implementierung (look.slang), Complementary-inspiriert, kein Code aus dem Pack. Produktionspfad: meshlet_cull (Compute) + Mesh-only + DrawMeshTasksIndirectEXT.",
+ "slangVersion": "2026.17.1",
+ "modules": [
+  {
+   "file": "rr_guide.slang",
+   "entry": "rrGuide",
+   "stage": "compute",
+   "spv": "rr_guide.spv"
+  },
+  {
+   "file": "rr_guide.slang",
+   "entry": "rrResolve",
+   "stage": "compute",
+   "spv": "rr_resolve.spv"
+  },
+  {
+   "file": "meshlet_cull.slang",
+   "entry": "meshletCull",
+   "stage": "compute",
+   "spv": "meshlet_cull.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainMeshDirect",
+   "stage": "mesh",
+   "spv": "terrain_mesh_direct.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainFrag",
+   "stage": "fragment",
+   "spv": "terrain_frag.spv"
+  },
+  {
+   "file": "hiz_downsample.slang",
+   "entry": "hizDownsample",
+   "stage": "compute",
+   "spv": "hiz.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainShadowMesh",
+   "stage": "mesh",
+   "spv": "terrain_shadow_mesh.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainShadowFrag",
+   "stage": "fragment",
+   "spv": "terrain_shadow_frag.spv"
+  },
+  {
+   "file": "deferred.slang",
+   "entry": "deferredMain",
+   "stage": "compute",
+   "spv": "deferred.spv"
+  },
+  {
+   "file": "bloom.slang",
+   "entry": "bloomDown",
+   "stage": "compute",
+   "spv": "bloom_down.spv"
+  },
+  {
+   "file": "bloom.slang",
+   "entry": "bloomUp",
+   "stage": "compute",
+   "spv": "bloom_up.spv"
+  },
+  {
+   "file": "final.slang",
+   "entry": "finalMain",
+   "stage": "compute",
+   "spv": "final.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "waterMesh",
+   "stage": "mesh",
+   "spv": "water_mesh.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "waterFrag",
+   "stage": "fragment",
+   "spv": "water_frag.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "lodWaterMesh",
+   "stage": "mesh",
+   "spv": "lod_water_mesh.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "lodWaterFrag",
+   "stage": "fragment",
+   "spv": "lod_water_frag.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "lodWaterDepthFrag",
+   "stage": "fragment",
+   "spv": "lod_water_depth_frag.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "translucentMesh",
+   "stage": "mesh",
+   "spv": "translucent_mesh.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "translucentRecordFrag",
+   "stage": "fragment",
+   "spv": "translucent_record_frag.spv"
+  },
+  {
+   "file": "taa.slang",
+   "entry": "taaResolve",
+   "stage": "compute",
+   "spv": "taa.spv"
+  },
+  {
+   "file": "oit.slang",
+   "entry": "oitResolve",
+   "stage": "compute",
+   "spv": "oit_resolve.spv"
+  },
+  {
+   "file": "oit.slang",
+   "entry": "oitFullscreenMesh",
+   "stage": "mesh",
+   "spv": "oit_fullscreen_mesh.spv"
+  },
+  {
+   "file": "oit.slang",
+   "entry": "oitCompositeFrag",
+   "stage": "fragment",
+   "spv": "oit_composite_frag.spv"
+  },
+  {
+   "file": "deferred.slang",
+   "entry": "deferredMainRt",
+   "stage": "compute",
+   "spv": "deferred_main_rt.spv",
+   "defines": [
+    "VF_RT=1"
+   ]
+  },
+  {
+   "file": "rt_lights.slang",
+   "entry": "lightBin",
+   "stage": "compute",
+   "spv": "rt_light_bin.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodMesh",
+   "stage": "mesh",
+   "spv": "lod_mesh.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodFrag",
+   "stage": "fragment",
+   "spv": "lod_frag.spv"
+  },
+  {
+   "file": "motion.slang",
+   "entry": "motionMain",
+   "stage": "compute",
+   "spv": "motion.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodShadowMesh",
+   "stage": "mesh",
+   "spv": "lod_shadow_mesh.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodShadowFrag",
+   "stage": "fragment",
+   "spv": "lod_shadow_frag.spv"
+  },
+  {
+   "file": "lod_gen.slang",
+   "entry": "lodGenMain",
+   "stage": "compute",
+   "spv": "lod_gen.spv"
+  },
+  {
+   "file": "lod_mesher.slang",
+   "entry": "lodMeshMain",
+   "stage": "compute",
+   "spv": "lod_mesher.spv"
+  },
+  {
+   "file": "entity_shadow.slang",
+   "entry": "entityShadowVert",
+   "stage": "vertex",
+   "spv": "entity_shadow_vert.spv"
+  },
+  {
+   "file": "entity_shade.slang",
+   "entry": "entityShadeFrag",
+   "stage": "fragment",
+   "spv": "entity_shade_frag.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainClassicVert",
+   "stage": "vertex",
+   "spv": "terrain_classic_vert.spv"
+  },
+  {
+   "file": "terrain_mesh.slang",
+   "entry": "terrainShadowClassicVert",
+   "stage": "vertex",
+   "spv": "terrain_shadow_classic_vert.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "waterClassicVert",
+   "stage": "vertex",
+   "spv": "water_classic_vert.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "transClassicVert",
+   "stage": "vertex",
+   "spv": "trans_classic_vert.spv"
+  },
+  {
+   "file": "water.slang",
+   "entry": "lodWaterClassicVert",
+   "stage": "vertex",
+   "spv": "lod_water_classic_vert.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodClassicVert",
+   "stage": "vertex",
+   "spv": "lod_classic_vert.spv"
+  },
+  {
+   "file": "lod_mesh.slang",
+   "entry": "lodShadowClassicVert",
+   "stage": "vertex",
+   "spv": "lod_shadow_classic_vert.spv"
+  },
+  {
+   "file": "oit.slang",
+   "entry": "oitFsTriVert",
+   "stage": "vertex",
+   "spv": "oit_fs_tri_vert.spv"
+  },
+  {
+   "file": "drawcmd.slang",
+   "entry": "buildDrawCommands",
+   "stage": "compute",
+   "spv": "drawcmd.spv"
+  }
+ ]
 }

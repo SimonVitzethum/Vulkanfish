@@ -541,3 +541,88 @@ void translucentRecordFrag(TransVertOut input)
     gOitNodes[idx * 3 + 1] = asuint(input.pos.z);
     gOitNodes[idx * 3 + 2] = prev;
 }
+
+// ---------- Classic-Raster-Fallback (ohne Mesh-Shader) ----------
+// Wie terrainClassicVert (decodeClassicTerrain aus terrain_common.slang), mit den
+// Wasser-/Glas-Varyings. Tiefen-Vorpass nutzt waterClassicVert mit (kein Farbziel).
+[shader("vertex")]
+WaterVertOut waterClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    TerrainVertex tv;
+    float3 wp, n;
+    decodeClassicTerrain(iid, vid, tv, wp, n);
+    WaterVertOut o;
+    o.pos = mul(gFrame.viewProj, float4(wp, 1.0));
+    o.worldPos = wp;
+    o.faceNormal = n;
+    o.tint = tvColor(tv);
+    o.light = tvLight(tv);
+    return o;
+}
+
+[shader("vertex")]
+TransVertOut transClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    TerrainVertex tv;
+    float3 wp, n;
+    decodeClassicTerrain(iid, vid, tv, wp, n);
+    TransVertOut o;
+    o.pos = mul(gFrame.viewProj, float4(wp, 1.0));
+    o.worldPos = wp;
+    o.faceNormal = n;
+    o.uv = tvUv(tv);
+    o.color = tvColor(tv);
+    o.light = tvLight(tv);
+    o.mat = (tv.color >> 24) & 0xF;
+    return o;
+}
+
+// ---------- Classic-Raster-Fallback: LOD-Wasser (ohne Mesh-Shader) ----------
+// Wie lodWaterMesh, aber ein Quad = 6 Vertices (non-indexed Multi-Draw), Abdeckung ->
+// degeneriert (Fragment verwirft zusaetzlich je Pixel). Tiefen-Vorpass nutzt denselben
+// Vertex-Shader (kein Farbziel).
+void lodWaterCorner(uint tri, uint k, out float u, out float v)
+{
+    uint idx = tri == 0 ? (k == 2 ? 2u : k) : (k == 0 ? 0u : (k == 1 ? 2u : 3u));
+    u = (idx == 1 || idx == 2) ? 1.0 : 0.0;
+    v = idx >= 2 ? 1.0 : 0.0;
+}
+
+[shader("vertex")]
+WaterVertOut lodWaterClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    uint qq = vid / 6, tri = (vid % 6) / 3, k = vid % 3;
+    MeshletHeader mh = gMeshlets[gVisibleMeshlets[iid]];
+    FrameUniforms f = gFrame;
+    uint2 q = gLodQuads[mh.vertexStart + qq];
+    float scale = float(1u << mh.indexStart);
+    uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
+    float su = float(((q.x >> 22) & 31) + 1), sv = float(((q.x >> 27) & 31) + 1);
+    float3 p0 = relOrigin(f, mh.originX, mh.originY, mh.originZ) + float3(px, py + 1, pz) * scale - float3(0.0, 1.0 / 9.0, 0.0);
+    float3 du = float3(su * scale, 0.0, 0.0), dv = float3(0.0, 0.0, sv * scale);
+    uint biome = (q.y >> 13) & 0xFFu;
+    uint wc = gLodBiomeCol[biome].w;
+    float sky = float((q.y >> 21) & 0xF) / 15.0;
+    float cu, cv;
+    lodWaterCorner(tri, k, cu, cv);
+    float3 w = p0 + du * cu + dv * cv;
+    bool cull = ((q.y >> 29) & 7u) != 4u;
+    if (!cull && gLodW.maskValid != 0)
+    {
+        float3 mn = p0 - float3(0.0, 0.5, 0.0), mx = p0 + du + dv - float3(0.0, 0.5, 0.0);
+        int2 c0 = worldChunk(f, mn.xz + 0.01), c1 = worldChunk(f, mx.xz - 0.01);
+        int sy = worldSectionY(f, mn.y) - gLodW.minSectionY;
+        bool covered = all(c1 - c0 <= 3) && sy >= 0 && sy < 32;
+        for (int z = c0.y; covered && z <= c1.y; z++)
+            for (int x = c0.x; covered && x <= c1.x; x++)
+                covered = ((lodNearBits(int2(x, z)) >> uint(sy)) & 1u) != 0;
+        cull = covered;
+    }
+    WaterVertOut o;
+    o.pos = cull ? float4(0, 0, 0, 1) : mul(f.viewProj, float4(w, 1.0));
+    o.worldPos = w;
+    o.faceNormal = float3(0.0, 1.0, 0.0);
+    o.tint = float4(float((wc >> 16) & 255u), float((wc >> 8) & 255u), float(wc & 255u), 0.0) / 255.0;
+    o.light = float2(0.0, sky);
+    return o;
+}

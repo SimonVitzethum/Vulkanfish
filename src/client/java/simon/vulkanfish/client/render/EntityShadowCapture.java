@@ -29,8 +29,10 @@ public final class EntityShadowCapture {
     public record Batch(long vkBuffer, long byteOffset, int vertexCount, int stride, int posOffset, boolean quads) {
     }
 
-    private static final String[] CASTERS = {"entity_solid", "entity_cutout", "entity_smooth_cutout", "entity_translucent",
-            "armor_", "item_", "solid_moving_block", "cutout_moving_block", "banner"};
+    private static final String[] CASTERS = {"entity_solid", "entity_cutout", "entity_cutout_no_cull",
+            "entity_smooth_cutout", "entity_translucent", "entity_translucent_cull", "entity_alpha",
+            "armor_", "item_", "solid_moving_block", "cutout_moving_block", "banner",
+            "beacon_beam", "end_portal", "leash", "dragon"};
 
     private static boolean capturing;
     private static final List<StagedVertexBuffer.Draw> DRAWS = new ArrayList<>();
@@ -42,8 +44,10 @@ public final class EntityShadowCapture {
 
     /** Vor Vanillas prepareFrame der Welt (nicht der Hand/GUI). */
     public static void begin() {
-        // Vanillas Option "Entity-Schatten" schaltet auch die echten Schatten
-        capturing = net.minecraft.client.Minecraft.getInstance().options.entityShadows().get();
+        // Immer erfassen solange der GPU-Pfad aktiv ist: Vanillas Option
+        // "Entity-Schatten" wuerde sonst unsere echten Schatten mit abschalten.
+        // (Vanillas Blob-Schatten rendert der Mod ohnehin nicht.)
+        capturing = true;
         DRAWS.clear();
         SEEN.clear();
     }

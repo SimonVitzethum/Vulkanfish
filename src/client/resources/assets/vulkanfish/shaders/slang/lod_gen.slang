@@ -413,6 +413,10 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
             return;
         }
         if ((j.flags & 1u) == 0) return;
+        // Echte Saeule vorhanden? Pass 5 (laeuft zuerst) hat sie komplett geschrieben:
+        // teure Voxel-/Biom-Arbeit sparen. Nachbarspalten in Pass 4 lesen dann echte
+        // statt generierte Werte (stetigere Haenge an Daten-Grenzen).
+        if ((j.flags & 2u) != 0 && gRunHead[j.runBase + col].y != 0xFFFFFFFFu) return;
         // Voxel von oben: belegt, sobald eine Ecke fest ist (Stufe 0: der Block selbst)
         int top = -1, water = -1;
         for (int vy = int(hv) - 1; vy >= 0; vy--)
@@ -480,6 +484,9 @@ void lodGenMain(in uint3 tid : SV_DispatchThreadID)
         uint gx = col % GRID_W, gz = col / GRID_W;
         GenJob j = gJobs[job];
         if ((j.flags & 1u) == 0) return;
+        // Echte Saeule: Pass 5 hat sie geschrieben, Deko bleibt den echten Daten
+        // (keine generierten Baeume auf vermessenem Grund).
+        if ((j.flags & 2u) != 0 && gRunHead[j.runBase + col].y != 0xFFFFFFFFu) return;
         int4 me = gColumn[job * GRID_W * GRID_W + col];
         int s = stepOf(j.level);
         uint hv = gP.height >> uint(j.level);

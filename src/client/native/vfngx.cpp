@@ -18,7 +18,17 @@
 #include <cstring>
 #include <functional>
 #include <mutex>
+#ifdef _WIN32
+// Windows: kein pthread (MSVC) – Worker-Thread ueber _beginthreadex mit 64 MB Stack,
+// wchar_t ist 2 Byte (UTF-16) statt 4.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <process.h>
+#else
 #include <pthread.h>
+#endif
 #include <vector>
 
 namespace {
@@ -29,7 +39,11 @@ std::mutex gMx;
 std::condition_variable gCv;
 std::function<void()> gJob;
 bool gJobDone = true, gWorker = false, gStop = false;
+#ifdef _WIN32
+static HANDLE gWorkerHandle = nullptr;
+#else
 pthread_t gWorkerThread;
+#endif
 
 void* workerMain(void*) {
     for (;;) {
@@ -50,9 +64,25 @@ void* workerMain(void*) {
     return nullptr;
 }
 
+#ifdef _WIN32
+static unsigned __stdcall workerEntry(void*) {
+    workerMain(nullptr);
+    return 0;
+}
+#endif
+
 void onBigStack(const std::function<void()>& f) {
     std::unique_lock<std::mutex> l(gMx);
     if (!gWorker) {
+#ifdef _WIN32
+        unsigned tid = 0;
+        gWorkerHandle = (HANDLE)_beginthreadex(nullptr, 64u << 20, workerEntry, nullptr, 0, &tid);
+        if (!gWorkerHandle) {
+            l.unlock();
+            f(); // Notfall: im Aufrufer-Thread
+            return;
+        }
+#else
         pthread_attr_t a;
         pthread_attr_init(&a);
         pthread_attr_setstacksize(&a, 64u << 20);
@@ -61,6 +91,7 @@ void onBigStack(const std::function<void()>& f) {
             f(); // Notfall: im Aufrufer-Thread
             return;
         }
+#endif
         gWorker = true;
     }
     gJob = f;
@@ -92,12 +123,21 @@ void NVSDK_CONV ngxLog(const char* msg, NVSDK_NGX_Logging_Level, NVSDK_NGX_Featu
     std::fprintf(stderr, "[vulkanfish-ngx] %s", msg);
 }
 
+#ifdef _WIN32
+std::vector<uint16_t> wpath(const char* s) { // wchar_t ist unter Windows 2 Byte (UTF-16)
+    std::vector<uint16_t> w;
+    for (; *s; ++s) w.push_back((uint16_t)(unsigned char)*s);
+    w.push_back(0);
+    return w;
+}
+#else
 std::vector<uint32_t> wpath(const char* s) { // wchar_t ist unter Linux 4 Byte
     std::vector<uint32_t> w;
     for (; *s; ++s) w.push_back((uint32_t)(unsigned char)*s);
     w.push_back(0);
     return w;
 }
+#endif
 
 NVSDK_NGX_Resource_VK wrap(uint64_t image, uint64_t view, int format, uint32_t w, uint32_t h, bool depth, bool rw) {
     VkImageSubresourceRange r{};
@@ -119,7 +159,7 @@ extern "C" {
 static int initImpl(uint64_t instance, uint64_t physicalDevice, uint64_t device, uint64_t gipa, uint64_t gdpa,
                const char* dataPath, int verboseLog, int* multiFrameMax) {
     if (gInit) return -1;
-    std::vector<uint32_t> wp = wpath(dataPath);
+    auto wp = wpath(dataPath);
     const wchar_t* pathW = reinterpret_cast<const wchar_t*>(wp.data());
     const wchar_t* paths[1] = {pathW};
     NVSDK_NGX_FeatureCommonInfo fci;
@@ -502,7 +542,15 @@ void vfngx_shutdown() {
         gWorker = false;
     }
     gCv.notify_all();
-    if (had) pthread_join(gWorkerThread, nullptr);
+    if (had) {
+#ifdef _WIN32
+        WaitForSingleObject(gWorkerHandle, INFINITE);
+        CloseHandle(gWorkerHandle);
+        gWorkerHandle = nullptr;
+#else
+        pthread_join(gWorkerThread, nullptr);
+#endif
+    }
     gStop = false;
 }
 

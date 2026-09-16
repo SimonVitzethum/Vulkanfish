@@ -166,7 +166,13 @@ void lodMesh(
     for (uint c = 0; c < 4; c++)
     {
         uint vi = lt * 4 + c;
-        verts[vi].pos = mul(f.viewProj, float4(corners[c], 1.0));
+        float4 clip = mul(f.viewProj, float4(corners[c], 1.0));
+        // LOD immer einen Hauch hinter das Nahfeld: wo beide zeichnen (Maske
+        // veraltet, Chunk-Grenze), gewinnt das Nahfeld per Tiefentest statt
+        // Z-Fighting/Flackern. 1.5e-4 NDC ist subpixel, aber > 24-bit-Tiefenrauschen.
+        // Reverse-Z: groesser = naeher, also z verkleinern = weiter weg.
+        clip.z -= 1.5e-4 * clip.w;
+        verts[vi].pos = clip;
         verts[vi].inner = corners[c] + back;
         // UV wie Vanillas Blockflaechen: Seiten mit der Texturoberkante oben, Osten/Norden gespiegelt
         float3 w = corners[c];
@@ -343,5 +349,109 @@ LodGBufferOut lodFrag(LodFragIn input)
     LodGBufferOut o;
     o.albedoMat = float4(saturate(color), float(input.mat) / 255.0);
     o.normalLight = float4(octEncode(input.normal), input.light.x, input.light.y);
+    return o;
+}
+
+// ---------- Classic-Raster-Fallback (ohne Mesh-Shader) ----------
+// Quad q (0..31) des sichtbaren Meshlets laden (Ebene, Rechteck). Draws: non-indexed
+// Multi-DrawIndirectCount (ein Draw je Meshlet, firstInstance = Listenplatz), 6 Vertices
+// je Quad ((0,1,2),(0,2,3)). Abdeckung -> degeneriertes Dreieck (Fragment verwirft
+// zusaetzlich je Pixel wie im Mesh-Pfad) statt Primitive-Cull.
+void lodQuad(uint iid, uint qq, out uint2 q, out uint level, out float scale, out float3 origin,
+             out float3 p0, out float3 du, out float3 dv, out uint face, out float3 n)
+{
+    MeshletHeader mh = gMeshlets[gVisibleMeshlets[iid]];
+    q = gQuads[mh.vertexStart + qq];
+    level = mh.indexStart;
+    scale = float(1u << level);
+    origin = relOrigin(gFrame, mh.originX, mh.originY, mh.originZ);
+    uint px = q.x & 31, pz = (q.x >> 5) & 31, py = (q.x >> 10) & 511;
+    face = (q.x >> 19) & 7;
+    float su = float(((q.x >> 22) & 31) + 1), sv = float(((q.x >> 27) & 31) + 1);
+    uint axis = face >> 1;
+    bool positive = (face & 1) == 0;
+    float3 base = float3(px, py, pz);
+    if (axis == 0) { if (positive) base.x += 1.0; du = float3(0, 0, su); dv = float3(0, sv, 0); }
+    else if (axis == 1) { if (positive) base.y += 1.0; du = float3(su, 0, 0); dv = float3(0, 0, sv); }
+    else { if (positive) base.z += 1.0; du = float3(su, 0, 0); dv = float3(0, sv, 0); }
+    p0 = origin + base * scale;
+    du *= scale;
+    dv *= scale;
+    n = FACE_N[face];
+}
+
+// Ecke (tri, k) -> (u, v) im Quad ((0,1,2),(0,2,3))
+void lodQuadCorner(uint tri, uint k, out float u, out float v)
+{
+    uint idx = tri == 0 ? (k == 2 ? 2u : k) : (k == 0 ? 0u : (k == 1 ? 2u : 3u));
+    u = (idx == 1 || idx == 2) ? 1.0 : 0.0;
+    v = idx >= 2 ? 1.0 : 0.0;
+}
+
+[shader("vertex")]
+LodVertOut lodClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    uint qq = vid / 6, tri = (vid % 6) / 3, k = vid % 3;
+    uint2 q;
+    uint level;
+    float scale;
+    float3 origin, p0, du, dv, n;
+    uint face;
+    lodQuad(iid, qq, q, level, scale, origin, p0, du, dv, face, n);
+    float cu, cv;
+    lodQuadCorner(tri, k, cu, cv);
+    float3 w = p0 + du * cu + dv * cv;
+    uint texId = q.y & 0x1FFFu, biome = (q.y >> 13) & 0xFFu;
+    uint fsel = face == 2 ? 0u : face == 3 ? 2u : 1u;
+    uint4 look = gLook[texId * 3 + fsel];
+    uint rgb = lookColor(look, biome);
+    float sky = float((q.y >> 21) & 0xF) / 15.0;
+    uint emission = (q.y >> 25) & 0xF;
+    uint kind = (q.y >> 29) & 0x7;
+    float3 qa = p0 - n * scale, qb = p0 + du + dv;
+    float3 qmn = min(qa, qb) + 0.01, qmx = max(qa, qb) - 0.01;
+    bool cull = nearCoveredBox(qmn, qmx);
+    float3 back = -n * min(0.5, scale * 0.5);
+    LodVertOut o;
+    float4 clip = mul(gFrame.viewProj, float4(w, 1.0));
+    clip.z -= 1.5e-4 * clip.w; // LOD hinter Nahfeld (wie Mesh-Pfad)
+    o.pos = cull ? float4(0, 0, 0, 1) : clip;
+    o.inner = w + back;
+    o.uvw = face == 0 ? float2(-w.z, -w.y) : face == 1 ? float2(w.z, -w.y)
+              : face == 2 ? float2(w.x, w.z) : face == 3 ? float2(w.x, -w.z)
+              : face == 4 ? float2(w.x, -w.y) : float2(-w.x, -w.y);
+    o.rect = float4(float(look.x & 0xFFFFu), float(look.x >> 16), float(look.y & 0xFFFFu), float(look.y >> 16)) / 65535.0;
+    o.spriteLuma = float(look.w >> 24) / 255.0;
+    o.color = float3(float((rgb >> 16) & 255u), float((rgb >> 8) & 255u), float(rgb & 255u)) / 255.0;
+    o.normal = n;
+    o.light = float2(float(emission) / 15.0, sky);
+    uint mat = kind == LOD_KIND_LEAVES ? MAT_LEAVES : kind == LOD_KIND_LAVA ? MAT_LAVA : kind == LOD_KIND_WATER ? MAT_WATER : MAT_DEFAULT;
+    o.mat = mat | (emission << 4);
+    return o;
+}
+
+// Schatten ohne Unterteilung (Fallback-Vereinfachung): ganze Quads, Slope-Bias der
+// Pipeline faengt den Kruemmungsfehler auf. Nur LOD-Luecken des Nahfelds.
+[shader("vertex")]
+LodShadowVertOut lodShadowClassicVert(uint vid : SV_VertexID, uint iid : SV_InstanceID)
+{
+    uint qq = vid / 6, tri = (vid % 6) / 3, k = vid % 3;
+    uint2 q;
+    uint level;
+    float scale;
+    float3 origin, p0, du, dv, n;
+    uint face;
+    lodQuad(iid, qq, q, level, scale, origin, p0, du, dv, face, n);
+    float cu, cv;
+    lodQuadCorner(tri, k, cu, cv);
+    float3 w = p0 + du * cu + dv * cv;
+    uint kind = (q.y >> 29) & 0x7;
+    float3 qa = p0 - n * scale, qb = p0 + du + dv;
+    bool cull = kind == LOD_KIND_WATER || nearCoveredBox(min(qa, qb) + 0.01, max(qa, qb) - 0.01);
+    float4 clip = mul(gFrame.viewProj, float4(w, 1.0));
+    clip.xy = distortShadow(clip.xy);
+    LodShadowVertOut o;
+    o.pos = cull ? float4(0, 0, 0, 1) : clip;
+    o.inner = w - n * min(0.5, scale * 0.5);
     return o;
 }

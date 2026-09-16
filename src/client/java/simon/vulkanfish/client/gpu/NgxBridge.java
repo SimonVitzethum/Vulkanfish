@@ -15,8 +15,9 @@ import org.slf4j.LoggerFactory;
 
 /**
  * NVIDIA NGX (DLSS 4) ueber den nativen Shim src/client/native/vfngx.cpp, per FFM aufgerufen.
- * Verzeichnis mit libvfngx.so und den DLSS-Snippets (beschreibbar, NGX legt dort Caches an):
+ * Verzeichnis mit Shim + DLSS-Snippets (beschreibbar, NGX legt dort Caches an):
  * -Dvulkanfish.ngxDir (runClient setzt es auf build/native). Fehlt es, bleibt DLSS aus.
+ * Shim-Name je OS (libvfngx.so / vfngx.dll).
  */
 public final class NgxBridge {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
@@ -26,6 +27,14 @@ public final class NgxBridge {
     public static final int FEATURE_DLSS = 1, FEATURE_FRAMEGEN = 2, FEATURE_RAY_RECONSTRUCTION = 4;
 
     private static final Path DIR = System.getProperty("vulkanfish.ngxDir") != null ? Path.of(System.getProperty("vulkanfish.ngxDir")) : null;
+    private static final boolean IS_WINDOWS =
+            System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("windows");
+    private static final String SHIM_NAME = IS_WINDOWS ? "vfngx.dll" : "libvfngx.so";
+
+    /** Shim-Dateiname je OS (libvfngx.so / vfngx.dll). */
+    public static String shimName() {
+        return SHIM_NAME;
+    }
 
     private final MethodHandle init, error, dlaa, rr, fg, shutdown, option;
     private final Arena params = Arena.ofShared();
@@ -58,7 +67,7 @@ public final class NgxBridge {
 
     /** Liegt der Shim bereit (vor der Geraeteerstellung: sollen die NGX-Extensions dazu)? */
     public static boolean present() {
-        return DIR != null && Files.isRegularFile(DIR.resolve("libvfngx.so")) && !"false".equals(System.getProperty("vulkanfish.dlss"));
+        return DIR != null && Files.isRegularFile(DIR.resolve(SHIM_NAME)) && !"false".equals(System.getProperty("vulkanfish.dlss"));
     }
 
     /** Aus dem VulkanBackend-Mixin: NGX-Extensions vor vkCreateDevice ergaenzen (nur wenn vorhanden). */
@@ -100,7 +109,7 @@ public final class NgxBridge {
     public static NgxBridge create(BlazeDeviceInterop blaze) {
         if (!present()) return null;
         try {
-            SymbolLookup lib = SymbolLookup.libraryLookup(DIR.resolve("libvfngx.so"), Arena.global());
+            SymbolLookup lib = SymbolLookup.libraryLookup(DIR.resolve(SHIM_NAME), Arena.global());
             NgxBridge b = new NgxBridge(lib);
             long gipa = org.lwjgl.vulkan.VK.getFunctionProvider().getFunctionAddress("vkGetInstanceProcAddr");
             long gdpa = org.lwjgl.vulkan.VK10.vkGetInstanceProcAddr(blaze.vkInstance(), "vkGetDeviceProcAddr");
