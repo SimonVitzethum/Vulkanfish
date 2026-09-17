@@ -19,14 +19,13 @@ struct EntityMotion
 struct MotionUniforms
 {
     float4x4 invViewProj;       // aktueller Frame (mit Jitter): Tiefe -> relativer Raum
-    float4x4 prevViewProjJittered; // Vorframe MIT Jitter (nur TAA-Reprojektion; MVs nutzen unten)
+    float4x4 prevViewProj;      // Vorframe ohne Jitter, im relativen Raum dieses Frames
     float2 screenSize;
     uint historyValid;
     float pad;
     float4x4 viewProjUnjittered; // aktueller Frame ohne Jitter
     uint entityCount;
     uint pad1, pad2, pad3;
-    float4x4 prevViewProj;      // Vorframe OHNE Jitter, im relativen Raum dieses Frames (MV-Basis)
 };
 [[vk::binding(2, 0)]] ConstantBuffer<MotionUniforms> gU;
 

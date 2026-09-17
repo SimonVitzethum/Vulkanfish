@@ -262,12 +262,6 @@
    "entry": "buildDrawCommands",
    "stage": "compute",
    "spv": "drawcmd.spv"
-  },
-  {
-   "file": "flicker.slang",
-   "entry": "flickerOverlay",
-   "stage": "compute",
-   "spv": "flicker.spv"
   }
  ]
 }

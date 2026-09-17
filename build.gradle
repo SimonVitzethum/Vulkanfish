@@ -60,10 +60,6 @@ tasks.named("runClient") {
 	if (project.hasProperty("vfSnapshots")) {
 		jvmArgs("-Dvulkanfish.snapshots=true")
 	}
-	// Flacker-Diagnose: Overlay + Zaehler (braucht -PvfFlickerDebug beim Bauen, sonst nicht enthalten)
-	if (project.hasProperty("vfFlickerDebug")) {
-		jvmArgs("-Dvulkanfish.flickerDebug=true")
-	}
 	// Beliebige -D-Properties an die Spiel-JVM: -PvfJvm="-Dvulkanfish.debugView=1 ..."
 	if (project.hasProperty("vfJvm")) {
 		jvmArgs(project.property("vfJvm").toString().split(" "))
@@ -88,22 +84,6 @@ processResources {
 	// Vorkompilierte Slang-SPIR-V ins Jar packen
 	from("build/slang") {
 		into "assets/vulkanfish/shaders/spv"
-	}
-}
-
-// Gefiltertes Shader-Manifest (Client-Resources, Loom trennt main/client):
-// ohne Diagnose-Flag faellt flickerOverlay raus, mit laeuft alles durch.
-tasks.named("processClientResources") {
-	// Gefiltertes Manifest statt der Quelle (s. filterShadersJson unten)
-	exclude("assets/vulkanfish/shaders/slang/shaders.json")
-	dependsOn("filterShadersJson")
-	from("$buildDir/filtered-shaders.json") {
-		into "assets/vulkanfish/shaders/slang"
-		rename("filtered-shaders.json", "shaders.json")
-	}
-	// Diagnose-Quelle nur im Diagnose-Build mitpacken (Release enthaelt keinerlei Flicker-Code)
-	if (!project.hasProperty("vfFlickerDebug")) {
-		exclude("assets/vulkanfish/shaders/slang/flicker.slang")
 	}
 }
 
@@ -152,11 +132,6 @@ tasks.register("compileSlang") {
 		slangOut.mkdirs()
 		def manifest = new groovy.json.JsonSlurper().parseText(file("$slangSrc/shaders.json").text)
 		manifest.modules.each { m ->
-			// Flacker-Diagnose nur im Diagnose-Build (sonst kein SPIR-V, kein Manifest-Eintrag, kein Code)
-			if (m.entry.toString() == "flickerOverlay" && !project.hasProperty("vfFlickerDebug")) {
-				logger.lifecycle("slangc ${m.file} uebersprungen (nur mit -PvfFlickerDebug)")
-				return
-			}
 			def out = file("$slangOut/${m.spv}")
 			logger.lifecycle("slangc ${m.file} [${m.stage}:${m.entry}] -> ${m.spv}")
 			def cmd = [slangcBin.toString(), slangSrc.toString() + "/" + m.file.toString(),
@@ -177,20 +152,6 @@ tasks.register("compileSlang") {
 }
 
 processResources.dependsOn("compileSlang")
-
-// Gefiltertes Shader-Manifest fuers Jar: ohne Diagnose-Flag faellt der
-// flickerOverlay-Eintrag raus (Loader + SPIR-V bleiben konsistent).
-tasks.register("filterShadersJson") {
-	inputs.file("$slangSrc/shaders.json")
-	outputs.file("$buildDir/filtered-shaders.json")
-	doLast {
-		def manifest = new groovy.json.JsonSlurper().parseText(file("$slangSrc/shaders.json").text)
-		if (!project.hasProperty("vfFlickerDebug")) {
-			manifest.modules.removeAll { it.entry == "flickerOverlay" }
-		}
-		file("$buildDir/filtered-shaders.json").text = new groovy.json.JsonBuilder(manifest).toPrettyString()
-	}
-}
 
 // ---- DLSS 4 (NVIDIA NGX) ----
 // Baut den nativen Shim src/client/native/vfngx.cpp gegen das DLSS-SDK (Header + NGX-Lib)
