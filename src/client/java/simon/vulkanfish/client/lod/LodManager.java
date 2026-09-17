@@ -951,7 +951,10 @@ public final class LodManager {
         ChunkPos pos = new ChunkPos(cx, cz);
         java.util.concurrent.CompletableFuture<Optional<CompoundTag>> bobbyTag;
         try {
-            bobbyTag = bobby.load(level, pos);
+            bobbyTag = bobby.load(level, pos)
+                // Haengende Futures (Bobby-/Disk-Hickup) duerfen keinen Chunk ewig blockieren:
+                // Timeout feuert exceptionally -> whenComplete laeuft -> Abbau wie gewohnt.
+                .orTimeout(30, java.util.concurrent.TimeUnit.SECONDS);
         } catch (Throwable t) {
             pendingStored.decrementAndGet(); // synchron fehlgeschlagen: nichts ausstehend
             noData(e, cx, cz, dist);
@@ -977,7 +980,8 @@ public final class LodManager {
             return;
         }
         try {
-            sl.getChunkSource().chunkMap.read(new ChunkPos(cx, cz)).whenComplete((tag, err) -> {
+            sl.getChunkSource().chunkMap.read(new ChunkPos(cx, cz)).orTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
+                    .whenComplete((tag, err) -> {
                 if (err != null || tag == null || tag.isEmpty()) {
                     pendingStored.decrementAndGet(); // nichts gespeichert: Anfrage beendet
                     noData(e, cx, cz, dist);

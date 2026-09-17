@@ -2771,7 +2771,8 @@ public final class NativePassRunner {
             copyDepth(arena, cmd, mainDepth.vkImage(), sceneDepth.image());
             long entityShadePipe = classicRaster ? pipeEntityShadeC : pipeEntityShade;
             long entityShadeLayout = classicRaster ? layoutEntityShadeClassic : layoutEntityShade;
-            if (shadowsOn && entityShadePipe != 0L) {
+            // Ohne Entities kein Schattenwurf/-empfang: Fullscreen-Multiply komplett sparen (Normalfall!)
+            if (shadowsOn && entityShadePipe != 0L && !simon.vulkanfish.client.render.EntityShadowCapture.frame().isEmpty()) {
                 // Sonnenschatten auf Vanillas Entities/Block-Entities/Partikel (vor der Szenen-Kopie).
                 // Praezise statt fullBarrier: TRANSFER-Kopie -> Fragment-Lesen + Attachment-LOAD.
                 barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT,
