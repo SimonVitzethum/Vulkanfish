@@ -1,10 +1,16 @@
 package simon.vulkanfish.client.lod;
 
 import java.lang.reflect.Method;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.HashSet;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import net.fabricmc.loader.api.FabricLoader;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.Minecraft;
@@ -28,6 +34,12 @@ import simon.vulkanfish.client.gpu.WorkerPool;
  *
  * <p>Ohne Bobby (entfernt oder aus): der Cache bleibt nutzbar – direkt aus
  * {@code .bobby/<Server>/<Seed-Hash>/<Dimension>/r.X.Z.mca} (Vanilla-Regionformat, nur lesend).
+ *
+ * <p>Kein Lookup pro Chunk: Beim Weltbeitritt (und danach alle 60 s im Hintergrund) wird die
+ * Abdeckung einmalig aus allen Regionskoepfen gelesen (nur 8 KiB pro .mca-Datei, keine Chunkdaten).
+ * Danach entscheidet ein O(1)-Set, ob ein Chunk ueberhaupt einen Bobby-Zugriff (API-Future oder
+ * Plattenlesung) verursacht – Fehlstellen kosten weder Future noch I/O. Vor dem ersten Scan gilt
+ * das alte Verhalten (durchlassen), damit nichts klemmt.
  */
 final class BobbySource {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
@@ -40,6 +52,21 @@ final class BobbySource {
     private Path diskDir;
     private RegionFileStorage disk;
     private int diskHits;
+    // Einmalig geladene Abdeckung: Chunk-Schluessel aller gecachten Chunks (alle Seed-Ordner).
+    // Unveränderlich nach Veroeffentlichung – atomarer Tausch, nebenlaeufige Reads sind sicher.
+    private volatile Set<Long> bobbyChunks = Set.of();
+    private volatile boolean scanPending;
+    private volatile long lastScanMs;
+    private volatile int scanGen;
+    private final AtomicBoolean scanning = new AtomicBoolean();
+
+    private static long key(ChunkPos p) {
+        return ((long) p.x() << 32) | (p.z() & 0xFFFFFFFFL);
+    }
+
+    private static long key(int x, int z) {
+        return ((long) x << 32) | (z & 0xFFFFFFFFL);
+    }
 
     BobbySource() {
         if (!FabricLoader.getInstance().isModLoaded("bobby")) return;
@@ -61,6 +88,13 @@ final class BobbySource {
     @SuppressWarnings("unchecked")
     CompletableFuture<Optional<CompoundTag>> load(ClientLevel level, ChunkPos pos) {
         if (level == null) return EMPTY;
+        // Plattenauflösung auch bei aktiver Bobby-API: Scan und Gate gelten für beide Pfade
+        if (level != diskLevel) openDisk(level);
+        else maybeRescan(level);
+        // Gate: gecachter Chunk? Nur dann Bobby anfassen (API-Future oder Platte).
+        // Ausnahmen: Scan läuft noch (altes Verhalten), oder keine Cache-Ordner bekannt –
+        // dann hält Bobby ggf. reine Live-Daten (API-Pfad wie bisher pro Chunk).
+        if (!scanPending && !disks.isEmpty() && !bobbyChunks.contains(key(pos))) return EMPTY;
         if (api) {
             try {
                 Object manager = getManager.invoke(level.getChunkSource());
@@ -88,6 +122,82 @@ final class BobbySource {
     private static Optional<CompoundTag> asTag(Object o) {
         if (o instanceof Optional<?> opt && opt.isPresent() && opt.get() instanceof CompoundTag tag) return Optional.of(tag);
         return Optional.empty();
+    }
+
+    // ---------- Abdeckung: einmal alle laden, dann O(1) pro Chunk ----------
+
+    /** Alle 60 s: neue Cache-Ordner entdecken bzw. Abdeckung auffrischen (Hintergrund). */
+    private void maybeRescan(ClientLevel level) {
+        if (scanPending) return;
+        long now = System.currentTimeMillis();
+        if (now - lastScanMs < 60_000) return;
+        lastScanMs = now;
+        if (disks.isEmpty()) {
+            openDisk(level); // Cache-Ordner koennten seither erschienen sein (billig: nur Stats)
+            return;
+        }
+        if (scanning.compareAndSet(false, true)) {
+            java.util.List<Path> dirs = java.util.List.copyOf(disks.stream().map(DiskEntry::dir).toList());
+            int gen = scanGen;
+            WorkerPool.submit(WorkerPool.PRIO_LOD, () -> scanDirs(dirs, gen));
+        }
+    }
+
+    /** Liest nur Regionskoepfe (8 KiB/Datei): Offset-Tabelle sagt, welche Chunks existieren. */
+    private void scanDirs(java.util.List<Path> dirs, int gen) {
+        try {
+            Set<Long> found = new HashSet<>();
+            int regions = 0;
+            ByteBuffer buf = ByteBuffer.allocate(8192);
+            for (Path dir : dirs) {
+                java.util.List<Path> files;
+                try (var stream = Files.list(dir)) {
+                    files = stream.filter(p -> {
+                        String n = p.getFileName().toString();
+                        return n.startsWith("r.") && n.endsWith(".mca");
+                    }).toList();
+                } catch (Throwable t) {
+                    continue;
+                }
+                for (Path f : files) {
+                    int[] rc = regionCoords(f.getFileName().toString());
+                    if (rc == null) continue;
+                    try (FileChannel ch = FileChannel.open(f, StandardOpenOption.READ)) {
+                        buf.clear();
+                        while (buf.hasRemaining()) {
+                            if (ch.read(buf) <= 0) break;
+                        }
+                        if (buf.position() < 4096) continue;
+                        buf.flip();
+                        int bx = rc[0] * 32, bz = rc[1] * 32;
+                        for (int i = 0; i < 1024; i++) {
+                            if (buf.getInt() != 0) found.add(key(bx + (i & 31), bz + (i >> 5)));
+                        }
+                        regions++;
+                    } catch (Throwable ignored) {
+                    }
+                }
+            }
+            if (gen == scanGen) {
+                bobbyChunks = found; // atomarer Tausch: keine Uebergangs-Luecken
+                scanPending = false;
+                LOG.info("[vulkanfish] LOD: Bobby-Abdeckung geladen: {} Chunks in {} Regionen", found.size(), regions);
+            }
+        } finally {
+            scanning.set(false);
+        }
+    }
+
+    /** "r.&lt;x&gt;.&lt;z&gt;.mca" -> {x, z}, sonst null. */
+    private static int[] regionCoords(String name) {
+        if (!name.startsWith("r.") || !name.endsWith(".mca")) return null;
+        String[] p = name.split("\\.");
+        if (p.length != 4) return null;
+        try {
+            return new int[]{Integer.parseInt(p[1]), Integer.parseInt(p[2])};
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     // ---------- ohne Bobby: Cache-Dateien direkt ----------
@@ -183,6 +293,17 @@ final class BobbySource {
                 diskDir = disks.get(0).dir();
                 disk = disks.get(0).storage();
                 LOG.info("[vulkanfish] LOD: Bobby-Cache ohne Bobby gefunden, lese direkt aus {} Ordner(n): {}", disks.size(), diskDir);
+                // Abdeckung einmalig im Hintergrund laden (Header-Scan, keine Chunkdaten)
+                bobbyChunks = Set.of();
+                scanGen++;
+                scanPending = true;
+                scanning.set(true);
+                lastScanMs = System.currentTimeMillis();
+                java.util.List<Path> dirs = java.util.List.copyOf(disks.stream().map(DiskEntry::dir).toList());
+                int gen = scanGen;
+                WorkerPool.submit(WorkerPool.PRIO_LOD, () -> scanDirs(dirs, gen));
+            } else {
+                scanPending = false;
             }
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] LOD: Bobby-Cache nicht lesbar ({})", t.toString());
@@ -202,6 +323,9 @@ final class BobbySource {
     }
 
     private void closeDisk() {
+        scanGen++; // laufende Scans verwerfen
+        bobbyChunks = Set.of();
+        scanPending = false;
         for (DiskEntry e : disks) {
             try {
                 synchronized (e.storage()) {
