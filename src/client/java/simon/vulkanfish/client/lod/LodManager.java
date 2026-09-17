@@ -736,6 +736,11 @@ public final class LodManager {
                     } catch (Throwable t) {
                         LOG.warn("[vulkanfish] LOD-Auftrag {} fehlgeschlagen", node.key, t);
                         buildsInFlight.decrementAndGet();
+                        // Sonst bleibt building=true fuer immer und die Region ein permanentes
+                        // Loch (der CPU-Pfad meldet Fehlschlag ueber built zurueck; hier nachholen)
+                        node.building = false;
+                        node.dirty = true;
+                        enqueue(node);
                     }
                 });
                 continue;
