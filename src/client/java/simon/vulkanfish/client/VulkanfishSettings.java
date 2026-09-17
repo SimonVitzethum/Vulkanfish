@@ -132,7 +132,7 @@ public final class VulkanfishSettings {
     }
 
     public static int lodChunks() {
-        return lodChunks == null ? 256 : lodChunks;
+        return lodChunks == null ? 64 : lodChunks;
     }
 
     public static void setLodChunks(int chunks) {

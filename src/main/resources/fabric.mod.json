@@ -3,13 +3,14 @@
 	"id": "vulkanfish",
 	"version": "${version}",
 	"name": "vulkanfish",
-	"description": "This is an example description! Tell everyone what your mod is about!",
+	"description": "GPU-driven Vulkan terrain renderer: mesh-shaded near field, LOD far field (default 64 chunks, 256+ effortless on good hardware), DLSS 4 on NVIDIA.",
 	"authors": [
-		"Me!"
+		"SimonVitzethum"
 	],
 	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
+		"homepage": "https://github.com/SimonVitzethum/Vulkanfish",
+		"sources": "https://github.com/SimonVitzethum/Vulkanfish",
+		"issues": "https://github.com/SimonVitzethum/Vulkanfish/issues"
 	},
 	"license": "GPL-3.0-or-later",
 	"icon": "assets/vulkanfish/icon.png",
