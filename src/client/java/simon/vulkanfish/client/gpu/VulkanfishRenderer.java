@@ -350,6 +350,14 @@ public final class VulkanfishRenderer {
 
     // Render-Position je Entity im Vorframe (fuer die Bewegungsvektoren)
     private final it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<double[]> prevEntityPos = new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>();
+    private static final float[] NO_MOTION = new float[0];
+
+    /** true wenn diesen Frame Bewegungsvektoren gebraucht werden (DLSS aktiv oder FG vorhanden). */
+    private boolean motionNeeded() {
+        if (nativeRunner == null) return false;
+        if (nativeRunner.canUpscale()) return true; // DLAA laeuft (Motion-Pass aktiv)
+        return FgPresenter.instance() != null; // FG vorhanden (faellt sonst auf Standard zurueck)
+    }
     private float[] entityMotion = new float[12 * 64];
     private long entityFrame;
 
@@ -416,7 +424,13 @@ public final class VulkanfishRenderer {
         taaWasOn = taaOn;
         if (initialized && nativeRunner != null && nativeRunner.isReady() && taaOn) {
             long t0 = System.nanoTime();
-            if (!"false".equals(System.getProperty("vulkanfish.entityMV"))) gatherMovingEntities();
+            // Bewegungsvektoren braucht nur DLSS/FG (Motion-Pass); sonst die Entity-Iteration
+            // pro Frame sparen (bei vielen Entities messbar, TAA ignoriert sie).
+            if (!"false".equals(System.getProperty("vulkanfish.entityMV")) && motionNeeded()) {
+                gatherMovingEntities();
+            } else {
+                nativeRunner.setEntityMotion(NO_MOTION, 0);
+            }
             // DLSS Super Resolution: aus dem kleinen Ziel ins echte (danach gilt wieder das grosse)
             nativeRunner.renderTaa(Minecraft.getInstance().gameRenderer.mainRenderTarget(), RenderScale.active() ? RenderScale.full() : null);
             RenderScale.endLevel();
