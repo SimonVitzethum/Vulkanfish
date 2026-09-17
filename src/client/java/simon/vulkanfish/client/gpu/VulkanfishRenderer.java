@@ -83,6 +83,20 @@ public final class VulkanfishRenderer {
     private long cpuNanosStart, cpuNanosTerrain, cpuNanosWater, cpuNanosTaa;
     private long cpuNanosSubmit, cpuNanosLevel; // Vanilla-Submission (prepareFrame) bzw. Level-render gesamt
     private long frameT0, drawWin, batchWin;
+    // Automatische Aufloesung bei GPU-Limit (Fix 4): RenderScale-Faktor, CPU-EMA, Countdown
+    private float autoResFactor = 1.0f;
+    private double cpuFrameMsEma;
+    private int autoResCountdown;
+    private static final boolean AUTO_RES = !"false".equals(System.getProperty("vulkanfish.autoRes", "true"));
+    private static final double AUTO_RES_BUDGET = autoResBudget();
+
+    private static double autoResBudget() {
+        try {
+            return Math.max(8.0, Double.parseDouble(System.getProperty("vulkanfish.autoResBudget", "15.0")));
+        } catch (Throwable t) {
+            return 15.0;
+        }
+    }
     private int cpuFrames;
     private long cpuLogMs;
 
@@ -451,7 +465,8 @@ public final class VulkanfishRenderer {
         if (forced != null) mode = Integer.parseInt(forced.trim());
         boolean upscale = initialized && nativeRunner != null && taaOn && nativeRunner.canUpscale()
                 && mode > 0 && mode < RenderScale.MODE_SCALE.length;
-        RenderScale.setWanted(upscale ? RenderScale.MODE_SCALE[mode] : 1.0f);
+        if (!upscale) autoResTick((System.nanoTime() - frameT0) / 1e6);
+        RenderScale.setWanted(upscale ? RenderScale.MODE_SCALE[mode] : autoResFactor);
         if (initialized) logCpu();
         FrameDataCapture.taaJitter = initialized && nativeRunner != null && nativeRunner.isReady() && simon.vulkanfish.client.VulkanfishSettings.taa();
         if (pendingScreenshot < 0) return;
@@ -520,6 +535,37 @@ public final class VulkanfishRenderer {
         if (!nativeRunner.isReady() && vanillaOpaqueDisabled) restoreVanillaOpaque();
     }
 
+    /**
+     * Automatische Aufloesung (Fix 4, nur ohne DLSS-Hochskalierung): Liegt die GPU-Zeit des Levels
+     * ueber dem Budget (Standard 15 ms), die CPU aber darunter (echtes GPU-Limit, kein CPU-Stau),
+     * wird das Level-Ziel schrittweise kleiner (bis 0.6) – Vanilla-Entities/Partikel/Wolken und unsere
+     * Paesse rendern dann alle kleiner mit. Bei Reserve geht es schrittweise zurueck auf 1.0.
+     * Entscheidung alle 60 Frames anhand gleitender Mittel (kein Flattern). Abschaltbar:
+     * -Dvulkanfish.autoRes=false, Budget: -Dvulkanfish.autoResBudget=15.0.
+     */
+    private void autoResTick(double frameMs) {
+        cpuFrameMsEma = cpuFrameMsEma == 0.0 ? frameMs : cpuFrameMsEma * 0.95 + frameMs * 0.05;
+        if (!AUTO_RES || nativeRunner == null) {
+            autoResFactor = 1.0f;
+            return;
+        }
+        if (++autoResCountdown < 60) return;
+        autoResCountdown = 0;
+        double gpu = nativeRunner.gpuSpanMs();
+        if (gpu <= 0) return; // noch keine GPU-Zeit bekannt
+        float next = autoResFactor;
+        if (gpu > AUTO_RES_BUDGET && cpuFrameMsEma < AUTO_RES_BUDGET * 0.8) next = Math.max(0.6f, autoResFactor * 0.9f);
+        else if (gpu < AUTO_RES_BUDGET * 0.65 && autoResFactor < 1.0f) next = Math.min(1.0f, autoResFactor * 1.1f + 0.01f);
+        if (next != autoResFactor) {
+            autoResFactor = next;
+            nativeRunner.resetTaaHistory();
+            LOG.info("[vulkanfish] Automatische Aufloesung: Faktor {} (GPU {} ms, CPU {} ms)",
+                    String.format(java.util.Locale.ROOT, "%.2f", next),
+                    String.format(java.util.Locale.ROOT, "%.1f", gpu),
+                    String.format(java.util.Locale.ROOT, "%.1f", cpuFrameMsEma));
+        }
+    }
+
     private void logCpu() {
         cpuFrames++;
         long now = System.currentTimeMillis();
@@ -527,7 +573,9 @@ public final class VulkanfishRenderer {
         cpuLogMs = now;
         double n = Math.max(cpuFrames, 1) * 1e6;
         double rest = Math.max(0, cpuNanosLevel - cpuNanosStart - cpuNanosSubmit - cpuNanosTerrain - cpuNanosWater - cpuNanosTaa) / n;
-        LOG.info("[vulkanfish] CPU/Frame (Render-Thread): level {} ms = start {} + submit(Vanilla) {} + terrain {} + wasser {} + taa {} + rest(Vanilla) {} ms; draws {}/frame, schatten-batches {}/frame",
+        long dropped = simon.vulkanfish.client.render.ParticleThrottle.takeDropped();
+        long staggered = simon.vulkanfish.client.render.EntityStagger.takeSkipped();
+        LOG.info("[vulkanfish] CPU/Frame (Render-Thread): level {} ms = start {} + submit(Vanilla) {} + terrain {} + wasser {} + taa {} + rest(Vanilla) {} ms; draws {}/frame, schatten-batches {}/frame, partikel-verworfen {}, entity-gestaffelt {}",
                 String.format(java.util.Locale.ROOT, "%.3f", cpuNanosLevel / n),
                 String.format(java.util.Locale.ROOT, "%.3f", cpuNanosStart / n),
                 String.format(java.util.Locale.ROOT, "%.3f", cpuNanosSubmit / n),
@@ -535,7 +583,7 @@ public final class VulkanfishRenderer {
                 String.format(java.util.Locale.ROOT, "%.3f", cpuNanosWater / n),
                 String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTaa / n),
                 String.format(java.util.Locale.ROOT, "%.3f", rest),
-                drawWin / Math.max(cpuFrames, 1), batchWin / Math.max(cpuFrames, 1));
+                drawWin / Math.max(cpuFrames, 1), batchWin / Math.max(cpuFrames, 1), dropped, staggered);
         cpuNanosStart = cpuNanosTerrain = cpuNanosWater = cpuNanosTaa = cpuNanosSubmit = cpuNanosLevel = 0;
         drawWin = batchWin = 0;
         cpuFrames = 0;

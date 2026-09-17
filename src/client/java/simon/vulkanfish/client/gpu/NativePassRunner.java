@@ -2423,8 +2423,8 @@ public final class NativePassRunner {
         }
         // Cache-/Skip-Heuristiken: Trefferquote (Flacker-Diagnose + Sparsamkeit im Blick)
         sb.append("[Schatten neu ").append(shadowRedraws).append("/Cache ").append(shadowHits)
-                .append("] [Phase2 raster ").append(phase2Runs).append("/skip ").append(phase2Skips).append("] ");
-        shadowRedraws = shadowHits = phase2Runs = phase2Skips = 0;
+                .append("/Entity-inkrementell ").append(entityOnlyUpdates).append("] [Phase2 raster ").append(phase2Runs).append("/skip ").append(phase2Skips).append("] ");
+        shadowRedraws = shadowHits = entityOnlyUpdates = phase2Runs = phase2Skips = 0;
         return sb.append("gesamt ").append(String.format(java.util.Locale.ROOT, "%.2f", total)).append(" ms").toString();
     }
 
@@ -2479,19 +2479,47 @@ public final class NativePassRunner {
             }
         }
         int entitySig = batches.size();
-        for (var b : batches) entitySig = entitySig * 31 + b.vertexCount();
-        boolean staticWorld = matSame && stageEpoch == lastShadowEpoch && entitySig == lastShadowEntitySig;
+        long entityVerts = 0;
+        for (var b : batches) {
+            entitySig = entitySig * 31 + b.vertexCount();
+            entityVerts += b.vertexCount();
+        }
+        boolean staticSame = matSame && stageEpoch == lastShadowEpoch;
+        // Nur Entities geaendert (Sonne/Kamera/Geometrie gleich, kleine Batches, Karte gueltig):
+        // Entities direkt in die gecachte Karte zeichnen statt alles neu. Geisterbilder wandernder
+        // Entities begrenzt spaetestens jedes 8. Mal ein Voll-Redraw. Abschaltbar: -Dvulkanfish.entityOnlyShadow=false
+        if (ENTITY_ONLY_SHADOW && !batches.isEmpty() && staticSame && shadowValid
+                && entityVerts <= ENTITY_ONLY_VERTS && entityOnlyAge < ENTITY_ONLY_MAX_AGE) {
+            lastShadowEntitySig = entitySig;
+            shadowValid = true;
+            shadowEntityOnly = true;
+            entityOnlyAge++;
+            return false;
+        }
+        boolean staticWorld = staticSame && entitySig == lastShadowEntitySig;
         if (!staticWorld || (!batches.isEmpty() && shadowAge >= SHADOW_MAX_AGE)) {
             lastShadowMat = mat == null ? null : mat.clone();
             lastShadowEpoch = stageEpoch;
             lastShadowEntitySig = entitySig;
             shadowAge = 0;
             shadowValid = true;
+            shadowEntityOnly = false;
+            entityOnlyAge = 0;
             return true;
         }
         shadowAge++;
+        shadowEntityOnly = false;
         return false;
     }
+
+    /** Inkrementelles Entity-Schatten-Update: nur Entities in die gecachte Karte (LOAD statt CLEAR). */
+    private boolean shadowEntityOnly;
+    private int entityOnlyAge;
+    private long entityOnlyUpdates;
+    private static final boolean ENTITY_ONLY_SHADOW =
+            !"false".equals(System.getProperty("vulkanfish.entityOnlyShadow", "true"));
+    private static final long ENTITY_ONLY_VERTS = 65536; // mehr = Voll-Redraw (Geister-Risiko)
+    private static final int ENTITY_ONLY_MAX_AGE = 7; // spaetestens jedes 8. Mal voll
 
     private float[] lastPhase2Mat;
     private int lastPhase2OX, lastPhase2OY, lastPhase2OZ;
@@ -2633,7 +2661,7 @@ public final class NativePassRunner {
             // relativ zum Render-Ursprung (= Ursprung der Kamera-Section)
             boolean doShadow = shadows && shadowNeeded(d, entityBatches);
             if (doShadow) shadowRedraws++;
-            else if (shadows) shadowHits++;
+            else if (shadows && !shadowEntityOnly) shadowHits++;
             if (doShadow) {
                 float shadowFloor = -TerrainStreamer.SHADOW_BELOW * 16f;
                 float shadowFar = lodMaskData != null ? TerrainStreamer.SHADOW_RADIUS * 16f : 1e30f;
@@ -2651,6 +2679,8 @@ public final class NativePassRunner {
                     VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK10.VK_ACCESS_SHADER_READ_BIT);
             stamp(cmd, q0 + 4);
             if (doShadow) recordShadow(arena, cmd, slot, atlasView, entityBatches);
+            else if (shadows && shadowEntityOnly && !entityBatches.isEmpty())
+                recordEntityShadowOnly(arena, cmd, slot, entityBatches);
             stamp(cmd, q0 + 5);
             if (d.dimension() != 0) {
                 // Nether/End: Vanillas Himmel wird als Hintergrund weiterverwendet
@@ -3810,6 +3840,33 @@ public final class NativePassRunner {
             if (classicRaster) drawClassic(cmd, cmdLodShadow, lodShadowIndirect, lodMaxMeshlets);
             else EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodShadowIndirect.buffer(), 0L, 1, 12);
         }
+        recordEntityShadows(arena, cmd, slot, entityBatches);
+        KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
+        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK10.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK10.VK_ACCESS_SHADER_READ_BIT);
+    }
+
+    /**
+     * Nur Entities in die gecachte Schattenkarte (LOAD, kein CLEAR, kein Terrain): der teure
+     * Terrain-Durchlauf entfaellt, die Batches testen gegen die gecachte Tiefe – identisch zum
+     * Voll-Redraw, ausser dass weitgewanderte Entities bis zum naechsten Voll-Redraw (max. 8
+     * Frames) einen Schatten-Rest hinterlassen.
+     */
+    private void recordEntityShadowOnly(Arena arena, VkCommandBuffer cmd, int slot,
+                                        java.util.List<simon.vulkanfish.client.render.EntityShadowCapture.Batch> entityBatches) {
+        if (entityBatches.isEmpty()) return;
+        entityOnlyUpdates++;
+        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_VERTEX_INPUT_BIT,
+                VK10.VK_ACCESS_TRANSFER_WRITE_BIT, VK10.VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT);
+        VkRenderingAttachmentInfo depthAtt = VkRenderingAttachmentInfo.calloc(arena.stack()).sType$Default()
+                .imageView(shadowMap.view()).imageLayout(VK10.VK_IMAGE_LAYOUT_GENERAL)
+                .loadOp(VK10.VK_ATTACHMENT_LOAD_OP_LOAD).storeOp(VK10.VK_ATTACHMENT_STORE_OP_STORE);
+        VkRenderingInfo ri = VkRenderingInfo.calloc(arena.stack()).sType$Default();
+        ri.renderArea().offset().set(0, 0);
+        ri.renderArea().extent().set(SHADOW_RES, SHADOW_RES);
+        ri.layerCount(1).pDepthAttachment(depthAtt);
+        KHRDynamicRendering.vkCmdBeginRenderingKHR(cmd, ri);
+        setViewport(arena, cmd, SHADOW_RES, SHADOW_RES);
         recordEntityShadows(arena, cmd, slot, entityBatches);
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
