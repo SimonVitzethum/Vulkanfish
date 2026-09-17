@@ -359,6 +359,12 @@ public final class LodManager {
         if (chunks == lodChunks) return;
         lodChunks = chunks;
         lastSelX = Double.NaN;
+        // 256+ Chunks Radius (ab hier quadratisch mehr Chunks!): Backfill dauert lange, Pools
+        // werden knapp – einmalig warnen statt still zu churnen.
+        if (chunks > 256) {
+            LOG.warn("[vulkanfish] LOD-Distanz {} Chunks (~{} Mio. Chunks Flaeche): experimentell – Backfill braucht viele Minuten, fernes LOD bleibt solange lueckenhaft",
+                    chunks, String.format(java.util.Locale.ROOT, "%.1f", Math.PI * chunks * chunks / 1e6));
+        }
     }
 
     /** Erlaubter Bildfehler eines Voxels in Pixeln (kleiner = mehr Detail). */
@@ -857,12 +863,15 @@ public final class LodManager {
     // ---------- Quellen ----------
 
     private double lastSortX = Double.NaN, lastSortZ = Double.NaN;
+    private long lastSortFrame;
 
     private void processRequests(double camX, double camZ) {
         if (requestQueue.isEmpty()) return;
         // Kompaktieren bei Bedarf, Sortieren nur bei Bewegung/Zuwachs (nicht jeden Frame 200k
         // Eintraege): bei statischer Kamera aendert sich die Entfernungsordnung nicht – mit
         // grossen Bobby-Mengen sparte das sonst alle ~120 Frames einen vollen Re-Sort.
+        // Zusaetzlich mindestens 600 Frames zwischen Wachstum-Sorts (Millionen-Queues wuerden
+        // sonst sekundenlang freezen – lieber leicht unsortiert weiterarbeiten).
         if (requestHead >= requestQueue.size() || requestQueue.size() > requestSortedSize * 2 + 256 || frame % 120 == 0) {
             if (requestHead > 0) {
                 requestQueue.removeElements(0, Math.min(requestHead, requestQueue.size()));
@@ -871,12 +880,14 @@ public final class LodManager {
             if (requestQueue.isEmpty()) return;
             double moved = Double.isNaN(lastSortX) ? Double.POSITIVE_INFINITY
                     : Math.abs(camX - lastSortX) + Math.abs(camZ - lastSortZ);
-            if (moved > 16.0 || requestQueue.size() > requestSortedSize * 2 + 256) {
+            boolean grown = requestQueue.size() > requestSortedSize * 2 + 256;
+            if (moved > 16.0 || (grown && frame - lastSortFrame >= 600)) {
                 final double sx = camX, sz = camZ;
                 sortByDistance(requestQueue, k -> chunkDist(k, sx, sz));
                 requestSortedSize = requestQueue.size();
                 lastSortX = camX;
                 lastSortZ = camZ;
+                lastSortFrame = frame;
             }
         }
         long t0 = System.nanoTime();
@@ -1332,7 +1343,9 @@ public final class LodManager {
 
     /** Hashes von Chunks, die kein aufbewahrter Knoten mehr betreffen kann (weit weg), verwerfen. */
     private void prunePublished(double camX, double camZ) {
-        double limit = farBlocks() + 2048; // etwas ueber die Auswahl hinaus (aufbewahrte Knoten am Rand)
+        // Eng an der Auswahl (Sweep wirft Daten schon ab far+256): Hashes dahinter sind tot
+        // (keine Updates mehr moeglich) – bei 1024 Chunks sonst hunderte MB.
+        double limit = farBlocks() + 512; // etwas ueber die Auswahl hinaus (Knoten am Rand)
         synchronized (publishedHash) {
             publishedHash.keySet().removeIf(k -> chunkDist(k, camX, camZ) > limit);
         }
