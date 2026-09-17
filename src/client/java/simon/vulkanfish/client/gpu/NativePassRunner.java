@@ -276,6 +276,12 @@ public final class NativePassRunner {
     private Buf cmdNear, cmdNearShadow, cmdLod, cmdLodShadow; // Draw-Command-Pools
     private Buf cmdWater, cmdTrans, cmdLodWater; // Wasser-Pass: eigene Pools (gleichzeitig live)
     private int lodMaxMeshlets;
+    // ---- Entity-Lightmap auf der GPU (statt CPU + Upload pro Frame) ----
+    // Vanillas 16x16-Lightmap (Block x Himmel) aus denselben Uniforms wie der Deferred-Pass.
+    private Img lightmapImg;
+    private long layoutLightmap, pipeLightmap;
+    private long lightmapTarget; // Vanillas Textur (vkImage), 0 = Vanilla schreibt selbst
+    private long lastLightSig = Long.MIN_VALUE;
     private Buf oitNodes;
     private Buf oitCounter;
     private int oitCapacity;
@@ -1491,6 +1497,15 @@ public final class NativePassRunner {
         layoutTaa = pipelineLayout(arena, setLayout(arena,
                 new int[][]{{0, SI}, {1, SI}, {2, SI}, {3, ST}, {4, ST}, {5, SM}, {6, UB}}, C), 0, 0);
         pipeTaa = computePipe(arena, layoutTaa, module(arena, loader, "taaResolve"));
+        try {
+            // Entity-Lightmap auf der GPU (16x16 in Vanillas Textur). Nicht fatal: ohne Pipe
+            // schreibt Vanilla seine eigene Lightmap (wie ohne unseren Renderer).
+            layoutLightmap = pipelineLayout(arena, setLayout(arena, new int[][]{{0, UB}, {1, ST}}, C), 0, 0);
+            pipeLightmap = computePipe(arena, layoutLightmap, module(arena, loader, "lightmapMain"));
+        } catch (Throwable t) {
+            LOG.warn("[vulkanfish] Entity-Lightmap-Pipeline fehlt, Vanilla-Lightmap bleibt ({})", t.toString());
+            pipeLightmap = 0L;
+        }
         transFragModule = module(arena, loader, "translucentRecordFrag");
         if (classicRaster) {
             // Glas/Eis einseitig wie Vanillas transluzentes Terrain (Scheiben haben eigene Rueckseiten)
@@ -2018,6 +2033,7 @@ public final class NativePassRunner {
             bloomMipViews = new long[bmips];
             for (int i = 0; i < bmips; i++) bloomMipViews[i] = makeView(arena, bloom.image(), FMT_HDR, i, 1, ca);
             ldr = makeImage(arena, w, h, 1, FMT_LDR, stor | src, ca);
+            lightmapImg = makeImage(arena, 16, 16, 1, FMT_LDR, stor | src, ca); // Entity-Lightmap (Compute schreibt, Kopie liest)
             background = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
             sceneCopy = makeImage(arena, w, h, 1, FMT_LDR, sampled | stor | dst, ca);
             oitHead = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R32_UINT, stor | dst, ca);
@@ -2061,9 +2077,11 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, rrDiffuse, rrSpecular, rrNormals, rrColor}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, rrDiffuse, rrSpecular, rrNormals, rrColor,
+                lightmapImg}) destroyImg(img);
         destroyOutput();
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = motion = null;
+        lightmapImg = null;
         fgDepth = fgHud = null;
         rrDiffuse = rrSpecular = rrNormals = rrColor = rrOut = null;
         fgCaptured = false;
@@ -2359,6 +2377,7 @@ public final class NativePassRunner {
                 lodClustersCleared = true;
             }
             recordUploads(arena, cmd, slot);
+            recordLightmap(arena, cmd, slot);
             stamp(cmd, q0 + 1);
             if (rt != null && !rtForceOff) recordRt(arena, cmd, slot, d);
             if (pipeLodGen != 0L) recordLodGpu(arena, cmd, slot);
@@ -3308,7 +3327,7 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront, oitFrontDepth, motion, rrDiffuse, rrSpecular, rrNormals, rrColor}) {
+                oitHead, oitFront, oitFrontDepth, motion, rrDiffuse, rrSpecular, rrNormals, rrColor, lightmapImg}) {
             if (img != null) toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -3375,6 +3394,37 @@ public final class NativePassRunner {
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                 VK10.VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK10.VK_ACCESS_SHADER_READ_BIT | VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    }
+
+    /** Vanillas Lightmap-Ziel (vkImage) + Signatur der Eingaben; 0 = Vanilla schreibt selbst. */
+    public void noteLightmap(long vkImage, long sig) {
+        lightmapTarget = vkImage;
+        lightmapSig = sig;
+        if (vkImage == 0L) lastLightSig = Long.MIN_VALUE; // Effektwechsel -> danach sicher neu
+    }
+
+    private long lightmapSig;
+
+    /**
+     * Entity-Lightmap rechnen + in Vanillas Textur kopieren (im Terrain-Frame, vor den
+     * Entity-Draws; ein Frame Lag bei Aenderungen ist auf 16x16 unsichtbar). Nur bei
+     * geaenderten Eingaben (Licht ist meist statisch).
+     */
+    private void recordLightmap(Arena arena, VkCommandBuffer cmd, int slot) {
+        if (pipeLightmap == 0L || lightmapTarget == 0L || lightmapImg == null || lightmapSig == lastLightSig) return;
+        lastLightSig = lightmapSig;
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeLightmap);
+        push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutLightmap,
+                W.ub(0, uniforms[slot]), W.st(1, lightmapImg.view()));
+        VK10.vkCmdDispatch(cmd, 2, 2, 1);
+        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_TRANSFER_READ_BIT);
+        VkImageCopy.Buffer region = VkImageCopy.calloc(1, arena.stack());
+        region.get(0).srcSubresource().set(VK10.VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
+        region.get(0).dstSubresource().set(VK10.VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1);
+        region.get(0).extent().set(16, 16, 1);
+        VK10.vkCmdCopyImage(cmd, lightmapImg.image(), VK10.VK_IMAGE_LAYOUT_GENERAL,
+                lightmapTarget, VK10.VK_IMAGE_LAYOUT_GENERAL, region);
     }
 
     private void recordHiz(Arena arena, VkCommandBuffer cmd) {

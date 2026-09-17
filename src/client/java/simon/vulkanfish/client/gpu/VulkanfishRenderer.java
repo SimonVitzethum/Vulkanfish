@@ -1180,6 +1180,12 @@ public final class VulkanfishRenderer {
         return vanillaOpaqueDisabled;
     }
 
+    /** Vanillas Lightmap-Ziel fuer die GPU-Lightmap (0 = Vanilla schreibt selbst). */
+    public static void noteLightmap(long vkImage, long sig) {
+        var r = simon.vulkanfish.client.VulkanfishClient.RENDERER;
+        if (r != null && r.nativeRunner != null) r.nativeRunner.noteLightmap(vkImage, sig);
+    }
+
     /** Vanilla wieder alles meshen lassen und die Section-Geometrie neu aufbauen (Render-Thread). */
     private void restoreVanillaOpaque() {
         vanillaOpaqueDisabled = false;

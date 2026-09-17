@@ -1,7 +1,7 @@
 package simon.vulkanfish.client.mixin;
 
-import com.mojang.blaze3d.systems.RenderSystem;
 import com.mojang.blaze3d.textures.GpuTexture;
+import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
 import net.minecraft.client.renderer.Lightmap;
 import net.minecraft.client.renderer.state.LightmapRenderState;
 import org.spongepowered.asm.mixin.Final;
@@ -12,27 +12,23 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import simon.vulkanfish.client.gpu.FrameDataCapture;
 import simon.vulkanfish.client.gpu.VulkanfishRenderer;
-import simon.vulkanfish.client.render.EntityLightmap;
 
-/** Solange unser Renderer das Terrain zeichnet: Lightmap im Vulkanfish-Look (EntityLightmap). */
+/** Solange unser Renderer das Terrain zeichnet: Lightmap im Vulkanfish-Look (GPU-Compute, 16x16). */
 @Mixin(Lightmap.class)
 public abstract class LightmapMixin {
     @Shadow @Final private GpuTexture texture;
-    private long vulkanfish$lastLightSig = Long.MIN_VALUE;
 
     @Inject(method = "render", at = @At("TAIL"))
     private void vulkanfish$ourLight(LightmapRenderState state, CallbackInfo ci) {
         var d = FrameDataCapture.last;
         if (d == null || !VulkanfishRenderer.vanillaOpaqueDisabled() || state.darknessEffectScale > 0.0f
                 || state.nightVisionEffectIntensity > 0.0f && simon.vulkanfish.client.VulkanfishSettings.fullbright() <= 0.0f) {
-            vulkanfish$lastLightSig = Long.MIN_VALUE; // Effektwechsel -> danach sicher neu hochladen
+            VulkanfishRenderer.noteLightmap(0L, 0L); // Vanilla schreibt selbst (Effekte/Fallback)
             return; // Dunkelheits-/Nachtsicht-Effekte (Trank, Warden) bleiben Vanillas
         }
-        // 16x16-Upload nur bei geaenderten Eingaben (Eckwerte sind zeitlich glatt, meist statisch)
-        long sig = signature(d);
-        if (sig == vulkanfish$lastLightSig) return;
-        vulkanfish$lastLightSig = sig;
-        RenderSystem.getDevice().createCommandEncoder().writeToTexture(texture, EntityLightmap.compute(d), 0, 0, 0, 0, 16, 16);
+        // GPU rechnet + kopiert im Terrain-Frame (vor den Entity-Draws); nur Ziel + Signatur melden
+        long img = texture instanceof VulkanGpuTexture vk ? vk.vkImage() : 0L;
+        VulkanfishRenderer.noteLightmap(img, signature(d));
     }
 
     /** Hash aller Lightmap-Eingaben (float-Bits): gleich -> gleiche Textur, Upload entfaellt. */
