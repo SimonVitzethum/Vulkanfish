@@ -16,6 +16,7 @@ import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.util.vma.Vma;
 import org.lwjgl.util.vma.VmaAllocationCreateInfo;
 import org.lwjgl.util.vma.VmaAllocationInfo;
+import org.lwjgl.util.vma.VmaBudget;
 import org.lwjgl.vulkan.EXTMeshShader;
 import org.lwjgl.vulkan.KHRAccelerationStructure;
 import org.lwjgl.vulkan.KHRDynamicRendering;
@@ -48,6 +49,7 @@ import org.lwjgl.vulkan.VkImageSubresourceRange;
 import org.lwjgl.vulkan.VkImageViewCreateInfo;
 import org.lwjgl.vulkan.VkMemoryBarrier;
 import org.lwjgl.vulkan.VkPhysicalDevice;
+import org.lwjgl.vulkan.VkPhysicalDeviceMemoryProperties;
 import org.lwjgl.vulkan.VkPhysicalDeviceProperties;
 import org.lwjgl.vulkan.VkPipelineColorBlendAttachmentState;
 import org.lwjgl.vulkan.VkPipelineColorBlendStateCreateInfo;
@@ -144,6 +146,10 @@ public final class NativePassRunner {
     private VkPhysicalDevice phys;
     private VkQueue gfxQ;
     private int gfxFam;
+    /** Device-localer Heap fuer die VRAM-Wache (oder groesster Heap bei Shared Memory). */
+    private int vramHeap = -1;
+    /** Reserve, die immer frei bleiben muss (Treiber-Spitzen, Resize, fremde Apps). */
+    public static final long VRAM_RESERVE_BYTES = 300L << 20;
     private boolean ready;
     private String disableReason = "nicht initialisiert";
     private final boolean hizEnabled;
@@ -1094,6 +1100,7 @@ public final class NativePassRunner {
             phys = blaze.vkPhysicalDevice();
             gfxQ = blaze.graphicsQueue();
             gfxFam = blaze.graphicsQueueFamily();
+            selectVramHeap(arena);
             boolean meshCaps = dev.getCapabilities().vkCmdDrawMeshTasksIndirectEXT != 0L;
             if (!classicRaster && !meshCaps) {
                 return fail("vkCmdDrawMeshTasksIndirectEXT fehlt auf Mojangs Device (Mixin nicht aktiv?)");
@@ -1142,6 +1149,54 @@ public final class NativePassRunner {
     }
 
     // ---------- Erstellung ----------
+
+    /**
+     * VRAM-Heap waehlen: device-lokal bevorzugt, sonst der groesste (Shared Memory ohne
+     * separaten VRAM). Danach misst vramHeadroomBytes() Budget minus Verbrauch aus Mojangs
+     * eigenem Allocator (inklusive Mojangs Texturen) – ohne EXT_memory_budget faellt das
+     * Budget auf die Heap-Groesse zurueck, die 300-MiB-Reserve deckt dann die Differenz.
+     */
+    private void selectVramHeap(Arena arena) {
+        vramHeap = -1;
+        try {
+            VkPhysicalDeviceMemoryProperties mp = VkPhysicalDeviceMemoryProperties.calloc(arena.stack());
+            VK10.vkGetPhysicalDeviceMemoryProperties(phys, mp);
+            int best = -1;
+            long bestSize = -1;
+            int devLocal = -1;
+            long devSize = -1;
+            for (int i = 0; i < mp.memoryHeapCount(); i++) {
+                long size = mp.memoryHeaps(i).size();
+                int flags = mp.memoryHeaps(i).flags();
+                if (size > bestSize) {
+                    bestSize = size;
+                    best = i;
+                }
+                if ((flags & VK10.VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0 && size > devSize) {
+                    devSize = size;
+                    devLocal = i;
+                }
+            }
+            vramHeap = devLocal >= 0 ? devLocal : best;
+        } catch (Throwable t) {
+            LOG.warn("[vulkanfish] VRAM-Heap unbekannt, ohne Budget-Skalierung ({})", t.toString());
+        }
+    }
+
+    /**
+     * Freier VRAM im gewaehlten Heap (Budget minus Verbrauch, VMA-Sicht inklusive Mojang).
+     * Long.MIN_VALUE, wenn unbekannt (dann greifen nur die statischen Caps + OOM-Halbierung).
+     */
+    public long vramHeadroomBytes() {
+        if (vma == 0L || vramHeap < 0) return Long.MIN_VALUE;
+        try (Arena arena = new Arena()) {
+            VmaBudget.Buffer b = VmaBudget.calloc(16, arena.stack()); // VK_MAX_MEMORY_HEAPS = 16
+            Vma.vmaGetHeapBudgets(vma, b);
+            return Math.max(0L, b.get(vramHeap).budget() - b.get(vramHeap).usage());
+        } catch (Throwable t) {
+            return Long.MIN_VALUE;
+        }
+    }
 
     /**
      * Block-Atlas mit negativem Mip-Bias bei DLSS Super Resolution (log2 der Skalierung, NVIDIAs
@@ -1265,12 +1320,65 @@ public final class NativePassRunner {
         return b;
     }
 
+    /** Geplante Nahfeld-Bytes bei gegebener Quad-Kapazitaet (spiegelt createScene unten). */
+    private long nearBytes(int quads) {
+        long meshlets = (long) quads / SectionMesher.QUADS_PER_MESHLET * 2;
+        long bytes = (long) quads * 4 * SectionMesher.VERTEX_BYTES + (long) quads * 2 * 4L
+                + meshlets * (SectionMesher.MESHLET_BYTES + 6L * 4L)
+                + 65535L * CLUSTER_BYTES + 4096L;
+        if (classicRaster) bytes += meshlets * 4L * 16L; // Command-Pools (4x)
+        return bytes;
+    }
+
+    /** Geplante LOD-Bytes bei voller Kapazitaet (spiegelt initLod). */
+    private long lodBytes() {
+        long meshlets = simon.vulkanfish.client.lod.LodManager.MAX_MESHLETS;
+        long bytes = (long) simon.vulkanfish.client.lod.LodManager.MAX_QUADS
+                * simon.vulkanfish.client.lod.LodManager.QUAD_BYTES
+                + meshlets * 64L + 65535L * CLUSTER_BYTES + meshlets * 4L * 4L + 65536L;
+        if (classicRaster) bytes += meshlets * 3L * 16L; // Command-Pools (3x)
+        return bytes;
+    }
+
     /** GPU-Scene so gross wie moeglich anlegen (halbiert bei Out-of-Memory). */
     private void createScene(Arena arena) {
         int stor = VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         int dst = VK10.VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         int devLocal = VK10.VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        for (int quads = MAX_QUADS; ; quads /= 2) {
+        int startQuads = MAX_QUADS;
+        long headroom = vramHeadroomBytes();
+        if (headroom != Long.MIN_VALUE) {
+            // Geplante Pools (Nah voll + LOD voll + RT) muessen mit 300 MiB Reserve passen,
+            // sonst kleiner starten (die Halbierungs-Schleife darunter faengt den Rest; Schaetzung
+            // lieber grosszuegig, Richtung Sicherheit). Mojangs Basis-Belegung ist schon drin.
+            boolean lodOn;
+            try {
+                lodOn = simon.vulkanfish.client.gpu.GpuDrivenConfig.load().enableLod();
+            } catch (Throwable t) {
+                lodOn = true;
+            }
+            long winPx = 1920L * 1080L;
+            try {
+                var win = net.minecraft.client.Minecraft.getInstance().getWindow();
+                winPx = Math.max(1L, (long) win.getWidth() * win.getHeight());
+            } catch (Throwable ignored) {
+            }
+            long imagesEst = winPx * 64 + (32L << 20); // G-Buffer/HDR/History/OIT/Schatten + Wachstum
+            long planned = nearBytes(MAX_QUADS) + (lodOn ? lodBytes() : 0L) + (rtWanted ? (256L << 20) : 0L) + imagesEst;
+            long avail = headroom - VRAM_RESERVE_BYTES;
+            if (avail < planned) {
+                double s = Math.max(0.0, (double) avail / Math.max(1L, planned));
+                startQuads = Math.max(MIN_QUADS, (int) (MAX_QUADS * s));
+                LOG.info(String.format(java.util.Locale.ROOT,
+                        "[vulkanfish] VRAM: %.1f GiB frei, %.1f GiB geplant -> Szene startet mit %d Quads (300 MiB Reserve)",
+                        headroom / 1073741824.0, planned / 1073741824.0, startQuads));
+            } else {
+                LOG.info(String.format(java.util.Locale.ROOT,
+                        "[vulkanfish] VRAM: %.1f GiB frei, %.1f GiB geplant (300 MiB Reserve bleibt)",
+                        headroom / 1073741824.0, planned / 1073741824.0));
+            }
+        }
+        for (int quads = startQuads; ; quads /= 2) {
             List<Buf> made = new ArrayList<>();
             try {
                 maxVerts = quads * 4;
@@ -1987,6 +2095,111 @@ public final class NativePassRunner {
 
     void rtClear() {
         if (rt != null) rt.clear(timelineValue + 1);
+    }
+
+    /** Null-sicher freigeben (fuer Laufzeit-Notbremsen); gibt null zurueck. */
+    private Buf free(Buf b) {
+        if (b != null) destroyBuffer(b);
+        return null;
+    }
+
+    /**
+     * Laufzeit-Notbremse bei VRAM-Knappheit: RT-Puffer freigeben (Blocklicht faellt auf
+     * Vanilla zurueck). Einseitig, idempotent. @return true wenn wirklich abgeworfen.
+     */
+    public boolean dropRtGpu() {
+        if (rt == null) return false;
+        waitValue(timelineValue); // laufende Frames mit RT-Bezuegen abwarten
+        try {
+            rt.destroy(); // nur eigene BLAS/TLAS/Pools (verts/tris bleiben, gehoeren der Szene)
+        } catch (Throwable ignored) {
+        }
+        rt = null;
+        cellCount = free(cellCount);
+        cellLights = free(cellLights);
+        return true;
+    }
+
+    /**
+     * Laufzeit-Notbremse bei VRAM-Knappheit: alle LOD-GPU-Objekte freigeben (Zeichen- und
+     * Generierungs-Puffer). Danach ist lodReady aus (alle Draw-/Upload-Pfade pruefen das);
+     * der Renderer haengt zusaetzlich den Manager aus (kein Nachbauen). Einseitig, idempotent.
+     * @return true wenn wirklich abgeworfen.
+     */
+    public boolean dropLodGpu() {
+        if (!lodReady && !lodGpuReady) return false;
+        waitValue(timelineValue); // laufende Frames mit LOD-Bezuegen abwarten
+        lodQuads = free(lodQuads);
+        lodMeshlets = free(lodMeshlets);
+        lodClusters = free(lodClusters);
+        lodVis1 = free(lodVis1);
+        lodVis2 = free(lodVis2);
+        lodVisBits = free(lodVisBits);
+        lodIndirect1 = free(lodIndirect1);
+        lodIndirect2 = free(lodIndirect2);
+        lodVisWater = free(lodVisWater);
+        lodWaterIndirect = free(lodWaterIndirect);
+        lodClusterTotal = free(lodClusterTotal);
+        lodNearMask = free(lodNearMask);
+        lodTexTable = free(lodTexTable);
+        lodDrawBiome = free(lodDrawBiome);
+        lodVisShadow = free(lodVisShadow);
+        lodShadowIndirect = free(lodShadowIndirect);
+        cmdLod = free(cmdLod);
+        cmdLodShadow = free(cmdLodShadow);
+        cmdLodWater = free(cmdLodWater);
+        genProg = free(genProg);
+        genConst = free(genConst);
+        genPerm = free(genPerm);
+        genOffs = free(genOffs);
+        genOct = free(genOct);
+        genNormal = free(genNormal);
+        genNormalFactor = free(genNormalFactor);
+        genBlendD = free(genBlendD);
+        genBlendOct = free(genBlendOct);
+        lgTermBuf = free(lgTermBuf);
+        lgTermBase = free(lgTermBase);
+        lodBiomeTable = free(lodBiomeTable);
+        lodClimate = free(lodClimate);
+        lodClimateBiome = free(lodClimateBiome);
+        lodClimateNode = free(lodClimateNode);
+        lodMat = free(lodMat);
+        lodMatTint = free(lodMatTint);
+        lodBiomeCol = free(lodBiomeCol);
+        lgFlat = free(lgFlat);
+        lgInterp = free(lgInterp);
+        lgSamples = free(lgSamples);
+        lgColumn = free(lgColumn);
+        lgGrid = free(lgGrid);
+        lgTop = free(lgTop);
+        lgFrzPerm = free(lgFrzPerm);
+        lgFrzTerm = free(lgFrzTerm);
+        for (int i = 0; i < FRAMES; i++) {
+            lgJobTerm[i] = free(lgJobTerm[i]);
+            lgJobs[i] = free(lgJobs[i]);
+            lgMeshJobs[i] = free(lgMeshJobs[i]);
+            lgCounts[i] = free(lgCounts[i]);
+            lgTmp[i] = free(lgTmp[i]);
+            lgCommit[i] = free(lgCommit[i]);
+            lgRunHead[i] = free(lgRunHead[i]);
+            lgRuns[i] = free(lgRuns[i]);
+            lgFrzAnchor[i] = free(lgFrzAnchor[i]);
+        }
+        if (lgQueryPool != 0L) {
+            try {
+                VK10.vkDestroyQueryPool(dev, lgQueryPool, null);
+            } catch (Throwable ignored) {
+            }
+            lgQueryPool = 0L;
+        }
+        resetLodBatches();
+        lodClient = null;
+        lod = null;
+        lodReady = false;
+        lodGpuReady = false;
+        genReady = false;
+        lodClusterCount = 0;
+        return true;
     }
 
     // ---------- Images ----------

@@ -179,6 +179,39 @@ public final class VulkanfishRenderer {
             LOG.warn("[vulkanfish] GPU-Scene voll -> Vanilla meshet Opaque wieder mit (Sichtweite reduzieren spart das)");
             restoreVanillaOpaque();
         }
+        if ((vramGuardFrame++ % 300) == 0) vramGuard();
+    }
+
+    private int vramGuardFrame;
+    private int vramBand = 3; // 3 ok, 2 Warnung (<300 MiB), 1 RT weg (<150), 0 LOD weg (<100)
+
+    /**
+     * VRAM-Wache (alle ~5 s): Die Init-Skalierung garantiert die Reserve nur beim Start;
+     * schrumpft sie spaeter (fremde Apps, 4K-Resize, Treiber), wird erst RT, dann LOD
+     * abgeworfen (einseitig, mit Log – nichts wird automatisch wieder eingeschaltet).
+     */
+    private void vramGuard() {
+        if (nativeRunner == null) return;
+        long headroom = nativeRunner.vramHeadroomBytes();
+        if (headroom == Long.MIN_VALUE) return; // unbekannt: statische Caps + OOM-Halbierung greifen
+        int band = headroom < (100L << 20) ? 0 : headroom < (150L << 20) ? 1 : headroom < (300L << 20) ? 2 : 3;
+        if (band >= vramBand) {
+            vramBand = band; // Erholung: lautlos (einseitig, kein automatisches Wiedereinschalten)
+            return;
+        }
+        vramBand = band;
+        if (band <= 1 && nativeRunner.dropRtGpu()) {
+            LOG.warn("[vulkanfish] VRAM knapp ({} MiB frei): Raytracing-Blocklicht abgeworfen (Vanilla-Blocklicht aktiv)",
+                    headroom >> 20);
+        }
+        if (band == 0 && lod != null) {
+            LOG.warn("[vulkanfish] VRAM kritisch ({} MiB frei): LOD-Fernfeld abgeworfen (Nebel deckt die Ferne)",
+                    headroom >> 20);
+            nativeRunner.dropLodGpu();
+            lod = null;
+        } else if (band == 2) {
+            LOG.info("[vulkanfish] VRAM-Reserve unterschritten ({} MiB frei, Ziel 300 MiB)", headroom >> 20);
+        }
     }
 
     /** Selbsttest-Ablauf je Frame (nativ aus renderOpaqueTerrain, Vanilla-Vergleich aus onFrameEnd). */
