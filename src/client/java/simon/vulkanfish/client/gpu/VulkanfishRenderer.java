@@ -104,14 +104,15 @@ public final class VulkanfishRenderer {
         // 2. Raster-Pfad: Mesh-Shader wenn moeglich, sonst Classic-Raster-Fallback
         // (Vertex-Pulling + Multi-DrawIndirectCount, Culling bleibt GPU-driven).
         // -Dvulkanfish.classicRaster=true erzwingt den Fallback (Test), =false verbietet ihn.
-        boolean vanillaCompare = Boolean.getBoolean("vulkanfish.vanillaCompare"); // Selbsttest: Vanillas Bild zum Vergleich
+        // Unser Renderer ist immer Standard (kein Vanilla-Vergleichsmodus mehr); Vanilla
+        // rendert nur noch, wenn gar kein Pfad technisch moeglich ist.
         String classicProp = System.getProperty("vulkanfish.classicRaster", "auto");
         boolean classicForced = "true".equals(classicProp);
         boolean classicAllowed = !"false".equals(classicProp);
-        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading() && !classicForced && !vanillaCompare;
-        boolean classicPath = !meshPath && !vanillaCompare && classicAllowed && device.supportsIndirectCount();
+        boolean meshPath = config.enableMeshShaders() && device.supportsMeshShading() && !classicForced;
+        boolean classicPath = !meshPath && classicAllowed && device.supportsIndirectCount();
         if (!meshPath && !classicPath) {
-            LOG.warn("[vulkanfish] Weder Mesh-Shading noch IndirectCount auf Mojangs Device -> Vanilla-Pfad");
+            LOG.warn("[vulkanfish] Weder Mesh- noch Classic-Pfad auf Mojangs Device moeglich -> Vanilla-Pfad");
             return;
         }
         // 3. Bobby optional (Fernfeld-Quelle fuer 250-Chunk-LOD).
@@ -134,18 +135,7 @@ public final class VulkanfishRenderer {
         }
         streamer = new TerrainStreamer(nativeRunner);
         simon.vulkanfish.client.VulkanfishSettings.initDefaults(config);
-        if (config.enableLod() && nativeRunner.lodReady()) {
-            lod = new simon.vulkanfish.client.lod.LodManager(simon.vulkanfish.client.VulkanfishSettings.lodChunks(),
-                    simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
-            nativeRunner.setLod(lod);
-            lod.setNearField(streamer);
-            nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
-            lod.setRunner(nativeRunner);
-            FrameDataCapture.lodFogDistance = lod.farBlocks();
-            LOG.info("[vulkanfish] LOD-Fernfeld: {} Chunks, max. {} px Fehler pro Voxel, {} Worker-Threads, GPU-Budget {} ms",
-                    simon.vulkanfish.client.VulkanfishSettings.lodChunks(), simon.vulkanfish.client.VulkanfishSettings.lodPixelError(),
-                    WorkerPool.threads(), simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
-        }
+        if (config.enableLod()) enableLod();
         initialized = true;
         vanillaOpaqueDisabled = true;
         LOG.info("[vulkanfish] GPU-driven renderer init: mesh={} classic={} hiz={} rt={} (Pass folgt) bobby={}",
@@ -174,11 +164,38 @@ public final class VulkanfishRenderer {
                 NativePassRunner.SHADOW_RES);
         cpuNanosStart += System.nanoTime() - t0;
         if (streamer.overflowed() && vanillaOpaqueDisabled && lod == null) {
-            // GPU-Scene voll und kein Fernfeld, das entfernte Sections uebernimmt: Vanilla muss die
-            // restlichen Sections wieder selbst meshen (Hybrid, dort ohne unser Licht)
-            LOG.warn("[vulkanfish] GPU-Scene voll -> Vanilla meshet Opaque wieder mit (Sichtweite reduzieren spart das)");
-            restoreVanillaOpaque();
+            // GPU-Scene voll: entfernte Sections ans Fernfeld statt an Vanilla – unser Pfad
+            // bleibt Standard (kein Hybrid). Nur wenn LOD-Pipelines fehlen, faellt Vanilla
+            // als Notnagel ein (sonst Loecher).
+            if (enableLod()) {
+                LOG.warn("[vulkanfish] GPU-Scene voll -> Fernfeld nachtraeglich eingeschaltet (LOD-Chunks {}), entfernte Sections zeichnet das LOD",
+                        simon.vulkanfish.client.VulkanfishSettings.lodChunks());
+            } else {
+                LOG.warn("[vulkanfish] GPU-Scene voll, kein Fernfeld moeglich -> Vanilla meshet Opaque mit (LOD einschalten vermeidet das)");
+                restoreVanillaOpaque();
+            }
         }
+    }
+
+    /**
+     * LOD-Fernfeld einschalten (beim Start per Config oder nachtraeglich bei GPU-Scene-Overflow).
+     * @return true wenn aktiv (oder schon war)
+     */
+    private boolean enableLod() {
+        if (lod != null) return true;
+        if (nativeRunner == null || !nativeRunner.lodReady()) return false;
+        simon.vulkanfish.client.VulkanfishSettings.initDefaults(config);
+        lod = new simon.vulkanfish.client.lod.LodManager(simon.vulkanfish.client.VulkanfishSettings.lodChunks(),
+                simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
+        nativeRunner.setLod(lod);
+        lod.setNearField(streamer);
+        nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
+        lod.setRunner(nativeRunner);
+        FrameDataCapture.lodFogDistance = lod.farBlocks();
+        LOG.info("[vulkanfish] LOD-Fernfeld: {} Chunks, max. {} px Fehler pro Voxel, {} Worker-Threads, GPU-Budget {} ms",
+                simon.vulkanfish.client.VulkanfishSettings.lodChunks(), simon.vulkanfish.client.VulkanfishSettings.lodPixelError(),
+                WorkerPool.threads(), simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
+        return true;
     }
 
     /** Selbsttest-Ablauf je Frame (nativ aus renderOpaqueTerrain, Vanilla-Vergleich aus onFrameEnd). */
@@ -296,8 +313,6 @@ public final class VulkanfishRenderer {
         }
     }
 
-    private long vanillaTestFrame;
-
     /** Einstellungen aus dem Spiel (VulkanfishSettings) jeden Frame uebernehmen – Aenderungen gelten sofort. */
     private boolean taaWasOn = true;
 
@@ -375,9 +390,7 @@ public final class VulkanfishRenderer {
 
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
-        if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
-            selfTestFrame(++vanillaTestFrame); // Vergleichslauf ohne unseren Renderer (Vanilla-Bild)
-        }
+        // Kein Vanilla-Vergleichslauf mehr: unser Renderer ist immer Standard.
         boolean taaOn = simon.vulkanfish.client.VulkanfishSettings.taa();
         if (taaOn && !taaWasOn && nativeRunner != null) nativeRunner.resetTaaHistory();
         taaWasOn = taaOn;

@@ -133,7 +133,7 @@ public final class NativePassRunner {
     private static final String[] PASS_NAMES = {"upload", "rt-bau", "hiz", "cull", "schatten", "gbuffer", "licht", "bloom", "final"};
     private static final int TS_TERRAIN = PASS_NAMES.length + 1;
     private static final int TS_PER_FRAME = TS_TERRAIN + 7; // + Wasser-Zwischenstempel (3) // + Wasser/Glas (Start/Ende) + TAA (Start/Ende)
-    private static final int TAA_UBO_BYTES = 224; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS) + Entity-Anzahl
+    private static final int TAA_UBO_BYTES = 288; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS) + Entity-Anzahl + Vorframe-Matrix ohne Jitter (fuer 64: dort liegt die MIT Jitter)
     private static final int MAX_MOVING_ENTITIES = 256;
     /** Periode der gewickelten Weltlage fuer Shader-Rauschen (ein unsichtbarer Sprung alle 4096 Bloecke). */
     private static final int WORLD_WRAP = 4096;
@@ -211,7 +211,11 @@ public final class NativePassRunner {
     private int historyIndex;
     private boolean historyValid;
     // Vorframe fuer die TAA-Reprojektion: Projektion*Rotation (ohne Translation) + Welt-Kamera
-    private float[] prevProjRot;
+    // Vorframe-Rotationen (TAA-Reprojektion + Motion/NGX): GEJITTERT fuers TAA (die History
+    // enthaelt den gejitterten Vorframe!), UNGEJITTERT fuer Bewegungsvektoren/FrameGen (Jitter
+    // bekommen die separat). Verwechslung = globale History-Ablehnung = Kantenflackern!
+    private float[] prevProjRotJ;
+    private float[] prevProjRotU;
     private double[] prevCamW;
     private FrameUniformsData frameData; // Daten des aktuellen Frames (fuer TAA)
     private int waterSlot = -1; // Slot, dessen Terrain-Frame gerade aufgenommen wurde (Wasser folgt)
@@ -276,6 +280,19 @@ public final class NativePassRunner {
     private Buf cmdNear, cmdNearShadow, cmdLod, cmdLodShadow; // Draw-Command-Pools
     private Buf cmdWater, cmdTrans, cmdLodWater; // Wasser-Pass: eigene Pools (gleichzeitig live)
     private int lodMaxMeshlets;
+    // ---- Flacker-Diagnose (NUR Diagnose-Builds: -PvfFlickerDebug + -Dvulkanfish.flickerDebug) ----
+    // Overlay: LDR-Vorframe-Differenz als Heatmap + Zaehler. Release-Builds enthalten weder
+    // das SPIR-V noch den Manifest-Eintrag; hier bleibt dann nur dieser ungenutzte Zweig.
+    public static final boolean FLICKER = Boolean.getBoolean("vulkanfish.flickerDebug");
+    private static final int FLICKER_MODE = Integer.getInteger("vulkanfish.flickerMode", 0);
+    private Img prevLdr, flickerOut;
+    private Buf flickerCount;
+    private long layoutFlicker, pipeFlicker;
+    private boolean flickerAvailable, flickerInit;
+
+    private boolean flickerOn() {
+        return FLICKER && flickerAvailable && prevLdr != null && flickerOut != null;
+    }
     private Buf oitNodes;
     private Buf oitCounter;
     private int oitCapacity;
@@ -1104,6 +1121,7 @@ public final class NativePassRunner {
             initLod(arena, loader);
             initEntityShadow(arena, loader);
             initDlss(arena, loader);
+            initFlicker(arena, loader);
             shadowMap = makeImage(arena, SHADOW_RES, SHADOW_RES, 1, FMT_DEPTH,
                     VK10.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK10.VK_IMAGE_USAGE_SAMPLED_BIT
                             | VK10.VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -1331,6 +1349,10 @@ public final class NativePassRunner {
         visShadowCount = makeBuffer(arena, 16, stor | dst, hostVis);
         // Phase-2-Aufkommen (nur Statistik-Heuristik: 0 + statische Kamera = Phase-2-Raster skippen)
         phase2Count = makeBuffer(arena, 16, stor | dst, hostVis);
+        if (FLICKER) {
+            // Flacker-Zaehler (Host-lesbar, pro Frame genullt); Pipe folgt in initFlicker
+            flickerCount = makeBuffer(arena, 16, stor | dst, hostVis);
+        }
         for (int i = 0; i < FRAMES; i++) {
             uniforms[i] = makeBuffer(arena, UBO_BYTES, uni, hostVis);
             shadowUniforms[i] = makeBuffer(arena, UBO_BYTES, uni, hostVis);
@@ -2017,7 +2039,13 @@ public final class NativePassRunner {
             bloom = makeImage(arena, bw, bh, bmips, FMT_HDR, sampled | stor | dst, ca);
             bloomMipViews = new long[bmips];
             for (int i = 0; i < bmips; i++) bloomMipViews[i] = makeView(arena, bloom.image(), FMT_HDR, i, 1, ca);
-            ldr = makeImage(arena, w, h, 1, FMT_LDR, stor | src, ca);
+            ldr = makeImage(arena, w, h, 1, FMT_LDR, stor | src | sampled, ca); // sampled: Flacker-Diagnose liest mit
+            if (FLICKER) {
+                // Vorframe-LDR (sauber, nur Blit-Ziel) + Overlay-Ausgabe (nur Diagnose-Builds belegt)
+                prevLdr = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
+                flickerOut = makeImage(arena, w, h, 1, FMT_LDR, stor | src, ca);
+                flickerInit = false;
+            }
             background = makeImage(arena, w, h, 1, FMT_LDR, sampled | dst, ca);
             sceneCopy = makeImage(arena, w, h, 1, FMT_LDR, sampled | stor | dst, ca);
             oitHead = makeImage(arena, w, h, 1, VK10.VK_FORMAT_R32_UINT, stor | dst, ca);
@@ -2061,9 +2089,11 @@ public final class NativePassRunner {
         hizMipViews = new long[0];
         bloomMipViews = new long[0];
         for (Img img : new Img[]{gAlbedo, gNormal, depth, hiz, hdr, bloom, ldr, background, sceneCopy, sceneDepth,
-                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, rrDiffuse, rrSpecular, rrNormals, rrColor}) destroyImg(img);
+                history[0], history[1], taaOut, oitHead, oitFront, oitFrontDepth, motion, fgDepth, rrDiffuse, rrSpecular, rrNormals, rrColor,
+                prevLdr, flickerOut}) destroyImg(img);
         destroyOutput();
         gAlbedo = gNormal = depth = hiz = hdr = bloom = ldr = background = sceneCopy = sceneDepth = taaOut = motion = null;
+        prevLdr = flickerOut = null;
         fgDepth = fgHud = null;
         rrDiffuse = rrSpecular = rrNormals = rrColor = rrOut = null;
         fgCaptured = false;
@@ -2182,6 +2212,10 @@ public final class NativePassRunner {
         sb.append("[Schatten neu ").append(shadowRedraws).append("/Cache ").append(shadowHits)
                 .append("] [Phase2 raster ").append(phase2Runs).append("/skip ").append(phase2Skips).append("] ");
         shadowRedraws = shadowHits = phase2Runs = phase2Skips = 0;
+        if (flickerOn() && flickerCount != null && width > 0 && height > 0) {
+            double pct = 100.0 * (MemoryUtil.memGetInt(flickerCount.mapped()) & 0xFFFFFFFFL) / ((long) width * height);
+            sb.append("[Flicker ").append(String.format(java.util.Locale.ROOT, "%.2f", pct)).append("%] ");
+        }
         return sb.append("gesamt ").append(String.format(java.util.Locale.ROOT, "%.2f", total)).append(" ms").toString();
     }
 
@@ -2214,7 +2248,7 @@ public final class NativePassRunner {
                                     float exposure, long frameIndex, float[] frustum,
                                     float[] shadowFrustum, float[] shadowEye, float[] viewProjUnjittered,
                                     double camWX, double camWY, double camWZ, int originX, int originY, int originZ,
-                                    float[] projRotUnjittered) {
+                                    float[] projRotUnjittered, float[] projRotJittered) {
     }
 
     /**
@@ -2440,8 +2474,10 @@ public final class NativePassRunner {
             recordBloom(arena, cmd);
             stamp(cmd, q0 + 8);
             recordFinal(arena, cmd, slot);
+            // Flacker-Diagnose: Overlay nach flickerOut (ldr bleibt sauber), Main-Blit von dort
+            if (flickerOn()) recordFlicker(arena, cmd);
             // Ergebnis ins Main-Target, Tiefe ins Main-Depth (gleiche Reverse-Z-Projektion)
-            blit(arena, cmd, ldr.image(), mainColor.vkImage(), width, height);
+            blit(arena, cmd, (flickerOn() ? flickerOut : ldr).image(), mainColor.vkImage(), width, height);
             copyDepth(arena, cmd, depth.image(), mainDepth.vkImage());
             stamp(cmd, q0 + 9);
             fullBarrier(arena, cmd);
@@ -2736,11 +2772,17 @@ public final class NativePassRunner {
         try (Arena arena = new Arena()) {
             ByteBuffer ub = MemoryUtil.memByteBuffer(taaUniforms[slot].mapped(), TAA_UBO_BYTES);
             putMat(ub, 0, d.invViewProj());
-            // Vorframe-Matrix im relativen Raum DIESES Frames (der Render-Ursprung kann gewechselt haben)
-            float[] prevVp = prevProjRot == null ? null : new org.joml.Matrix4f().set(prevProjRot)
+            // Vorframe-Matrizen im relativen Raum DIESES Frames (der Render-Ursprung kann gewechselt haben).
+            // 64 (TAA): MIT Vorframe-Jitter – die History ist der gejitterte Vorframe, nur so trifft
+            // die Reprojektion. 224 (Motion/NGX): OHNE Jitter – reine Szenenbewegung, Jitter separat.
+            float[] prevVp = prevProjRotJ == null ? null : new org.joml.Matrix4f().set(prevProjRotJ)
+                    .translate((float) (d.originX() - prevCamW[0]), (float) (d.originY() - prevCamW[1]), (float) (d.originZ() - prevCamW[2]))
+                    .get(new float[16]);
+            float[] prevVpU = prevProjRotU == null ? null : new org.joml.Matrix4f().set(prevProjRotU)
                     .translate((float) (d.originX() - prevCamW[0]), (float) (d.originY() - prevCamW[1]), (float) (d.originZ() - prevCamW[2]))
                     .get(new float[16]);
             putMat(ub, 64, prevVp != null ? prevVp : d.viewProjUnjittered());
+            putMat(ub, 224, prevVpU != null ? prevVpU : d.viewProjUnjittered());
             ub.putFloat(128, width).putFloat(132, height);
             ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
             ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
@@ -2748,10 +2790,11 @@ public final class NativePassRunner {
             int moving = writeEntityMotion(slot);
             ub.putInt(208, moving);
             boolean fg = fgWanted(main);
-            if (fg) fgCamera = fgCameraParams(d, prevVp);
+            if (fg) fgCamera = fgCameraParams(d, prevVpU);
             if (dlaaActive()) {
                 if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null, fg, target, targetColor)) {
-                    prevProjRot = d.projRotUnjittered();
+                    prevProjRotJ = d.projRotJittered();
+                    prevProjRotU = d.projRotUnjittered();
                     prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
                     historyValid = false; // TAA-History ist veraltet, falls spaeter zurueckgeschaltet wird
                     return;
@@ -2803,7 +2846,8 @@ public final class NativePassRunner {
             slotValue[slot] = timelineValue;
             historyIndex ^= 1;
             historyValid = true;
-            prevProjRot = d.projRotUnjittered();
+            prevProjRotJ = d.projRotJittered();
+            prevProjRotU = d.projRotUnjittered();
             prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] TAA-Pass deaktiviert, native Submission aus", t);
@@ -3308,7 +3352,7 @@ public final class NativePassRunner {
     private void initImages(Arena arena, VkCommandBuffer cmd) {
         int color = VK10.VK_IMAGE_ASPECT_COLOR_BIT;
         for (Img img : new Img[]{gAlbedo, gNormal, hiz, hdr, bloom, ldr, background, sceneCopy, history[0], history[1], taaOut,
-                oitHead, oitFront, oitFrontDepth, motion, rrDiffuse, rrSpecular, rrNormals, rrColor}) {
+                oitHead, oitFront, oitFrontDepth, motion, rrDiffuse, rrSpecular, rrNormals, rrColor, prevLdr, flickerOut}) {
             if (img != null) toGeneral(arena, cmd, img.image(), img.mips(), color);
         }
         toGeneral(arena, cmd, depth.image(), 1, VK10.VK_IMAGE_ASPECT_DEPTH_BIT);
@@ -3372,9 +3416,55 @@ public final class NativePassRunner {
         VK10.vkCmdFillBuffer(cmd, visMeshletCount.buffer(), 0, 4, 0);
         VK10.vkCmdFillBuffer(cmd, visShadowCount.buffer(), 0, 4, 0);
         VK10.vkCmdFillBuffer(cmd, phase2Count.buffer(), 0, 4, 0);
+        if (flickerOn()) VK10.vkCmdFillBuffer(cmd, flickerCount.buffer(), 0, 4, 0);
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT, VK10.VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                 VK10.VK_ACCESS_TRANSFER_WRITE_BIT,
                 VK10.VK_ACCESS_SHADER_READ_BIT | VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_INDIRECT_COMMAND_READ_BIT);
+    }
+
+    /** Flacker-Diagnose-Pipeline (nur Diagnose-Builds; Fehler -> still aus, nie Build-/Init-Bruch). */
+    private void initFlicker(Arena arena, SlangShaderLoader loader) {
+        flickerAvailable = false;
+        if (!FLICKER) return;
+        try {
+            int C = VK10.VK_SHADER_STAGE_COMPUTE_BIT;
+            layoutFlicker = pipelineLayout(arena, setLayout(arena,
+                    new int[][]{{0, SI}, {1, SI}, {2, ST}, {3, SB}}, C), C, 16);
+            pipeFlicker = computePipe(arena, layoutFlicker, module(arena, loader, "flickerOverlay"));
+            flickerAvailable = pipeFlicker != 0L;
+            LOG.info("[vulkanfish] Flacker-Diagnose {} (Modus {}, -Dvulkanfish.flickerMode=0/1)",
+                    flickerAvailable ? "bereit" : "nicht verfuegbar", FLICKER_MODE);
+        } catch (Throwable t) {
+            LOG.warn("[vulkanfish] Flacker-Diagnose aus ({})", t.toString());
+            flickerAvailable = false;
+        }
+    }
+
+    /**
+     * Flacker-Overlay nach dem Final-Pass: Vorframe-Differenz als Heatmap nach flickerOut
+     * (ldr bleibt sauber und wird danach als naechstes prevLdr weggeblittet).
+     */
+    private void recordFlicker(Arena arena, VkCommandBuffer cmd) {
+        if (!flickerInit) {
+            // Erstes Frame: prev ohne Overlay initialisieren (sonst Muell-Differenz-Blitz)
+            blit(arena, cmd, ldr.image(), prevLdr.image(), width, height);
+            flickerInit = true;
+            return;
+        }
+        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK10.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                VK10.VK_ACCESS_SHADER_WRITE_BIT | VK10.VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK10.VK_ACCESS_SHADER_READ_BIT | VK10.VK_ACCESS_SHADER_WRITE_BIT);
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, pipeFlicker);
+        push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_COMPUTE, layoutFlicker,
+                W.si(0, ldr.view()), W.si(1, prevLdr.view()), W.st(2, flickerOut.view()), W.sb(3, flickerCount));
+        ByteBuffer pc = arena.malloc(16);
+        pc.putInt(0, FLICKER_MODE).putInt(4, width).putInt(8, height).putInt(12, 0);
+        VK10.vkCmdPushConstants(cmd, layoutFlicker, VK10.VK_SHADER_STAGE_COMPUTE_BIT, 0, pc);
+        VK10.vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+        barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK10.VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK10.VK_ACCESS_SHADER_WRITE_BIT, VK10.VK_ACCESS_TRANSFER_READ_BIT);
+        blit(arena, cmd, ldr.image(), prevLdr.image(), width, height); // sauber weglegen (Overlay ging nach flickerOut)
     }
 
     private void recordHiz(Arena arena, VkCommandBuffer cmd) {
