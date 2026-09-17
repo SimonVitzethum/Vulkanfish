@@ -2780,7 +2780,8 @@ public final class NativePassRunner {
             putMat(ub, 224, prevVpU != null ? prevVpU : d.viewProjUnjittered());
             ub.putFloat(128, width).putFloat(132, height);
             ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
-            ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
+            ub.putFloat(140, 0.25f); // Nachschaerfen (gleicht die TAA-Weichheit aus; 0.45 ringte an
+            // Hell/Dunkel-Kanten – Sonne-oben/Schatten-Seite, Laub-vor-Himmel, Savanna-Kontrast – im Jitter-Takt)
             putMat(ub, 144, d.viewProjUnjittered());
             int moving = writeEntityMotion(slot);
             ub.putInt(208, moving);
