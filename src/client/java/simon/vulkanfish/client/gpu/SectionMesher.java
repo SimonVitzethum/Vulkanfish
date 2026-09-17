@@ -591,6 +591,7 @@ final class SectionMesher {
             float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE, maxZ = -Float.MAX_VALUE;
             float cutoff = Float.MAX_VALUE;
             boolean foliage = false;
+            float windMax = 0.0f;
             int axis = axisKey[order[mStart[m]]];
             for (int q = 0; q < mCount[m]; q++) {
                 int src = order[mStart[m] + q];
@@ -598,6 +599,10 @@ final class SectionMesher {
                 // Material steht im Alpha-Byte (low 4 Bit, siehe writeVertex): 1..4 = Laub/Pflanzen/Ranken
                 int mat = (words[base + 3] >>> 24) & 0xF;
                 if (mat >= MAT_LEAVES && mat <= MAT_VINE) foliage = true;
+                // Wind-Amplitude je Material (terrain_common.slang): Oberkanten 0.10, Laub/Ranken
+                // 0.035, mal Regenfaktor bis 2.5, Hüllkurve ~1.6x -> Puffer 4x für den Ebenen-Test
+                if (mat == MAT_PLANT_TOP) windMax = Math.max(windMax, 0.10f);
+                else if (mat == MAT_LEAVES || mat == MAT_VINE) windMax = Math.max(windMax, 0.035f);
                 for (int w = 0; w < WORDS_PER_QUAD; w++) vb.putInt(words[base + w]);
                 for (int v = 0; v < 4; v++) {
                     float x = pos[src * 12 + v * 3];
@@ -626,7 +631,10 @@ final class SectionMesher {
                 planes[m * 4] = AXES[axis][0];
                 planes[m * 4 + 1] = AXES[axis][1];
                 planes[m * 4 + 2] = AXES[axis][2];
-                planes[m * 4 + 3] = cutoff;
+                // Wind schwingt nur horizontal (XZ): reale Seiten-Ebenen wandern aus dem statischen
+                // Cutoff -> Cull-Popping an Laub-/Pflanzen-Seiten. Puffer pro Maximal-Amplitude
+                // (Ober-/Unterseiten unberührt, Nicht-Laub unverändert -> Overdraw nur dort).
+                planes[m * 4 + 3] = cutoff - 4.0f * windMax;
             }
         }
         vb.flip();

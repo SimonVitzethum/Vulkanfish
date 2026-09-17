@@ -133,7 +133,7 @@ public final class NativePassRunner {
     private static final String[] PASS_NAMES = {"upload", "rt-bau", "hiz", "cull", "schatten", "gbuffer", "licht", "bloom", "final"};
     private static final int TS_TERRAIN = PASS_NAMES.length + 1;
     private static final int TS_PER_FRAME = TS_TERRAIN + 7; // + Wasser-Zwischenstempel (3) // + Wasser/Glas (Start/Ende) + TAA (Start/Ende)
-    private static final int TAA_UBO_BYTES = 224; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS) + Entity-Anzahl
+    private static final int TAA_UBO_BYTES = 288; // + aktuelle Matrix ohne Jitter (Bewegungsvektoren, DLSS) + Entity-Anzahl + Vorframe-Matrix ohne Jitter (fuer 64: dort liegt die MIT Jitter)
     private static final int MAX_MOVING_ENTITIES = 256;
     /** Periode der gewickelten Weltlage fuer Shader-Rauschen (ein unsichtbarer Sprung alle 4096 Bloecke). */
     private static final int WORLD_WRAP = 4096;
@@ -211,7 +211,11 @@ public final class NativePassRunner {
     private int historyIndex;
     private boolean historyValid;
     // Vorframe fuer die TAA-Reprojektion: Projektion*Rotation (ohne Translation) + Welt-Kamera
-    private float[] prevProjRot;
+    // Vorframe-Rotationen (TAA-Reprojektion + Motion/NGX): GEJITTERT fuers TAA (die History
+    // enthaelt den gejitterten Vorframe!), UNGEJITTERT fuer Bewegungsvektoren/FrameGen (Jitter
+    // bekommen die separat). Verwechslung = globale History-Ablehnung = Kantenflackern!
+    private float[] prevProjRotJ;
+    private float[] prevProjRotU;
     private double[] prevCamW;
     private FrameUniformsData frameData; // Daten des aktuellen Frames (fuer TAA)
     private int waterSlot = -1; // Slot, dessen Terrain-Frame gerade aufgenommen wurde (Wasser folgt)
@@ -1178,12 +1182,20 @@ public final class NativePassRunner {
         // Block-Atlas: Pixel-Look wie Vanilla (Nearest-Vergroesserung), aber lineare
         // Verkleinerung + lineare Mips: Nearest-Min/Mip springt zwischen Mip-Stufen
         // (sichtbares Kantenflimmern an schraegen/flachen Blickwinkeln).
+        // Anisotropie best-effort (Seiten bei flachem Winkel!): Falls das Device sie nicht
+        // hergibt, faellt die Erstellung fehl -> plain ohne (nie Init-Bruch).
         si.magFilter(VK10.VK_FILTER_NEAREST).minFilter(VK10.VK_FILTER_LINEAR)
                 .mipmapMode(VK10.VK_SAMPLER_MIPMAP_MODE_LINEAR);
-        check(VK10.vkCreateSampler(dev, si, null, p), "atlasSampler");
+        si.anisotropyEnable(true).maxAnisotropy(4.0f);
+        if (VK10.vkCreateSampler(dev, si, null, p) != VK10.VK_SUCCESS) {
+            LOG.info("[vulkanfish] Atlas ohne Anisotropie (Device lehnt ab)");
+            si.anisotropyEnable(false).maxAnisotropy(1.0f);
+            check(VK10.vkCreateSampler(dev, si, null, p), "atlasSampler");
+        }
         atlasSampler = atlasSamplerBase = p.get(0);
-        // Schatten: Hardware-Vergleich + bilinear = 2x2-PCF pro Tap
+        // Schatten: Hardware-Vergleich + bilinear = 2x2-PCF pro Tap (kein Aniso: mit Compare illegal)
         si.magFilter(VK10.VK_FILTER_LINEAR).minFilter(VK10.VK_FILTER_LINEAR).maxLod(0)
+                .anisotropyEnable(false).maxAnisotropy(1.0f)
                 .compareEnable(true).compareOp(VK10.VK_COMPARE_OP_LESS_OR_EQUAL);
         check(VK10.vkCreateSampler(dev, si, null, p), "shadowSampler");
         shadowSampler = p.get(0);
@@ -2232,7 +2244,7 @@ public final class NativePassRunner {
                                     float exposure, long frameIndex, float[] frustum,
                                     float[] shadowFrustum, float[] shadowEye, float[] viewProjUnjittered,
                                     double camWX, double camWY, double camWZ, int originX, int originY, int originZ,
-                                    float[] projRotUnjittered) {
+                                    float[] projRotUnjittered, float[] projRotJittered) {
     }
 
     /**
@@ -2755,11 +2767,17 @@ public final class NativePassRunner {
         try (Arena arena = new Arena()) {
             ByteBuffer ub = MemoryUtil.memByteBuffer(taaUniforms[slot].mapped(), TAA_UBO_BYTES);
             putMat(ub, 0, d.invViewProj());
-            // Vorframe-Matrix im relativen Raum DIESES Frames (der Render-Ursprung kann gewechselt haben)
-            float[] prevVp = prevProjRot == null ? null : new org.joml.Matrix4f().set(prevProjRot)
+            // Vorframe-Matrizen im relativen Raum DIESES Frames (der Render-Ursprung kann gewechselt haben).
+            // 64 (TAA): MIT Vorframe-Jitter – die History ist der gejitterte Vorframe, nur so trifft
+            // die Reprojektion. 224 (Motion/NGX): OHNE Jitter – reine Szenenbewegung, Jitter separat.
+            float[] prevVp = prevProjRotJ == null ? null : new org.joml.Matrix4f().set(prevProjRotJ)
+                    .translate((float) (d.originX() - prevCamW[0]), (float) (d.originY() - prevCamW[1]), (float) (d.originZ() - prevCamW[2]))
+                    .get(new float[16]);
+            float[] prevVpU = prevProjRotU == null ? null : new org.joml.Matrix4f().set(prevProjRotU)
                     .translate((float) (d.originX() - prevCamW[0]), (float) (d.originY() - prevCamW[1]), (float) (d.originZ() - prevCamW[2]))
                     .get(new float[16]);
             putMat(ub, 64, prevVp != null ? prevVp : d.viewProjUnjittered());
+            putMat(ub, 224, prevVpU != null ? prevVpU : d.viewProjUnjittered());
             ub.putFloat(128, width).putFloat(132, height);
             ub.putInt(136, historyValid && prevVp != null ? 1 : 0);
             ub.putFloat(140, 0.45f); // Nachschaerfen (gleicht die TAA-Weichheit aus)
@@ -2767,10 +2785,11 @@ public final class NativePassRunner {
             int moving = writeEntityMotion(slot);
             ub.putInt(208, moving);
             boolean fg = fgWanted(main);
-            if (fg) fgCamera = fgCameraParams(d, prevVp);
+            if (fg) fgCamera = fgCameraParams(d, prevVpU);
             if (dlaaActive()) {
                 if (recordDlaa(arena, slot, mainColor, colorView, main, depthView, prevVp != null, fg, target, targetColor)) {
-                    prevProjRot = d.projRotUnjittered();
+                    prevProjRotJ = d.projRotJittered();
+                    prevProjRotU = d.projRotUnjittered();
                     prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
                     historyValid = false; // TAA-History ist veraltet, falls spaeter zurueckgeschaltet wird
                     return;
@@ -2822,7 +2841,8 @@ public final class NativePassRunner {
             slotValue[slot] = timelineValue;
             historyIndex ^= 1;
             historyValid = true;
-            prevProjRot = d.projRotUnjittered();
+            prevProjRotJ = d.projRotJittered();
+            prevProjRotU = d.projRotUnjittered();
             prevCamW = new double[]{d.camWX(), d.camWY(), d.camWZ()};
         } catch (Throwable t) {
             LOG.warn("[vulkanfish] TAA-Pass deaktiviert, native Submission aus", t);

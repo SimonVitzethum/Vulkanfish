@@ -13,7 +13,7 @@
 struct TaaUniforms
 {
     float4x4 invViewProj;   // aktueller Frame (mit Jitter)
-    float4x4 prevViewProj;  // Vorframe OHNE Jitter (History liegt auf Pixelzentren)
+    float4x4 prevViewProj;  // Vorframe MIT dessen Jitter (History = gejitterter Vorframe!)
     float2 screenSize;
     uint historyValid;
     float sharpness;

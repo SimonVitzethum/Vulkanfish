@@ -224,4 +224,17 @@ float3 tonemap(float3 c, float exposure)
     return saturate(m);
 }
 
+// ---------- Geordnetes Dithering (4x4 Bayer) ----------
+// Stabile Alternative zum harten Alpha-Cutoff an Cutout-Kanten: statisches Korn statt
+// binaerem Poppen (ohne TAA steht das Muster still, mit TAA wird es weggemittelt).
+float bayer4(float2 p)
+{
+    uint2 q = uint2(p) & 3u;
+    uint i = q.x + q.y * 4u;
+    // Zeilen (0,8,2,10 / 12,4,14,6 / 3,11,1,9 / 15,7,13,5) als Nibbles, Zeile 0 unten
+    uint lo = 0x6E4CA280u, hi = 0x5D7F91B3u;
+    uint m = i < 8u ? lo : hi;
+    return float((m >> ((i & 7u) * 4u)) & 15u) / 16.0;
+}
+
 #endif

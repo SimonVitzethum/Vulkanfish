@@ -133,6 +133,10 @@ public final class FrameDataCapture {
             float[] vp = viewProj.get(new float[16]); // JOML: column-major (wie das Shader-Layout)
             Matrix4f projRotUnj = new Matrix4f(haveProjection ? LEVEL_PROJECTION_UNJITTERED : cam.projectionMatrix)
                     .mul(new Matrix4f().set(cam.viewRotationMatrix));
+            // Gejitterte Variante (LEVEL_PROJECTION traegt den Jitter dieses Frames): Basis der
+            // TAA-Reprojektion – die History enthaelt den GEJITTERTEN Vorframe, nicht Pixelzentren!
+            Matrix4f projRotJ = new Matrix4f(haveProjection ? LEVEL_PROJECTION : cam.projectionMatrix)
+                    .mul(new Matrix4f().set(cam.viewRotationMatrix));
             float[] vpUnjittered = new Matrix4f(projRotUnj).translate(-rx, -ry, -rz).get(new float[16]);
             float[] invVp = new Matrix4f(viewProj).invert().get(new float[16]);
 
@@ -202,7 +206,8 @@ public final class FrameDataCapture {
                     skyRgb, renderDist, fog, rain, thunder, shadows ? SHADOW_DISTANCE : 0.0f,
                     dimension, fogType, moon, caveSmoothed, exposure, frameIndex,
                     extractFrustum(transpose(vp)), shadowFrustum, shadowEye, vpUnjittered,
-                    cam.pos.x, cam.pos.y, cam.pos.z, ox, oy, oz, projRotUnj.get(new float[16]));
+                    cam.pos.x, cam.pos.y, cam.pos.z, ox, oy, oz, projRotUnj.get(new float[16]),
+                    projRotJ.get(new float[16]));
         } catch (Throwable th) {
             if (!warned) {
                 warned = true;

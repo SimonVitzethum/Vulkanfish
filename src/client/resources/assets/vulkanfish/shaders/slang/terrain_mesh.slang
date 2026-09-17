@@ -69,8 +69,14 @@ struct GBufferOut
 GBufferOut terrainFrag(FragIn input)
 {
     float4 tex = gAtlas.Sample(gAtlasSamp, input.uv);
-    if (tex.a < 0.5)
-        discard; // Cutout wie Vanilla (Blaetter, Gras, Blumen)
+    // Cutout wie Vanilla (Blaetter, Gras, Blumen), aber mit geordnetem Dither statt hartem
+    // Cutoff: harte 0.5-Schwelle auf gefiltertem Alpha laesst Kanten pro Subpixel/Jitter/Mip
+    // binaer kippen (Flackern). Dither-Anteil waechst erst mit der Mip-Stufe (nah = Vanilla,
+    // fern = stabiles Korn statt Poppen; TAA mittelt es weg, ohne TAA steht das Muster still).
+    float lod = gAtlas.CalculateLevelOfDetail(gAtlasSamp, input.uv);
+    float spread = clamp((lod - 1.0) * 0.15, 0.0, 0.35);
+    if (tex.a + (bayer4(input.pos.xy) - 0.5) * spread < 0.5)
+        discard;
     GBufferOut o;
     o.albedoMat = float4(tex.rgb * input.color.rgb, float(input.mat) / 255.0);
     o.normalLight = float4(octEncode(normalize(input.normal)), saturate(input.light));
@@ -125,7 +131,12 @@ struct ShadowFragIn
 [shader("fragment")]
 void terrainShadowFrag(ShadowFragIn input)
 {
-    if (gAtlas.SampleLevel(gAtlasSamp, input.uv, 0).a < 0.5)
+    // Dieselbe Cutout-Maske wie im Hauptpass (Mips + Dither): sonst werfen Pixel Schatten,
+    // die die Kamera verwirft und umgekehrt (Licht/Schatten-Pumpen an Erosionskanten).
+    float a = gAtlas.Sample(gAtlasSamp, input.uv).a;
+    float lod = gAtlas.CalculateLevelOfDetail(gAtlasSamp, input.uv);
+    float spread = clamp((lod - 1.0) * 0.15, 0.0, 0.35);
+    if (a + (bayer4(input.pos.xy) - 0.5) * spread < 0.5)
         discard;
 }
 
