@@ -851,18 +851,28 @@ public final class LodManager {
 
     // ---------- Quellen ----------
 
+    private double lastSortX = Double.NaN, lastSortZ = Double.NaN;
+
     private void processRequests(double camX, double camZ) {
         if (requestQueue.isEmpty()) return;
-        // Periodisch kompaktieren + nach Entfernung sortieren (nicht jeden Frame 200k Eintraege)
-        if (requestHead >= requestQueue.size() || frame % 120 == 0 || requestQueue.size() > requestSortedSize * 2 + 256) {
+        // Kompaktieren bei Bedarf, Sortieren nur bei Bewegung/Zuwachs (nicht jeden Frame 200k
+        // Eintraege): bei statischer Kamera aendert sich die Entfernungsordnung nicht – mit
+        // grossen Bobby-Mengen sparte das sonst alle ~120 Frames einen vollen Re-Sort.
+        if (requestHead >= requestQueue.size() || requestQueue.size() > requestSortedSize * 2 + 256 || frame % 120 == 0) {
             if (requestHead > 0) {
                 requestQueue.removeElements(0, Math.min(requestHead, requestQueue.size()));
                 requestHead = 0;
             }
-            final double sx = camX, sz = camZ;
-            sortByDistance(requestQueue, k -> chunkDist(k, sx, sz));
-            requestSortedSize = requestQueue.size();
             if (requestQueue.isEmpty()) return;
+            double moved = Double.isNaN(lastSortX) ? Double.POSITIVE_INFINITY
+                    : Math.abs(camX - lastSortX) + Math.abs(camZ - lastSortZ);
+            if (moved > 16.0 || requestQueue.size() > requestSortedSize * 2 + 256) {
+                final double sx = camX, sz = camZ;
+                sortByDistance(requestQueue, k -> chunkDist(k, sx, sz));
+                requestSortedSize = requestQueue.size();
+                lastSortX = camX;
+                lastSortZ = camZ;
+            }
         }
         long t0 = System.nanoTime();
         int liveCopies = 0;
@@ -879,8 +889,11 @@ public final class LodManager {
                     liveCopies++;
                     e.state = STATE_PENDING;
                     submitSections(copySections(live), cx, cz, LodColumn.SOURCE_LIVE, e, chunkDist(key, camX, camZ));
+                } else if (pendingStored.get() >= MAX_STORED_IN_FLIGHT) {
+                    break; // Rueckstau: Parsen hinkt (grosse Bobby-Mengen); Eintrag bleibt an der Spitze
                 } else {
                     e.state = STATE_PENDING;
+                    pendingStored.incrementAndGet();
                     requestStored(e, cx, cz, chunkDist(key, camX, camZ));
                 }
             }
@@ -911,9 +924,23 @@ public final class LodManager {
     }
 
     /** Bobby-Cache, dann Spielstand (asynchron, Worker), sonst Generator bzw. keine Daten. */
+    // Rueckstau-Begrenzung (pendingStored): Spawn (Requests, bis ~12K/s) ist weit schneller als
+    // Parsen+Bauen (~600/s). Ohne Cap stuenden sich bei grossen Bobby-Mengen hunderttausende
+    // Chunk-Tags (GBs) in der Parse-Warteschlange. Live-Kopien zaehlen nie dazu (Nahfeld
+    // bleibt reaktionsschnell); Ueberlauf wartet einen Frame (Eintrag bleibt an der Spitze).
+    private final java.util.concurrent.atomic.AtomicInteger pendingStored = new java.util.concurrent.atomic.AtomicInteger();
+    private static final int MAX_STORED_IN_FLIGHT = 256;
+
     private void requestStored(ChunkEntry e, int cx, int cz, double dist) {
         ChunkPos pos = new ChunkPos(cx, cz);
-        java.util.concurrent.CompletableFuture<Optional<CompoundTag>> bobbyTag = bobby.load(level, pos);
+        java.util.concurrent.CompletableFuture<Optional<CompoundTag>> bobbyTag;
+        try {
+            bobbyTag = bobby.load(level, pos);
+        } catch (Throwable t) {
+            pendingStored.decrementAndGet(); // synchron fehlgeschlagen: nichts ausstehend
+            noData(e, cx, cz, dist);
+            return;
+        }
         bobbyTag.whenComplete((tag, err) -> {
             if (err == null && tag != null && tag.isPresent()) {
                 WorkerPool.submit(WorkerPool.PRIO_LOD + (long) dist, () -> parseAndBuild(tag.get(), cx, cz, LodColumn.SOURCE_BOBBY, e, dist, false));
@@ -929,12 +956,14 @@ public final class LodManager {
         ClientLevel lvl = level;
         ServerLevel sl = server != null && lvl != null ? server.getLevel(lvl.dimension()) : null;
         if (sl == null) {
+            pendingStored.decrementAndGet(); // ohne Spielstand: Anfrage beendet
             noData(e, cx, cz, dist);
             return;
         }
         try {
             sl.getChunkSource().chunkMap.read(new ChunkPos(cx, cz)).whenComplete((tag, err) -> {
                 if (err != null || tag == null || tag.isEmpty()) {
+                    pendingStored.decrementAndGet(); // nichts gespeichert: Anfrage beendet
                     noData(e, cx, cz, dist);
                     return;
                 }
@@ -948,6 +977,7 @@ public final class LodManager {
                 });
             });
         } catch (Throwable t) {
+            pendingStored.decrementAndGet(); // Lesefehler: Anfrage beendet
             noData(e);
         }
     }
@@ -987,6 +1017,8 @@ public final class LodManager {
             buildColumn(sections, cx, cz, source, e);
         } catch (Throwable t) {
             noData(e);
+        } finally {
+            pendingStored.decrementAndGet(); // Anfrage roundtrip-beendet (Erfolg wie alle noData-Wege)
         }
     }
 
