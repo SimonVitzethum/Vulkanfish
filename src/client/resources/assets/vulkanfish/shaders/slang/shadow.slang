@@ -27,9 +27,9 @@ float sampleShadowMap(Texture2D<float> map, SamplerComparisonState cmp, FrameUni
         return 1.0;
     uint sw, sh, levels;
     map.GetDimensions(0, sw, sh, levels);
-    // Zeitlich stabiles PCF ohne Rauschen: Kreuz aus 5 Hardware-Vergleichen (je 2x2
-    // bilinear) im Abstand von 2,0 Texeln (~Weichheit des frueheren 3x3 zu 9-Tap-Kosten
-    // von 5). Mit TAA-Akkumulation visuell identisch, bei Sonne in Bewegung ruhiger.
+    // Zeitlich stabiles PCF ohne Rauschen: 3x3 Hardware-Vergleiche (je 2x2 bilinear)
+    // im Binomial-Gewicht ueber ~5x5 Texel. Das schmälere Kreuz sparte Taps, zeigte aber
+    // Snap-Stufen der Schattenkarte (Lichtrotation!) zu hart – Weichheit verdeckt sie.
     float2 texel = 1.0 / float2(sw, sh);
     // Slope-skalierter Tiefen-Bias: streifende Flaechen (ndl klein) brauchen mehr Abstand
     // als zugewandte, sonst oszillieren sie bei wandernder Sonne zwischen Licht und Schatten
@@ -37,13 +37,18 @@ float sampleShadowMap(Texture2D<float> map, SamplerComparisonState cmp, FrameUni
     float lightFade = length(f.lightDir);
     float slope = 1.0 - abs(dot(normalize(offsetDir + 1e-6), f.lightDir / max(lightFade, 1e-4)));
     float ref = sc.z - 0.0004 - saturate(slope) * 0.002;
-    float2 tap = texel * 2.0; // breiteres Kreuz (~3x3-Weichheit) gegen Kanten-Kriechen bei Sonne in Bewegung
-    float centerTap = map.SampleCmpLevelZero(cmp, uv, ref) * 4.0;
-    float arms = map.SampleCmpLevelZero(cmp, uv + float2(1.0, 0.0) * tap, ref)
-               + map.SampleCmpLevelZero(cmp, uv - float2(1.0, 0.0) * tap, ref)
-               + map.SampleCmpLevelZero(cmp, uv + float2(0.0, 1.0) * tap, ref)
-               + map.SampleCmpLevelZero(cmp, uv - float2(0.0, 1.0) * tap, ref);
-    float lit = (centerTap + arms * 2.0) / 12.0;
+    float lit = 0.0;
+    [unroll]
+    for (int y = -1; y <= 1; y++)
+    {
+        [unroll]
+        for (int x = -1; x <= 1; x++)
+        {
+            float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0); // Binomial 1-2-1: weicher Rand
+            lit += map.SampleCmpLevelZero(cmp, uv + float2(x, y) * texel * 1.5, ref) * w;
+        }
+    }
+    lit /= 16.0;
     // Rand der Schattendistanz weich ausblenden
     return lerp(lit, 1.0, saturate((length(center) - 0.85) / 0.15));
 }

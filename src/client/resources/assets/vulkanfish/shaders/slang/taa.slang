@@ -30,8 +30,9 @@ float3 fromYCoCg(float3 c)
     return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
-// Catmull-Rom mit 5 bilinearen Taps (Ecken weggelassen): schaerfer als bilinear
-float3 sampleHistory(float2 uv, float2 size)
+// Catmull-Rom mit 5 bilinearen Taps (Ecken weggelassen): schaerfer als bilinear.
+// Als float4 (Farbe + Tiefe im Alpha): die Tiefe speist den Disocclusion-Test unten.
+float4 sampleHistory4(float2 uv, float2 size)
 {
     float2 pos = uv * size;
     float2 c = floor(pos - 0.5) + 0.5;
@@ -44,11 +45,11 @@ float3 sampleHistory(float2 uv, float2 size)
     float2 tc0 = (c - 1.0) / size;
     float2 tc3 = (c + 2.0) / size;
     float2 tc12 = (c + w2 / w12) / size;
-    float3 r = gHistory.SampleLevel(gLinear, float2(tc12.x, tc0.y), 0).rgb * (w12.x * w0.y)
-             + gHistory.SampleLevel(gLinear, float2(tc0.x, tc12.y), 0).rgb * (w0.x * w12.y)
-             + gHistory.SampleLevel(gLinear, tc12, 0).rgb * (w12.x * w12.y)
-             + gHistory.SampleLevel(gLinear, float2(tc3.x, tc12.y), 0).rgb * (w3.x * w12.y)
-             + gHistory.SampleLevel(gLinear, float2(tc12.x, tc3.y), 0).rgb * (w12.x * w3.y);
+    float4 r = gHistory.SampleLevel(gLinear, float2(tc12.x, tc0.y), 0) * (w12.x * w0.y)
+             + gHistory.SampleLevel(gLinear, float2(tc0.x, tc12.y), 0) * (w0.x * w12.y)
+             + gHistory.SampleLevel(gLinear, tc12, 0) * (w12.x * w12.y)
+             + gHistory.SampleLevel(gLinear, float2(tc3.x, tc12.y), 0) * (w3.x * w12.y)
+             + gHistory.SampleLevel(gLinear, float2(tc12.x, tc3.y), 0) * (w12.x * w3.y);
     float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
     return max(r / wsum, 0.0);
 }
@@ -102,7 +103,12 @@ void taaResolve(in uint3 tid : SV_DispatchThreadID)
     if (u.historyValid != 0 && pc.w > 0.0)
     {
         float2 cuv = clamp(prevUv, 0.0, 1.0);
-        float3 hist = toYCoCg(sampleHistory(cuv, u.screenSize));
+        float4 hist4 = sampleHistory4(cuv, u.screenSize);
+        float3 hist = toYCoCg(hist4.rgb);
+        // Disocclusion-Test ueber die mitgespeicherte Vorframe-Tiefe (Reverse-Z, relativ):
+        // neu sichtbar Gewordenes bekommt Current (kein Ghosting), stabiles Vertrauen History.
+        // Fixt auch duenne Silhouetten: falsch reprojizierte History faellt hier raus statt zu flackern.
+        float disocc = saturate(abs(nearest - hist4.a) / max(max(nearest, hist4.a), 1e-4) * 20.0);
         // Varianz-Clipping: History auf die Farbverteilung der aktuellen Nachbarschaft ziehen
         float gamma = lerp(1.25, 0.9, saturate(motionPx / 12.0));
         float3 lo = m1 - gamma * sigma, hi = m1 + gamma * sigma;
@@ -111,10 +117,10 @@ void taaResolve(in uint3 tid : SV_DispatchThreadID)
         float3 ratio = abs(off / ext);
         float maxR = max(ratio.x, max(ratio.y, ratio.z));
         if (maxR > 1.0) hist = center + off / maxR;
-        float alpha = lerp(0.08, 0.3, saturate(motionPx / 10.0));
+        float alpha = max(lerp(0.08, 0.3, saturate(motionPx / 10.0)), disocc);
         result = fromYCoCg(lerp(hist, toYCoCg(cur), alpha));
     }
-    gHistoryOut[p] = float4(result, 1.0);
+    gHistoryOut[p] = float4(result, nearest);
     // Nachschaerfen nur fuer die Anzeige (nicht in die History: sonst Ringing-Aufschaukeln)
     float3 sharp = result + (result - meanRgb) * u.sharpness;
     gOut[p] = float4(saturate(sharp), 1.0);
