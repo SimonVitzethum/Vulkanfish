@@ -57,7 +57,7 @@ public final class LodManager {
     private static final long SCHEDULE_BUDGET_NS = 1_000_000L;  // ... und fuer die Knotenpruefung
     private static final int RECHECK_FRAMES = 15;               // wartende Knoten nur alle N Frames pruefen
     private static final int MAX_LIVE_COPIES_PER_FRAME = 24;
-    private static final long UPLOAD_BYTES_PER_FRAME = 6L << 20;
+    private static final long UPLOAD_BYTES_PER_FRAME = 12L << 20; // LOD-Backfill: PCIe schafft Vielfaches, Framespitze ~0,5 ms
     // GPU-Kapazitaet des Fernfelds (Quads a 8 Byte, Meshlets a 64 Byte)
     public static final int QUAD_BYTES = 8;
     public static final int MAX_QUADS = 32 << 20;

@@ -124,7 +124,7 @@ public final class NativePassRunner {
     public static final int TARGET_LOD_CLUSTERS = 6;
     private static final int UBO_BYTES = 560;
     private static final int FRAMES = 3;
-    private static final long STAGING_BYTES = 16L << 20;
+    private static final long STAGING_BYTES = 32L << 20; // Host-sichtbarer Upload-Ring (PCIe: 12 MB/Frame sind ~5% davon)
     private static final long WAIT_TIMEOUT_NS = 2_000_000_000L;
     private static final long STAGE2_ALL_COMMANDS = 0x00010000L;
     public static final int SHADOW_RES = 2048;
