@@ -335,10 +335,17 @@ LodGBufferOut lodFrag(LodFragIn input)
     if (size.x > 0.0 && input.spriteLuma > 0.01)
     {
         float2 f = frac(input.uvw);
-        float4 t = gAtlas.SampleGrad(gAtlasSamp, input.rect.xy + f * size, dx, dy);
+        float2 suv = input.rect.xy + f * size;
+        float4 t = gAtlas.SampleGrad(gAtlasSamp, suv, dx, dy);
         float l = dot(t.rgb, float3(0.2126, 0.7152, 0.0722));
         l = lerp(input.spriteLuma * 0.55, l, saturate(t.a * 2.0 - 0.5)); // Loecher (Laub): dunkler Innenraum
-        color *= clamp(l / input.spriteLuma, 0.0, 2.5);
+        // Detail nur solange es stabil ist: an Mip-Uebergaengen springt l zwischen den Stufen
+        // (Jitter/Wind/Bewegung) und das Verhaeltnis pumpt – bei kontrastreichen Sprites
+        // (Savanna-Gelb auf Dreck!) als Flackern sichtbar, bei matten (River) unsichtbar.
+        // Mip 0-1 voll, ab Mip 4 reiner Durchschnitt (dort ist er das eh schon).
+        float lod = gAtlas.CalculateLevelOfDetail(gAtlasSamp, suv);
+        float detailW = clamp(1.0 - lod * 0.25, 0.0, 1.0);
+        color *= lerp(1.0, clamp(l / input.spriteLuma, 0.0, 2.5), detailW);
     }
     // Pixel in einer vom Nahfeld gezeichneten Section: dort gilt das Nahfeld (keine Doppelflaechen,
     // keine Loecher an Chunk-Grenzen, die ein Quad nur teilweise ueberdeckt). Nach den Ableitungen.

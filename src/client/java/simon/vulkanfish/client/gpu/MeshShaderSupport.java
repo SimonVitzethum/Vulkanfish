@@ -80,6 +80,10 @@ public final class MeshShaderSupport {
             // Glas/Eis: der Fragment-Shader haengt Fragmente per Atomik in Pro-Pixel-Listen
             VulkanFeature fragmentStores = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
                     "fragmentStoresAndAtomics", VkPhysicalDeviceFeatures.FRAGMENTSTORESANDATOMICS);
+            // Atlas-Anisotropie gegen Mip-Flimmern an Seiten (best-effort: fehlt sie, nimmt der
+            // Sampler den plain-Pfad; ohne ist gerade Savanna-Gelb auf Dreck sichtbar unruhig)
+            VulkanFeature aniso = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
+                    "samplerAnisotropy", VkPhysicalDeviceFeatures.SAMPLERANISOTROPY);
             // GPU-Worldgen: Noise-Koordinaten in double wie Vanilla
             VulkanFeature float64 = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
                     "shaderFloat64", VkPhysicalDeviceFeatures.SHADERFLOAT64);
@@ -114,6 +118,11 @@ public final class MeshShaderSupport {
                 }
                 if (storageRead.get(query)) features.add(storageRead);
                 if (storageWrite.get(query)) features.add(storageWrite);
+                if (aniso.get(query)) {
+                    features.add(aniso);
+                } else {
+                    LOG.info("[vulkanfish] samplerAnisotropy fehlt – Atlas ohne Anisotropie (Seiten unruhiger)");
+                }
                 // Mesh-Stage nur mit Extension + Feature (sonst Classic-Raster-Fallback)
                 if (hasMeshExt && mesh.get(query)) {
                     extensions.add(EXT_MESH);
