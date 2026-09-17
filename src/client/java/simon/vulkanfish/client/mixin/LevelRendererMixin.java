@@ -56,7 +56,10 @@ public class LevelRendererMixin {
             net.minecraft.client.renderer.feature.FeatureRenderDispatcher dispatcher, net.minecraft.client.renderer.SubmitNodeStorage storage,
             Operation<net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame> original) {
         simon.vulkanfish.client.render.EntityShadowCapture.begin();
+        // Profil: Vanillas Submission (alle Entity-/Partikel-Submits in den Staged-Puffer)
+        long t0 = System.nanoTime();
         var frame = original.call(dispatcher, storage);
+        if (VulkanfishClient.RENDERER != null) VulkanfishClient.RENDERER.addSubmitNanos(System.nanoTime() - t0);
         simon.vulkanfish.client.render.EntityShadowCapture.end(
                 ((FeatureRenderDispatcherAccessor) dispatcher).vulkanfish$stagedVertexBuffer());
         return frame;

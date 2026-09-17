@@ -38,6 +38,7 @@ public final class EntityShadowCapture {
     private static final List<StagedVertexBuffer.Draw> DRAWS = new ArrayList<>();
     private static final Set<StagedVertexBuffer.Draw> SEEN = Collections.newSetFromMap(new IdentityHashMap<>());
     private static List<Batch> frame = List.of();
+    private static int lastDraws, lastBatches; // Profil: Zeichnungen/Batches des letzten Frames
 
     private EntityShadowCapture() {
     }
@@ -68,9 +69,11 @@ public final class EntityShadowCapture {
     /** Nach prepareFrame: der Puffer ist hochgeladen, Offsets stehen fest. */
     public static void end(StagedVertexBuffer staged) {
         capturing = false;
+        lastDraws = DRAWS.size();
         List<Batch> out = new ArrayList<>();
         if (DRAWS.isEmpty()) {
             frame = out;
+            lastBatches = 0;
             return;
         }
         GpuBuffer vb = ((StagedVertexBufferAccessor) staged).vulkanfish$vertexBuffer();
@@ -91,10 +94,20 @@ public final class EntityShadowCapture {
         DRAWS.clear();
         SEEN.clear();
         frame = out;
+        lastBatches = out.size();
     }
 
     /** Batches des aktuellen Frames (fuer den Schattenpass). */
     public static List<Batch> frame() {
         return frame;
+    }
+
+    /** Profil: Staged-Draws bzw. Schatten-Batches des letzten Frames. */
+    public static int lastDraws() {
+        return lastDraws;
+    }
+
+    public static int lastBatches() {
+        return lastBatches;
     }
 }

@@ -81,6 +81,8 @@ public final class VulkanfishRenderer {
     }
     // CPU-Zeit unseres Codes pro Frame (Render-Thread), Log alle 10 s
     private long cpuNanosStart, cpuNanosTerrain, cpuNanosWater, cpuNanosTaa;
+    private long cpuNanosSubmit, cpuNanosLevel; // Vanilla-Submission (prepareFrame) bzw. Level-render gesamt
+    private long frameT0, drawWin, batchWin;
     private int cpuFrames;
     private long cpuLogMs;
 
@@ -155,6 +157,7 @@ public final class VulkanfishRenderer {
     /** Pro Frame aus LevelRendererMixin (Render-Thread, vor Vanillas Frame-Graph). */
     public void onFrameStart(net.minecraft.client.renderer.state.level.CameraRenderState cameraState,
                              net.minecraft.client.renderer.state.level.SkyRenderState skyState) {
+        frameT0 = System.nanoTime(); // Profil: gesamtes Level-render (Vanilla + unsere Paesse)
         ensureInitialized();
         pendingFrame = null;
         if (!initialized || !nativeRunner.isReady()) return;
@@ -408,6 +411,11 @@ public final class VulkanfishRenderer {
         nativeRunner.setEntityMotion(entityMotion, n);
     }
 
+    /** Profil: Vanillas Entity-/Partikel-Submission (aus LevelRendererMixin, Render-Thread). */
+    public void addSubmitNanos(long dt) {
+        cpuNanosSubmit += dt;
+    }
+
     /** Notweg aus GameRendererScaleMixin: niemand hat hochskaliert -> linear aufziehen. */
     public static void upscaleFallback(com.mojang.blaze3d.pipeline.RenderTarget low, com.mojang.blaze3d.pipeline.RenderTarget full) {
         var r = simon.vulkanfish.client.VulkanfishClient.RENDERER;
@@ -416,6 +424,7 @@ public final class VulkanfishRenderer {
 
     /** Aus LevelRendererMixin am Ende von render(): Frame-Graph komplett (inkl. Entities, Wasser). */
     public void onFrameEnd() {
+        cpuNanosLevel += System.nanoTime() - frameT0;
         if (!initialized && EXIT_AFTER_FRAMES > 0 && Minecraft.getInstance().level != null) {
             selfTestFrame(++vanillaTestFrame); // Vergleichslauf ohne unseren Renderer (Vanilla-Bild)
         }
@@ -472,6 +481,8 @@ public final class VulkanfishRenderer {
                 Minecraft.getInstance().gameRenderer.mainRenderTarget(), vkAtlas.vkImageView());
         frameGraph.endFrame(slot);
         cpuNanosTerrain += System.nanoTime() - t0;
+        drawWin += simon.vulkanfish.client.render.EntityShadowCapture.lastDraws();
+        batchWin += simon.vulkanfish.client.render.EntityShadowCapture.lastBatches();
         if (!ok && !nativeRunner.isReady() && vanillaOpaqueDisabled) {
             restoreVanillaOpaque(); // nativer Pfad endgueltig aus -> Vanilla komplett zurueck
         }
@@ -515,10 +526,18 @@ public final class VulkanfishRenderer {
         if (now - cpuLogMs < 10_000) return;
         cpuLogMs = now;
         double n = Math.max(cpuFrames, 1) * 1e6;
-        LOG.info("[vulkanfish] CPU/Frame (Render-Thread): streamer+capture {} ms, terrain-aufnahme {} ms, wasser {} ms, taa {} ms",
-                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosStart / n), String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTerrain / n),
-                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosWater / n), String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTaa / n));
-        cpuNanosStart = cpuNanosTerrain = cpuNanosWater = cpuNanosTaa = 0;
+        double rest = Math.max(0, cpuNanosLevel - cpuNanosStart - cpuNanosSubmit - cpuNanosTerrain - cpuNanosWater - cpuNanosTaa) / n;
+        LOG.info("[vulkanfish] CPU/Frame (Render-Thread): level {} ms = start {} + submit(Vanilla) {} + terrain {} + wasser {} + taa {} + rest(Vanilla) {} ms; draws {}/frame, schatten-batches {}/frame",
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosLevel / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosStart / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosSubmit / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTerrain / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosWater / n),
+                String.format(java.util.Locale.ROOT, "%.3f", cpuNanosTaa / n),
+                String.format(java.util.Locale.ROOT, "%.3f", rest),
+                drawWin / Math.max(cpuFrames, 1), batchWin / Math.max(cpuFrames, 1));
+        cpuNanosStart = cpuNanosTerrain = cpuNanosWater = cpuNanosTaa = cpuNanosSubmit = cpuNanosLevel = 0;
+        drawWin = batchWin = 0;
         cpuFrames = 0;
     }
 
