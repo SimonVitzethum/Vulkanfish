@@ -36,14 +36,15 @@ import simon.vulkanfish.client.gpu.NativePassRunner;
  */
 public final class EntityInstancing {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
-    /** Instanz-Layout (104 Byte = EntityInstance + light): 12 Modell + 4 Tint/Flag + 3+1+3+1+2. */
-    public static final int FLOATS_PER_INSTANCE = 26;
-    public static final int MAX_INSTANCES = 8192;
+    /** Instanz-Layout (108 Byte = EntityInstance + light + atlas): 12 Modell + 4 Tint/Flag + 3+1+3+1+2+1. */
+    public static final int FLOATS_PER_INSTANCE = 27;
+    public static final int MAX_INSTANCES = 32768;
     private static final boolean ENABLED =
             !"false".equals(System.getProperty("vulkanfish.entityPipeline", "true"));
 
     /** Gebackenes Modell (Modellraum 0..1, Atlas-UVs direkt – derselbe Atlas wie Vanilla). */
-    public record BakedModel(float[] verts, int[] indices, boolean translucent, float[] aabb, int slot) {
+    public record BakedModel(float[] verts, int[] indices, boolean translucent, float[] aabb, int slot,
+                             boolean itemsAtlas) {
     }
 
     /** Anstehender Bake-Upload (CPU-Arrays -> NativePassRunner erzeugt Device-Puffer). */
@@ -93,13 +94,40 @@ public final class EntityInstancing {
         return out;
     }
 
+    /** Fremd gebackenes Modell (Items) registrieren: Slot + Upload einreihen. Render-Thread. */
+    public static synchronized int registerBaked(BakedModel m) {
+        int slot = BY_SLOT.size();
+        BakedModel withSlot = new BakedModel(m.verts(), m.indices(), m.translucent(), m.aabb(), slot, m.itemsAtlas());
+        BY_SLOT.add(withSlot);
+        PENDING_UPLOADS.add(new BakedUpload(slot, withSlot.verts(), withSlot.indices()));
+        return slot;
+    }
+
+    /** Passt noch eine Instanz (sonst Vanilla-Überlauf, vollständig statt halb)? */
+    public static boolean fits(int extra) {
+        return instanceCount + extra <= MAX_INSTANCES;
+    }
+
+    /** Instanz aus beliebiger Matrix schreiben (Items); false = voll. Nur Render-Thread. */
+    public static boolean recordMatrix(BakedModel m, Matrix4f mat, int lightCoords, float white) {
+        if (!reserve(m)) return false;
+        mat.get(TMP_ARR);
+        int o = instanceCount * FLOATS_PER_INSTANCE;
+        writeRows(o);
+        writeTail(m, lightCoords, white, o);
+        instanceCount++;
+        return true;
+    }
+
+    private static void writeTail(BakedModel m, int lightCoords, float white, int o) {
+
     /** Modell zum BlockState (bake bei Bedarf, Render-Thread). null = Vanilla lassen. */
     public static synchronized BakedModel modelFor(BlockState state) {
         BakedModel m = MODELS.get(state);
         if (m != null) return m;
         m = bake(state);
         if (m == null) return null;
-        BakedModel withSlot = new BakedModel(m.verts(), m.indices(), m.translucent(), m.aabb(), BY_SLOT.size());
+        BakedModel withSlot = new BakedModel(m.verts(), m.indices(), m.translucent(), m.aabb(), BY_SLOT.size(), m.itemsAtlas());
         MODELS.put(state, withSlot);
         BY_SLOT.add(withSlot);
         PENDING_UPLOADS.add(new BakedUpload(withSlot.slot(), withSlot.verts(), withSlot.indices()));
@@ -193,7 +221,7 @@ public final class EntityInstancing {
             LOG.info("[vulkanfish] Entity-Modell gebacken: {} Quads (Block {}, transluzent={})",
                     indices.length / 6, state, translucent);
             return new BakedModel(verts, indices, translucent,
-                    new float[]{minX, minY, minZ, maxX, maxY, maxZ}, -1);
+                    new float[]{minX, minY, minZ, maxX, maxY, maxZ}, -1, false);
         } catch (Throwable t) {
             return null;
         }
@@ -252,6 +280,12 @@ public final class EntityInstancing {
         int o = instanceCount * FLOATS_PER_INSTANCE;
         // float3x4-Zeilen aus column-major get(): Zeile i = arr[i],arr[i+4],arr[i+8],arr[i+12]
         TMP_MAT.get(TMP_ARR);
+        writeRows(o);
+        writeTail(m, lightCoords, white, o);
+        instanceCount++;
+    }
+
+    private static void writeRows(int o) {
         instances[o] = TMP_ARR[0];
         instances[o + 1] = TMP_ARR[4];
         instances[o + 2] = TMP_ARR[8];
@@ -264,22 +298,5 @@ public final class EntityInstancing {
         instances[o + 9] = TMP_ARR[6];
         instances[o + 10] = TMP_ARR[10];
         instances[o + 11] = TMP_ARR[14];
-        instances[o + 12] = 1.0f;
-        instances[o + 13] = 1.0f; // Tint weiss (fallendes Gras vorerst ungetönt, siehe Doku)
-        instances[o + 14] = 1.0f;
-        instances[o + 15] = white; // Fuse-Blitz
-        instances[o + 16] = m.aabb()[0];
-        instances[o + 17] = m.aabb()[1];
-        instances[o + 18] = m.aabb()[2];
-        instances[o + 19] = 0.0f; // emissive
-        instances[o + 20] = m.aabb()[3];
-        instances[o + 21] = m.aabb()[4];
-        instances[o + 22] = m.aabb()[5];
-        instances[o + 23] = m.slot();
-        float block = ((lightCoords >> 4) & 15) / 15.0f;
-        float sky = ((lightCoords >> 20) & 15) / 15.0f;
-        instances[o + 24] = block;
-        instances[o + 25] = sky;
-        instanceCount++;
     }
 }

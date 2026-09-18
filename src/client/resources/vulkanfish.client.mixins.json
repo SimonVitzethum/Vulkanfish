@@ -14,6 +14,7 @@
 		"FeatureRenderDispatcherAccessor",
 		"GameRendererMixin",
 		"GameRendererScaleMixin",
+		"ItemDivertMixin",
 		"LevelExtractorMixin",
 		"LevelRendererMixin",
 		"LightmapExtractorMixin",

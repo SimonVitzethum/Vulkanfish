@@ -1909,9 +1909,9 @@ public final class NativePassRunner {
     private void initEntityPipes(Arena arena, SlangShaderLoader loader) {
         int V = VK10.VK_SHADER_STAGE_VERTEX_BIT, F = VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
         try {
-            // Bindings: 0S Baked-Verts, 1S Instanzen, 2U Frame, 3I Atlas, 4SMP Sampler
+            // Bindings: 0S Baked-Verts, 1S Instanzen, 2U Frame, 3I Atlas, 4SMP Sampler, 5I Item-Atlas
             layoutEntity = pipelineLayout(arena,
-                    setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, UB}, {3, SI}, {4, SM}}, V | F), 0, 0);
+                    setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, UB}, {3, SI}, {4, SM}, {5, SI}}, V | F), 0, 0);
             entityVertMod = module(arena, loader, "entityVert");
             entityShadowVertMod = module(arena, loader, "entityShadowInstVert");
             entityFragMod = module(arena, loader, "entityFrag");
@@ -1922,7 +1922,7 @@ public final class NativePassRunner {
             int host = VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
             for (int i = 0; i < FRAMES; i++) {
                 entityInst[i] = makeBuffer(arena,
-                        (long) simon.vulkanfish.client.render.EntityInstancing.MAX_INSTANCES * 104L,
+                        (long) simon.vulkanfish.client.render.EntityInstancing.MAX_INSTANCES * 108L,
                         VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host);
             }
             entityReady = true;
@@ -1954,6 +1954,17 @@ public final class NativePassRunner {
         }
     }
 
+    /** Item-Atlas-Sicht (pro Frame frisch: Reload-sicher, ~100 ns). 0 = fehlt. */
+    private static long itemsAtlasView() {
+        try {
+            var tex = net.minecraft.client.Minecraft.getInstance().getTextureManager().getTexture(
+                    net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_ITEMS);
+            if (tex instanceof com.mojang.blaze3d.vulkan.VulkanGpuTextureView vk) return vk.vkImageView();
+        } catch (Throwable ignored) {
+        }
+        return 0L;
+    }
+
     /** Ein Draw pro Modell (alle Instanzen): partitioniert per Slot-Scan in den Scratch. */
     private void recordEntityInstanced(Arena arena, VkCommandBuffer cmd, int slot, long atlasView) {
         uploadPendingEntityBaked(arena);
@@ -1966,6 +1977,8 @@ public final class NativePassRunner {
         float[] src = simon.vulkanfish.client.render.EntityInstancing.instanceData();
         float[] dst = simon.vulkanfish.client.render.EntityInstancing.scratch();
         final int stride = simon.vulkanfish.client.render.EntityInstancing.FLOATS_PER_INSTANCE;
+        final long itemsAtlas = itemsAtlasView();
+        final var bakedModels = simon.vulkanfish.client.render.EntityInstancing.models();
         VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeEntityG);
         int cursor = 0;
         for (var e : entityModels.entrySet()) {
@@ -1980,9 +1993,12 @@ public final class NativePassRunner {
             MemoryUtil.memFloatBuffer(entityInst[slot].mapped(), n * stride).put(start * stride, dst, start * stride,
                     count * stride);
             EntityModelBufs mb = e.getValue();
+            boolean useItems = e.getKey() < bakedModels.size() && bakedModels.get(e.getKey()).itemsAtlas();
+            long tex = useItems ? itemsAtlas : atlasView;
+            if (tex == 0L) continue;
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntity,
                     W.sb(0, mb.verts()), W.sb(1, entityInst[slot]), W.ub(2, uniforms[slot]),
-                    W.si(3, atlasView), W.sm(4, atlasSampler));
+                    W.si(3, tex), W.sm(4, atlasSampler), W.si(5, tex));
             VK10.vkCmdBindIndexBuffer(cmd, mb.idx().buffer(), 0L, VK10.VK_INDEX_TYPE_UINT32);
             VK10.vkCmdDrawIndexed(cmd, mb.idxCount(), count, 0, 0, start);
         }
@@ -2012,7 +2028,7 @@ public final class NativePassRunner {
             EntityModelBufs mb = e.getValue();
             push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntity,
                     W.sb(0, mb.verts()), W.sb(1, entityInst[slot]), W.ub(2, shadowUniforms[slot]),
-                    W.si(3, atlasView), W.sm(4, atlasSampler));
+                    W.si(3, atlasView), W.sm(4, atlasSampler), W.si(5, atlasView));
             VK10.vkCmdBindIndexBuffer(cmd, mb.idx().buffer(), 0L, VK10.VK_INDEX_TYPE_UINT32);
             VK10.vkCmdDrawIndexed(cmd, mb.idxCount(), count, 0, 0, start);
         }

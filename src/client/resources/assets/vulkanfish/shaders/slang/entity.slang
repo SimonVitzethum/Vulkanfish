@@ -14,6 +14,7 @@ struct EntityBakedVert
 [[vk::binding(2, 0)]] ConstantBuffer<FrameUniforms> gFrame;
 [[vk::binding(3, 0)]] Texture2D<float4> gAtlas;
 [[vk::binding(4, 0)]] SamplerState gAtlasSamp;
+[[vk::binding(5, 0)]] Texture2D<float4> gItemsAtlas;
 
 struct EntityVertOut
 {
@@ -23,6 +24,7 @@ struct EntityVertOut
     float2 light;
     float3 tint;
     float white;
+    float atlas;
 };
 
 EntityVertOut entityTransform(uint vid, uint iid)
@@ -37,6 +39,7 @@ EntityVertOut entityTransform(uint vid, uint iid)
     o.light = t.light;
     o.tint = t.tint_flags.rgb;
     o.white = t.tint_flags.a;
+    o.atlas = t.atlasId;
     return o;
 }
 
@@ -64,7 +67,10 @@ struct EntityGBufferOut
 [shader("fragment")]
 EntityGBufferOut entityFrag(EntityVertOut i)
 {
-    float4 tex = gAtlas.Sample(gAtlasSamp, i.uv);
+    // SPIR-V: keine Textur-Auswahl in Locals – beide samplen (eine wird verworfen), float wählen
+    float4 texA = gAtlas.Sample(gAtlasSamp, i.uv);
+    float4 texB = gItemsAtlas.Sample(gAtlasSamp, i.uv);
+    float4 tex = i.atlas < 0.5 ? texA : texB;
     float3 alb = lerp(tex.rgb * i.tint, float3(1.0), saturate(i.white));
     EntityGBufferOut o;
     o.albedoMat = float4(alb, 0.0);
