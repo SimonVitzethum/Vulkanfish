@@ -50,8 +50,13 @@ public final class BlazeDeviceInterop {
             backendField.setAccessible(true);
             Object backend = backendField.get(gpu);
             if (!(backend instanceof VulkanDevice vk)) {
-                LOG.warn("[vulkanfish] Kein VulkanDevice ({}), Fallback Vanilla",
-                        backend == null ? "null" : backend.getClass().getName());
+                long now = System.currentTimeMillis();
+                if (now - lastWarnMs > 10_000) {
+                    lastWarnMs = now;
+                    LOG.warn("[vulkanfish] Kein VulkanDevice ({}), Fallback Vanilla – "
+                                    + "Grafik-API in den Videoeinstellungen auf Vulkan stellen und neu starten",
+                            backend == null ? "null" : backend.getClass().getName());
+                }
                 return false;
             }
             this.device = vk;

@@ -82,7 +82,7 @@ public final class VulkanfishRenderer {
     // CPU-Zeit unseres Codes pro Frame (Render-Thread), Log alle 10 s
     private long cpuNanosStart, cpuNanosTerrain, cpuNanosWater, cpuNanosTaa;
     private long cpuNanosSubmit, cpuNanosLevel; // Vanilla-Submission (prepareFrame) bzw. Level-render gesamt
-    private long frameT0, drawWin, batchWin;
+    private long frameT0, drawWin, batchWin, lastDeviceWarnMs;
     private int cpuFrames;
     private long cpuLogMs;
 
@@ -99,7 +99,11 @@ public final class VulkanfishRenderer {
         initAttempted = true;
         // 1. Native Handles aus Blaze3D (VulkanDevice -> LWJGL). Ohne Device kein Pfad.
         if (!device.probe()) {
-            LOG.warn("[vulkanfish] Lazy-Init: noch kein Device – neuer Versuch naechster Frame");
+            long now = System.currentTimeMillis();
+            if (now - lastDeviceWarnMs > 10_000) {
+                lastDeviceWarnMs = now;
+                LOG.warn("[vulkanfish] Lazy-Init: noch kein Device – neuer Versuch naechster Frame");
+            }
             initAttempted = false; // spaeter erneut versuchen
             return;
         }
