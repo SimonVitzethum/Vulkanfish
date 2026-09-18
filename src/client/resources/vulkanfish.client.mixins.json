@@ -7,7 +7,6 @@
 		"CameraMixin",
 		"DebugEntryFpsMixin",
 		"ChunkMapInvoker",
-		"ChunkSectionsToRenderMixin",
 		"ClientChunkCacheMixin",
 		"ExampleClientMixin",
 		"FallingDivertMixin",

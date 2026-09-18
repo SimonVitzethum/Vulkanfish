@@ -16,7 +16,8 @@ import simon.vulkanfish.client.mixin.PreparedFrameInvoker;
  * entstehen, sonst verdeckt die Wassertiefe sie. Render-Thread.
  */
 public final class BreakingOverlayDefer {
-    private record Pending(FeatureRenderDispatcher.PreparedFrame frame, FeatureRenderPhase<?> phase, FeatureFrameContext context) {
+    private record Pending(FeatureRenderDispatcher.PreparedFrame frame, FeatureRenderPhase<?> phase,
+                             FeatureFrameContext context, com.mojang.renderpearl.api.commands.RenderPass renderPass) {
     }
 
     private static final List<Pending> PENDING = new ArrayList<>();
@@ -47,13 +48,15 @@ public final class BreakingOverlayDefer {
         return enabled && translucentBreaking;
     }
 
-    public static void add(FeatureRenderDispatcher.PreparedFrame frame, FeatureRenderPhase<?> phase, FeatureFrameContext context) {
-        PENDING.add(new Pending(frame, phase, context));
+    public static void add(FeatureRenderDispatcher.PreparedFrame frame, FeatureRenderPhase<?> phase,
+                           FeatureFrameContext context, com.mojang.renderpearl.api.commands.RenderPass renderPass) {
+        PENDING.add(new Pending(frame, phase, context, renderPass));
     }
 
     /** Nach unserem Wasser-/Glas-Pass (ChunkSectionsToRenderMixin). */
     public static void flush() {
-        for (Pending p : PENDING) ((PreparedFrameInvoker) (Object) p.frame()).vulkanfish$executePhase(p.phase(), p.context());
+        for (Pending p : PENDING)
+            ((PreparedFrameInvoker) (Object) p.frame()).vulkanfish$executePhase(p.phase(), p.context(), p.renderPass());
         PENDING.clear();
         translucentBreaking = false;
     }

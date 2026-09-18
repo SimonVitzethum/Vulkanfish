@@ -20,7 +20,6 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 import simon.vulkanfish.client.VulkanfishClient;
-
 /**
  * Einstiegspunkt pro Frame: ruft den GPU-driven Pfad auf dem Render-Thread
  * auf (Device existiert hier garantiert) und reicht Vanillas Kamera- +
@@ -30,6 +29,9 @@ import simon.vulkanfish.client.VulkanfishClient;
 public class LevelRendererMixin {
     @Shadow
     private LevelRenderState levelRenderState;
+
+    @Shadow
+    private net.minecraft.client.renderer.texture.TextureManager textureManager;
 
     @Inject(method = "render", at = @At("HEAD"))
     private void vulkanfish$onFrameStart(GraphicsResourceAllocator allocator,
@@ -76,6 +78,32 @@ public class LevelRendererMixin {
         if (VulkanfishClient.RENDERER != null) VulkanfishClient.RENDERER.onFrameEnd();
     }
 
+    /**
+     * 26.3: Der Frame-Graph haelt waehrend renderGroup einen RenderPass offen – unser
+     * encoder.execute() ist dort illegal (shared Encoder). Darum laeuft der Terrain-Frame
+     * hier (nach Sky-Pass, vor dem Main-Pass; prepareTranslucents ist reine CPU-Vorbereitung).
+     */
+    @Inject(method = "prepareTranslucents", at = @At("HEAD"))
+    private void vulkanfish$renderGpuDrivenTerrain(CallbackInfo ci) {
+        if (VulkanfishClient.RENDERER == null) return;
+        var atlas = textureManager.getTexture(net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_BLOCKS)
+                .getTextureView();
+        VulkanfishClient.RENDERER.renderOpaqueTerrain(atlas);
+    }
+
+    /**
+     * Wasser nach dem Main-Pass (kein offener Pass; Tiefe komplett mit Entities):
+     * Farbe/Tiefe plus Riss-Overlay hinter dem Wasser-/Glas-Bild.
+     */
+    @Inject(method = "executeOutline", at = @At("HEAD"))
+    private void vulkanfish$renderGpuDrivenWater(
+            net.minecraft.client.renderer.feature.FeatureRenderDispatcher.PreparedFrame featureFrame,
+            CallbackInfo ci) {
+        if (VulkanfishClient.RENDERER == null) return;
+        VulkanfishClient.RENDERER.renderWater();
+        simon.vulkanfish.client.render.BreakingOverlayDefer.flush();
+    }
+
     /** Overworld-Himmel zeichnet der Deferred-Pass selbst (Verlauf, Sonne, Mond, Sterne). */
     @ModifyVariable(method = "render", at = @At("HEAD"), argsOnly = true, ordinal = 1)
     private boolean vulkanfish$skipVanillaSky(boolean shouldRenderSky) {
@@ -87,8 +115,9 @@ public class LevelRendererMixin {
      * (frisch sichtbar, Scene voll, Fallback). Einmal je Section entschieden (leeres Mesh ->
      * alle Schichten fallen weg) statt je Section und Schicht: das waren zehntausende
      * Aufrufe samt Wrapper-Objekten pro Frame.
+     * 26.3: Schleife in extractSectionDrawGroups (prepareChunkRenders baut nur noch Draws).
      */
-    @Redirect(method = "prepareChunkRenders", at = @At(value = "INVOKE",
+    @Redirect(method = "extractSectionDrawGroups", at = @At(value = "INVOKE",
             target = "Lnet/minecraft/client/renderer/chunk/SectionRenderDispatcher$RenderSection;getSectionMesh()Lnet/minecraft/client/renderer/chunk/SectionMesh;"))
     private SectionMesh vulkanfish$skipCoveredSections(SectionRenderDispatcher.RenderSection section) {
         if (VulkanfishClient.RENDERER != null && VulkanfishClient.RENDERER.coversSection(section.getSectionNode())) {

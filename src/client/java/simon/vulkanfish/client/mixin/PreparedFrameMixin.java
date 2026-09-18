@@ -2,6 +2,7 @@ package simon.vulkanfish.client.mixin;
 
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
+import com.mojang.renderpearl.api.commands.RenderPass;
 import net.minecraft.client.renderer.SubmitNodeCollection;
 import net.minecraft.client.renderer.SubmitNodeStorage;
 import net.minecraft.client.renderer.feature.FeatureFrameContext;
@@ -24,17 +25,18 @@ public abstract class PreparedFrameMixin {
     private @Nullable SubmitNodeStorage submitNodeStorage;
 
     @WrapOperation(method = "executeTranslucent", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;executePhase(Lnet/minecraft/client/renderer/feature/phase/FeatureRenderPhase;Lnet/minecraft/client/renderer/feature/FeatureFrameContext;)V"))
+            target = "Lnet/minecraft/client/renderer/feature/FeatureRenderDispatcher$PreparedFrame;executePhase(Lnet/minecraft/client/renderer/feature/phase/FeatureRenderPhase;Lnet/minecraft/client/renderer/feature/FeatureFrameContext;Lcom/mojang/renderpearl/api/commands/RenderPass;)V"))
     private void vulkanfish$deferBreakingOverlay(FeatureRenderDispatcher.PreparedFrame self, FeatureRenderPhase<?> phase,
-                                                 FeatureFrameContext context, Operation<Void> original) {
+                                                 FeatureFrameContext context, RenderPass renderPass,
+                                                 Operation<Void> original) {
         if (BreakingOverlayDefer.active() && vulkanfish$isBreakingOverlay(phase)) {
-            BreakingOverlayDefer.add(self, phase, context);
+            BreakingOverlayDefer.add(self, phase, context, renderPass);
             return;
         }
         // Vanillas runde Entity-Schattenflecken: mit echten Sonnenschatten (Entities in der
         // Schattenkarte) doppelt -> weglassen, solange unser Renderer zeichnet
         if (BreakingOverlayDefer.nativeActive() && vulkanfish$isShadowBlobs(phase)) return;
-        original.call(self, phase, context);
+        original.call(self, phase, context, renderPass);
     }
 
     private boolean vulkanfish$isShadowBlobs(FeatureRenderPhase<?> phase) {

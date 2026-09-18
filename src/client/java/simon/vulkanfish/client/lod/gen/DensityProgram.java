@@ -525,6 +525,7 @@ public final class DensityProgram {
             }
             if (s == STAGE_V && resultReg >= 0) resultReg = phys[resultReg];
             if (s == STAGE_D) for (int i = 0; i < directResults.length; i++) directResults[i] = phys[directResults[i]];
+            regCount[s] = maxPhys;
         }
     }
 
