@@ -1,8 +1,7 @@
 package simon.vulkanfish.client.lod.gen;
 
 import it.unimi.dsi.fastutil.ints.IntArrayList;
-import net.minecraft.world.level.levelgen.synth.ImprovedNoise;
-import simon.vulkanfish.client.mixin.worldgen.ImprovedNoiseAccessor;
+import net.minecraft.world.level.levelgen.synth.PerlinNoise;
 
 import static simon.vulkanfish.client.lod.gen.DensityProgram.*;
 
@@ -23,9 +22,9 @@ public final class DensityCpu {
         perm = new byte[p.improved.size()][];
         offs = new double[p.improved.size()][];
         for (int i = 0; i < p.improved.size(); i++) {
-            ImprovedNoise n = p.improved.get(i);
-            perm[i] = ((ImprovedNoiseAccessor) (Object) n).vf$P();
-            offs[i] = new double[]{n.xo, n.yo, n.zo};
+            PerlinNoise n = p.improved.get(i);
+            perm[i] = NoiseTables.perms(n);
+            offs[i] = NoiseTables.offsets(n);
         }
     }
 
@@ -46,6 +45,14 @@ public final class DensityCpu {
                 }
                 case OP_MIN -> r[d] = Math.min(r[c.getInt(pc + 2)], r[c.getInt(pc + 3)]);
                 case OP_MAX -> r[d] = Math.max(r[c.getInt(pc + 2)], r[c.getInt(pc + 3)]);
+                case OP_SUB -> r[d] = r[c.getInt(pc + 2)] - r[c.getInt(pc + 3)];
+                case OP_DIV -> r[d] = r[c.getInt(pc + 2)] / r[c.getInt(pc + 3)];
+                case OP_LERP -> {
+                    double a = r[c.getInt(pc + 2)];
+                    r[d] = a == 0.0 ? r[c.getInt(pc + 3)]
+                            : a == 1.0 ? r[c.getInt(pc + 4)]
+                            : r[c.getInt(pc + 3)] + a * (r[c.getInt(pc + 4)] - r[c.getInt(pc + 3)]);
+                }
                 case OP_ADDK -> r[d] = r[c.getInt(pc + 2)] + k(c.getInt(pc + 3));
                 case OP_MULK -> r[d] = r[c.getInt(pc + 2)] * k(c.getInt(pc + 3));
                 case OP_MAP -> r[d] = map(c.getInt(pc + 3), r[c.getInt(pc + 2)]);
@@ -105,6 +112,10 @@ public final class DensityCpu {
             case 3 -> v > 0 ? v : v * 0.5;
             case 4 -> v > 0 ? v : v * 0.25;
             case 5 -> 1.0 / v;
+            case 7 -> -v;
+            case 8 -> Math.sqrt(v);
+            case 9 -> Math.log(v);
+            case 10 -> Math.signum(v);
             default -> {
                 double c = Math.max(-1.0, Math.min(1.0, v));
                 yield c / 2.0 - c * c * c / 24.0;
@@ -142,12 +153,15 @@ public final class DensityCpu {
         return der == 0.0f ? value : value + der * (in - p.consts.getFloat(kOff + index));
     }
 
+    /** 26.3: flache Lagen (Frequenz + Amplitude fix und fertig, Fudge je Oktave). */
     double normal(int idx, double x, double y, double z) {
-        int b = idx * 4;
-        double first = perlin(p.normals.getInt(b), p.normals.getInt(b + 1), x, y, z);
-        double f = 1.0181268882175227;
-        double second = perlin(p.normals.getInt(b + 2), p.normals.getInt(b + 3), x * f, y * f, z * f);
-        return (first + second) * p.normalFactor.get(idx);
+        int start = p.normals.getInt(idx * 2), count = p.normals.getInt(idx * 2 + 1);
+        double v = 0.0;
+        for (int i = start; i < start + count; i++) {
+            double[] o = p.octaves.get(i);
+            v += o[2] * improved((int) o[0], wrap(x * o[1]), wrap(y * o[1]), wrap(z * o[1]), o[3], y * o[1]);
+        }
+        return v;
     }
 
     private double perlin(int start, int count, double x, double y, double z) {
@@ -155,7 +169,7 @@ public final class DensityCpu {
         for (int i = start; i < start + count; i++) {
             double[] o = p.octaves.get(i);
             double fac = o[1];
-            v += o[2] * improved((int) o[0], wrap(x * fac), wrap(y * fac), wrap(z * fac), 0.0, 0.0);
+            v += o[2] * improved((int) o[0], wrap(x * fac), wrap(y * fac), wrap(z * fac), o[3], y * fac);
         }
         return v;
     }
@@ -214,30 +228,28 @@ public final class DensityCpu {
         return a + t * (b - a);
     }
 
+    /**
+     * BlendedNoise (26.3): lerp(clamp(main + 0.5), min, max); Stapel als Oktav-Bereiche,
+     * Smear je Lage (Fudge). d = [xzMul, yMul, xzFac, yFac, limitSmear, mainSmear,
+     * minStart, minCount, maxStart, maxCount, mainStart, mainCount].
+     */
     private double blended(int idx, int bx, int by, int bz) {
         double[] d = p.blended.get(idx);
-        double xzMul = d[0], yMul = d[1], xzFac = d[2], yFac = d[3], smear = d[4];
-        double limitX = bx * xzMul, limitY = by * yMul, limitZ = bz * xzMul;
-        double mainX = limitX / xzFac, mainY = limitY / yFac, mainZ = limitZ / xzFac;
-        double limitSmear = yMul * smear, mainSmear = limitSmear / yFac;
-        double blendMin = 0, blendMax = 0, main = 0, pow = 1.0;
-        for (int i = 0; i < 8; i++) {
-            int n = (int) d[40 + i];
-            if (n >= 0) main += improved(n, wrap(mainX * pow), wrap(mainY * pow), wrap(mainZ * pow), mainSmear * pow, mainY * pow) / pow;
-            pow /= 2.0;
+        double xzMul = d[0], yMul = d[1], xzFac = d[2], yFac = d[3];
+        double minS = stack(d, 6, bx * xzMul, by * yMul, bz * xzMul);
+        double maxS = stack(d, 8, bx * xzMul, by * yMul, bz * xzMul);
+        double mainS = stack(d, 10, bx * xzMul / xzFac, by * yMul / yFac, bz * xzMul / xzFac);
+        double choice = Math.max(0.0, Math.min(1.0, mainS + 0.5));
+        return minS + choice * (maxS - minS);
+    }
+
+    private double stack(double[] d, int rangeOff, double x, double y, double z) {
+        int start = (int) d[rangeOff], count = (int) d[rangeOff + 1];
+        double v = 0.0;
+        for (int i = start; i < start + count; i++) {
+            double[] o = p.octaves.get(i);
+            v += o[2] * improved((int) o[0], wrap(x * o[1]), wrap(y * o[1]), wrap(z * o[1]), o[3], y * o[1]);
         }
-        double factor = (main / 10.0 + 1.0) / 2.0;
-        boolean isMax = factor >= 1.0, isMin = factor <= 0.0;
-        pow = 1.0;
-        for (int i = 0; i < 16; i++) {
-            double wx = wrap(limitX * pow), wy = wrap(limitY * pow), wz = wrap(limitZ * pow);
-            double ysp = limitSmear * pow;
-            int mn = (int) d[8 + i], mx = (int) d[24 + i];
-            if (!isMax && mn >= 0) blendMin += improved(mn, wx, wy, wz, ysp, limitY * pow) / pow;
-            if (!isMin && mx >= 0) blendMax += improved(mx, wx, wy, wz, ysp, limitY * pow) / pow;
-            pow /= 2.0;
-        }
-        double t = Math.max(0.0, Math.min(1.0, factor));
-        return (blendMin / 512.0 + t * (blendMax / 512.0 - blendMin / 512.0)) / 128.0;
+        return v;
     }
 }

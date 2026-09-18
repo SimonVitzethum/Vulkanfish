@@ -9,7 +9,6 @@ import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Collection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,13 +69,11 @@ public final class NgxBridge {
         return DIR != null && Files.isRegularFile(DIR.resolve(SHIM_NAME)) && !"false".equals(System.getProperty("vulkanfish.dlss"));
     }
 
-    /** Aus dem VulkanBackend-Mixin: NGX-Extensions vor vkCreateDevice ergaenzen (nur wenn vorhanden). */
-    public static void augment(Collection<String> extensions, com.mojang.blaze3d.vulkan.VulkanPhysicalDevice physicalDevice) {
-        if (!present()) return;
-        for (String e : DEVICE_EXTENSIONS) {
-            if (physicalDevice.hasDeviceExtension(e)) extensions.add(e);
-            else LOG.info("[vulkanfish] DLSS: Extension {} fehlt", e);
-        }
+    /** NGX-Extensions als optionales FeatureSet (26.3): nur mit Shim anhaengen, Vanilla gated per Support. */
+    public static com.mojang.renderpearl.backend.vulkan.init.FeatureSet ngxFeatureSet() {
+        if (!present()) return null;
+        return new com.mojang.renderpearl.backend.vulkan.init.FeatureSet("Vulkanfish NGX",
+                java.util.Set.of(DEVICE_EXTENSIONS), java.util.Set.of());
     }
 
     /** Eigene Queue fuer den Present-Thread der Frame Generation: {Familie, Index} oder null. */
@@ -87,7 +84,7 @@ public final class NgxBridge {
      * FG-Kopien + Presents nicht hinter dem naechsten Frame auf Mojangs Queue warten.
      */
     public static it.unimi.dsi.fastutil.ints.Int2IntMap withPresentQueue(it.unimi.dsi.fastutil.ints.Int2IntMap map,
-                                                                        com.mojang.blaze3d.vulkan.VulkanPhysicalDevice physicalDevice) {
+                                                                        com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice physicalDevice) {
         var gfx = physicalDevice.graphicsQueueFamilyAndIndex();
         if (!present() || gfx == null) return map;
         int family = gfx.leftInt();

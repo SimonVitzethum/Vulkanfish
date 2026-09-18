@@ -1,10 +1,10 @@
 package simon.vulkanfish.client.render;
 
-import com.mojang.blaze3d.PrimitiveTopology;
-import com.mojang.blaze3d.buffers.GpuBuffer;
-import com.mojang.blaze3d.vertex.VertexFormat;
-import com.mojang.blaze3d.vertex.VertexFormatElement;
-import com.mojang.blaze3d.vulkan.VulkanGpuBuffer;
+import com.mojang.renderpearl.api.pipeline.PrimitiveTopology;
+import com.mojang.renderpearl.api.buffers.GpuBuffer;
+import com.mojang.renderpearl.api.vertex.VertexFormat;
+import com.mojang.renderpearl.api.vertex.VertexFormatElement;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuBuffer;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;

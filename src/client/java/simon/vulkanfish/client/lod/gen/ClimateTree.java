@@ -160,18 +160,33 @@ public final class ClimateTree {
 
     /** Stichprobe gegen Vanillas Biomquelle: Treffer, Suchaufwand (Log). */
     public void validate(WorldgenSource src, net.minecraft.world.level.biome.BiomeSource biomeSource) {
-        var sampler = src.randomState.sampler();
+        // 26.3: Klima exakt ueber Vanillas Sampler (kein NoiseSampler-Objekt mehr noetig)
+        var router = src.settings.noiseRouter();
+        var rs = src.randomState;
         java.util.Random rnd = new java.util.Random(99);
         int n = 2000, treeVsBrute = 0, vsVanilla = 0;
         long[] stats = new long[2];
         long t0 = System.nanoTime();
         for (int s = 0; s < n; s++) {
             int qx = rnd.nextInt(20000) - 10000, qz = rnd.nextInt(20000) - 10000, qy = rnd.nextInt(96) - 16;
-            var tp = sampler.sample(qx, qy, qz);
-            double[] t = {tp.temperature(), tp.humidity(), tp.continentalness(), tp.erosion(), tp.depth(), tp.weirdness()};
+            double[] t = {rs.sampleBlockValueUncached(router.temperature(), qx, qy, qz),
+                    rs.sampleBlockValueUncached(router.vegetation(), qx, qy, qz),
+                    rs.sampleBlockValueUncached(router.continents(), qx, qy, qz),
+                    rs.sampleBlockValueUncached(router.erosion(), qx, qy, qz),
+                    rs.sampleBlockValueUncached(router.depth(), qx, qy, qz),
+                    rs.sampleBlockValueUncached(router.ridges(), qx, qy, qz)};
             int a = search(t, stats), b = bruteForce(t);
             if (climateBiome[a] == climateBiome[b]) treeVsBrute++;
-            int v = simon.vulkanfish.client.lod.LodMaterials.biomeId(biomeSource.getNoiseBiome(qx, qy, qz, sampler));
+            var tp = net.minecraft.world.level.biome.Climate.target((float) t[0], (float) t[1], (float) t[2],
+                    (float) t[3], (float) t[4], (float) t[5]);
+            int v;
+            if (biomeSource instanceof net.minecraft.world.level.biome.MultiNoiseBiomeSource multi) {
+                v = simon.vulkanfish.client.lod.LodMaterials.biomeId(multi.getNoiseBiome(tp));
+            } else {
+                // Feste Quelle (z. B. End): Validierung nur Baum-gegen-Brute (vsVanilla = Treffer wenn konstant)
+                var first = biomeSource.possibleBiomes().stream().findFirst().orElse(null);
+                v = first == null ? -1 : simon.vulkanfish.client.lod.LodMaterials.biomeId(first);
+            }
             if (climateBiome[a] == v) vsVanilla++;
         }
         org.slf4j.LoggerFactory.getLogger("vulkanfish").info(

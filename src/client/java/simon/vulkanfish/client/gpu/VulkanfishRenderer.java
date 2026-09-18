@@ -1,7 +1,7 @@
 package simon.vulkanfish.client.gpu;
 
-import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import net.minecraft.client.Minecraft;
 import net.minecraft.core.BlockPos;
 import org.slf4j.Logger;

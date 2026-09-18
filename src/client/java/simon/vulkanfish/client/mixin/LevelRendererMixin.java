@@ -3,7 +3,7 @@ package simon.vulkanfish.client.mixin;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
-import com.mojang.blaze3d.buffers.GpuBufferSlice;
+import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.LevelRenderer;

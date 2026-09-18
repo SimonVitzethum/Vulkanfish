@@ -298,7 +298,9 @@ final class SectionMesher {
         }
         int emission = quad.materialInfo().lightEmission();
         // Vanillas feste Seiten-Schattierung herausrechnen: das Deferred-Licht schattiert selbst
-        float shade = quad.materialInfo().shade() ? cardinal.byFace(quad.direction()) : cardinal.up();
+        // (26.3: shadeDirectionOverride statt shade()-Flag; immer richtungsabhaengig)
+        net.minecraft.core.Direction shadeDir = quad.materialInfo().shadeDirectionOverride();
+        float shade = cardinal.byFace(shadeDir != null ? shadeDir : quad.direction());
         float unshade = shade > 0.05f ? 1.0f / shade : 1.0f;
         int emissionBits = Math.max(blockMaterial >> 4, Math.min(emission, 15)) << 4;
         for (int slot = 0; slot < 4; slot++) {
@@ -385,7 +387,8 @@ final class SectionMesher {
         if (currentRegion == null) return false;
         neighborPos.setWithOffset(scratch, dir);
         BlockState neighbor = currentRegion.getBlockState(neighborPos);
-        return neighbor.getFluidState().isEmpty() && neighbor.blocksMotion();
+        // 26.3: blocksMotion() entfernt (war isSolid + Ausnahmen fuer nicht-solide Bloecke = isSolid)
+        return neighbor.getFluidState().isEmpty() && neighbor.isSolid();
     }
 
     private void classify(float[] n) {
@@ -728,6 +731,11 @@ final class SectionMesher {
         public VertexConsumer setUv2(int u, int v) {
             if (cursor >= 0) lbuf[cursor] = (u & 0xFFFF) | (v << 16);
             return this;
+        }
+
+        @Override
+        public VertexConsumer setUv3(float u, float v) {
+            return this; // 26.3: dritter UV-Satz, fuer Fluids ungenutzt
         }
 
         @Override

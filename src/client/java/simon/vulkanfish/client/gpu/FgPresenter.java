@@ -1,9 +1,9 @@
 package simon.vulkanfish.client.gpu;
 
-import com.mojang.blaze3d.systems.CommandEncoderBackend;
-import com.mojang.blaze3d.textures.GpuTextureView;
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
-import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
+import com.mojang.renderpearl.backend.api.CommandEncoderBackend;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
+import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import it.unimi.dsi.fastutil.longs.LongList;
 import java.nio.LongBuffer;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -206,17 +206,20 @@ public final class FgPresenter {
     private int effectiveImages() {
         int wanted = wantedImages();
         var cfg = net.minecraft.client.Minecraft.getInstance().windowSurface().currentConfiguration();
-        boolean fifo = cfg.isPresent() && (cfg.get().presentMode() == com.mojang.blaze3d.systems.GpuSurface.PresentMode.FIFO
-                || cfg.get().presentMode() == com.mojang.blaze3d.systems.GpuSurface.PresentMode.FIFO_RELAXED);
+        boolean fifo = cfg.isPresent() && (cfg.get().presentMode() == com.mojang.renderpearl.api.device.GpuSurface.PresentMode.FIFO
+                || cfg.get().presentMode() == com.mojang.renderpearl.api.device.GpuSurface.PresentMode.FIFO_RELAXED);
         fifoMode = fifo;
         if (!fifo || wanted <= 1) return wanted;
         long now = System.nanoTime();
         if (refreshHz == 0 || now - refreshCheckNs > 2_000_000_000L) {
             refreshCheckNs = now;
-            long mon = org.lwjgl.glfw.GLFW.glfwGetWindowMonitor(net.minecraft.client.Minecraft.getInstance().getWindow().handle());
-            if (mon == 0L) mon = org.lwjgl.glfw.GLFW.glfwGetPrimaryMonitor();
-            var mode = mon != 0L ? org.lwjgl.glfw.GLFW.glfwGetVideoMode(mon) : null;
-            refreshHz = mode != null && mode.refreshRate() > 0 ? mode.refreshRate() : 60;
+            // 26.3: GLFW -> SDL, kein GLFW mehr im Client-Classpath; Vanillas VideoMode nutzen
+            float rr = 60f;
+            try {
+                rr = net.minecraft.client.Minecraft.getInstance().getWindow().getActiveVideoMode().getRefreshRate();
+            } catch (Throwable ignored) {
+            }
+            refreshHz = rr > 0 ? Math.round(rr) : 60;
         }
         // Dauer eines echten Bildes bei k Bildern: CPU-Arbeit oder GPU (Level + k-1 erzeugte Bilder)
         double cpuMs = frameIntervalNs / 1e6, gpuMs = frameGpuMs > 0.0 ? frameGpuMs : runner.gpuSpanMs();
@@ -328,7 +331,7 @@ public final class FgPresenter {
             }
             NativePassRunner.fullBarrier(a, cmd); // GUI & Co. fertig
             if (timed) VK10.vkCmdWriteTimestamp(cmd, VK10.VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, renderQueries, slot * 3 + 1);
-            long viewHandle = ((com.mojang.blaze3d.vulkan.VulkanGpuTextureView) view).vkImageView();
+            long viewHandle = ((com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView) view).vkImageView();
             int fmt = VK10.VK_FORMAT_R8G8B8A8_UNORM, bbFmt = NativePassRunner.vkFormat(tex);
             for (int i = 1; i < images; i++) {
                 NativePassRunner.Img out = ring[slot][i - 1];

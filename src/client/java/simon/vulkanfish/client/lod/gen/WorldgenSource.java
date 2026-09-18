@@ -18,7 +18,7 @@ import net.minecraft.world.level.biome.MultiNoiseBiomeSource;
 import net.minecraft.world.level.biome.MultiNoiseBiomeSourceParameterLists;
 import net.minecraft.world.level.biome.TheEndBiomeSource;
 import net.minecraft.world.level.chunk.ChunkGenerator;
-import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.densityfunction.DensityFunction;
 import net.minecraft.world.level.levelgen.NoiseBasedChunkGenerator;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.RandomState;
@@ -117,7 +117,7 @@ public final class WorldgenSource {
             LOG.warn("[vulkanfish] LOD-Generator: eingestellter Seed passt nicht zum Server {} – keine Generierung", serverName);
             return null;
         }
-        HolderLookup.Provider vanilla = VanillaRegistries.createLookup();
+        HolderLookup.Provider vanilla = VanillaRegistries.createWorldLookup();
         ResourceKey<Level> dim = client.dimension();
         ResourceKey<NoiseGeneratorSettings> settingsKey;
         BiomeSource biomes;
@@ -138,7 +138,7 @@ public final class WorldgenSource {
         }
         Holder<NoiseGeneratorSettings> settings = vanilla.lookupOrThrow(Registries.NOISE_SETTINGS).getOrThrow(settingsKey);
         NoiseBasedChunkGenerator gen = new NoiseBasedChunkGenerator(biomes, settings);
-        RandomState rs = RandomState.create(settings.value(), vanilla.lookupOrThrow(Registries.NOISE), seed);
+        RandomState rs = RandomState.create(vanilla.lookupOrThrow(Registries.NOISE), seed, settings.value());
         LOG.info("[vulkanfish] LOD-Generator: Mehrspieler {} mit bekanntem Seed, Vanilla-Worldgen ({})", serverName, dim.identifier());
         return compile(client, client.registryAccess(), seed, rs, gen, true);
     }
@@ -147,17 +147,19 @@ public final class WorldgenSource {
                                           NoiseBasedChunkGenerator gen, boolean vanillaOnly) {
         NoiseGeneratorSettings settings = gen.generatorSettings().value();
         long t0 = System.nanoTime();
-        var sampler = rs.sampler();
-        DensityProgram prog = DensityProgram.compile(rs.router().finalDensity(), java.util.List.of(sampler.temperature(),
-                sampler.humidity(), sampler.continentalness(), sampler.erosion(), sampler.depth(), sampler.weirdness()));
+        // 26.3: Klima direkt aus dem Router (humidity/weirdness heissen vegetation/ridges)
+        var router = settings.noiseRouter();
+        DensityProgram prog = DensityProgram.compile(router.finalDensity(), java.util.List.of(router.temperature(),
+                router.vegetation(), router.continents(), router.erosion(), router.depth(), router.ridges()),
+                rs, seed, settings.useLegacyRandomSource());
         LOG.info("[vulkanfish] LOD-Generator: Dichte kompiliert in {} ms: {}", (System.nanoTime() - t0) / 1_000_000, prog.stats());
-        boolean ok = prog.unsupported.isEmpty() && validate(rs.router().finalDensity());
+        boolean ok = prog.unsupported.isEmpty() && validate(rs, router.finalDensity(), seed, settings.useLegacyRandomSource());
         return new WorldgenSource(heights, registries, seed, rs, gen, settings, prog, ok, vanillaOnly);
     }
 
     /** Einstufiges Programm gegen Vanillas compute() an Zufallspunkten. */
-    private static boolean validate(DensityFunction f) {
-        DensityProgram direct = DensityProgram.compileDirect(f);
+    private static boolean validate(RandomState rs, DensityFunction f, long seed, boolean useLegacyRandom) {
+        DensityProgram direct = DensityProgram.compileDirect(f, rs, seed, useLegacyRandom);
         if (!direct.unsupported.isEmpty()) {
             LOG.warn("[vulkanfish] LOD-Generator: nicht unterstuetzte Dichtefunktionen {}", direct.unsupported);
             return false;
@@ -168,7 +170,8 @@ public final class WorldgenSource {
         int n = 400, signMismatch = 0;
         for (int i = 0; i < n; i++) {
             int x = rnd.nextInt(20000) - 10000, y = rnd.nextInt(384) - 64, z = rnd.nextInt(20000) - 10000;
-            double ref = f.compute(new DensityFunction.SinglePointContext(x, y, z));
+            // 26.3: compute() ist weg – Vanillas Sampler direkt (exakt, ohne Context)
+            double ref = rs.sampleBlockValueUncached(f, x, y, z);
             double got = cpu.evalDirect(x, y, z);
             double err = Math.abs(ref - got);
             maxErr = Math.max(maxErr, err);

@@ -17,13 +17,13 @@ struct Octave
 [[vk::binding(4, 0)]] StructuredBuffer<Octave> gOct;
 [[vk::binding(5, 0)]] StructuredBuffer<uint4> gNormal;    // firstStart, firstCount, secondStart, secondCount
 [[vk::binding(6, 0)]] StructuredBuffer<double> gNormalFactor;
-[[vk::binding(7, 0)]] StructuredBuffer<double> gBlendD;   // 8 je BlendedNoise
-[[vk::binding(8, 0)]] StructuredBuffer<int> gBlendOct;    // 40 je BlendedNoise (min 16, max 16, main 8)
+[[vk::binding(7, 0)]] StructuredBuffer<double> gBlendD;   // xzMul, yMul, xzFac, yFac je BlendedNoise
+[[vk::binding(8, 0)]] StructuredBuffer<int> gBlendOct;    // minStart, minCount, maxStart, maxCount, mainStart, mainCount
 
 static const uint OP_END = 0, OP_CONST = 1, OP_COORD = 2, OP_ADD = 3, OP_MUL = 4, OP_MIN = 5, OP_MAX = 6,
     OP_ADDK = 7, OP_MULK = 8, OP_MAP = 9, OP_CLAMP = 10, OP_YGRAD = 11, OP_NOISE = 12, OP_SNOISE = 13,
     OP_SHIFTA = 14, OP_SHIFTB = 15, OP_SHIFT = 16, OP_RANGE = 17, OP_INTERVAL = 18, OP_SPLINE = 19,
-    OP_BLENDED = 20, OP_LOADF = 21, OP_LOADI = 22, OP_STORE = 23;
+    OP_BLENDED = 20, OP_LOADF = 21, OP_LOADI = 22, OP_STORE = 23, OP_SUB = 24, OP_DIV = 25, OP_LERP = 26;
 static const uint CONST_REF = 0x80000000u;
 static const uint MAX_REGS = 32;
 
@@ -117,42 +117,33 @@ float normalNoiseF(uint idx, uint t0, uint jt0, int3 d, float3 s)
     return v * float(gNormalFactor[idx]);
 }
 
+float blendStack(uint octStart, uint octCount, uint tBase, uint jt0, int3 d, float by)
+{
+    float v = 0.0;
+    for (uint j = 0; j < octCount; j++)
+    {
+        uint o = octStart + j;
+        NoiseTerm m;
+        float3 vv = termCoord(jt0, tBase + j, d, float3(0.0), m);
+        v += gOct[o].valueFactor * improvedF(gOct[o].improved, vv, m.kzs.w, by * (m.kxy.z + m.kxy.w));
+    }
+    return v;
+}
+
+// 26.3: lerp(clamp(main + 0.5), min, max); Stapel als Oktav-Bereiche, Smear je Lage (Term).
 float blendedNoiseF(uint idx, uint t0, uint jt0, int3 d)
 {
     float by = float(d.y);
-    NoiseTerm m;
-    float mainV = 0.0, pw = 1.0;
-    for (uint i = 0; i < 8; i++)
-    {
-        int n = gBlendOct[idx * 40 + 32 + i];
-        if (n >= 0)
-        {
-            float3 v = termCoord(jt0, t0 + 32 + i, d, float3(0.0), m);
-            mainV += improvedF(uint(n), v, m.kzs.w, by * (m.kxy.z + m.kxy.w)) / pw;
-        }
-        pw *= 0.5;
-    }
-    float factor = (mainV / 10.0 + 1.0) / 2.0;
-    bool isMax = factor >= 1.0, isMin = factor <= 0.0;
-    float blendMin = 0.0, blendMax = 0.0;
-    pw = 1.0;
-    for (uint i = 0; i < 16; i++)
-    {
-        int mn = gBlendOct[idx * 40 + i], mx = gBlendOct[idx * 40 + 16 + i];
-        if (!isMax && mn >= 0)
-        {
-            float3 v = termCoord(jt0, t0 + i, d, float3(0.0), m);
-            blendMin += improvedF(uint(mn), v, m.kzs.w, by * (m.kxy.z + m.kxy.w)) / pw;
-        }
-        if (!isMin && mx >= 0)
-        {
-            float3 v = termCoord(jt0, t0 + 16 + i, d, float3(0.0), m);
-            blendMax += improvedF(uint(mx), v, m.kzs.w, by * (m.kxy.z + m.kxy.w)) / pw;
-        }
-        pw *= 0.5;
-    }
-    float t = saturate(factor);
-    return lerp(blendMin / 512.0, blendMax / 512.0, t) / 128.0;
+    uint minS = uint(gBlendOct[idx * 6]), minC = uint(gBlendOct[idx * 6 + 1]);
+    uint maxS = uint(gBlendOct[idx * 6 + 2]), maxC = uint(gBlendOct[idx * 6 + 3]);
+    uint mainS = uint(gBlendOct[idx * 6 + 4]), mainC = uint(gBlendOct[idx * 6 + 5]);
+    float mainV = blendStack(mainS, mainC, t0 + minC + maxC, jt0, d, by);
+    float choice = clamp(mainV + 0.5, 0.0, 1.0);
+    if (choice >= 1.0)
+        return blendStack(maxS, maxC, t0 + minC, jt0, d, by);
+    if (choice <= 0.0)
+        return blendStack(minS, minC, t0, jt0, d, by);
+    return lerp(blendStack(minS, minC, t0, jt0, d, by), blendStack(maxS, maxC, t0 + minC, jt0, d, by), choice);
 }
 
 float mapOp(uint type, float v)
@@ -165,6 +156,10 @@ float mapOp(uint type, float v)
     case 3: return v > 0.0 ? v : v * 0.5;
     case 4: return v > 0.0 ? v : v * 0.25;
     case 5: return 1.0 / v;
+    case 7: return -v;
+    case 8: return sqrt(v);
+    case 9: return log(v);
+    case 10: return sign(v);
     default:
     {
         float c = clamp(v, -1.0, 1.0);
@@ -194,6 +189,16 @@ void wgExec(inout Ctx c, uint progOffset, uint stage, inout float r[MAX_REGS])
         case OP_MUL: { float a = r[gProg[pc + 2]]; r[d] = a == 0.0 ? 0.0 : a * r[gProg[pc + 3]]; pc += 4; break; }
         case OP_MIN: r[d] = min(r[gProg[pc + 2]], r[gProg[pc + 3]]); pc += 4; break;
         case OP_MAX: r[d] = max(r[gProg[pc + 2]], r[gProg[pc + 3]]); pc += 4; break;
+        case OP_SUB: r[d] = r[gProg[pc + 2]] - r[gProg[pc + 3]]; pc += 4; break;
+        case OP_DIV: r[d] = r[gProg[pc + 2]] / r[gProg[pc + 3]]; pc += 4; break;
+        case OP_LERP:
+        {
+            float a = r[gProg[pc + 2]];
+            r[d] = a == 0.0 ? r[gProg[pc + 3]] : a == 1.0 ? r[gProg[pc + 4]]
+                : lerp(r[gProg[pc + 3]], r[gProg[pc + 4]], a);
+            pc += 5;
+            break;
+        }
         case OP_ADDK: r[d] = r[gProg[pc + 2]] + gConst[gProg[pc + 3]]; pc += 4; break;
         case OP_MULK: r[d] = r[gProg[pc + 2]] * gConst[gProg[pc + 3]]; pc += 4; break;
         case OP_MAP: r[d] = mapOp(gProg[pc + 3], r[gProg[pc + 2]]); pc += 4; break;

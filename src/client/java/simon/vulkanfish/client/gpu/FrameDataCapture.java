@@ -166,8 +166,11 @@ public final class FrameDataCapture {
             } catch (Throwable ignored) {
             }
             // Selbsttest mit fester Sonne: typische Vanilla-Taghimmelfarbe statt der (evtl. naechtlichen) echten
-            int packed = Float.isNaN(testSunAngle) || vis < 0.5f ? probe.getValue(EnvironmentAttributes.SKY_COLOR, pt) : 0x78A7FF;
-            float[] skyRgb = {((packed >> 16) & 0xFF) / 255.0f, ((packed >> 8) & 0xFF) / 255.0f, (packed & 0xFF) / 255.0f};
+            // (26.3: SKY_COLOR ist Vector3fc 0..1 statt gepacktem Int)
+            org.joml.Vector3fc skyVec = Float.isNaN(testSunAngle) || vis < 0.5f
+                    ? probe.getValue(EnvironmentAttributes.SKY_COLOR, pt) : null;
+            float[] skyRgb = skyVec != null ? new float[]{skyVec.x(), skyVec.y(), skyVec.z()}
+                    : new float[]{0x78 / 255.0f, 0xA7 / 255.0f, 0xFF / 255.0f};
             MoonPhase phase = probe.getValue(EnvironmentAttributes.MOON_PHASE, pt);
             float moon = phase != null ? MOON_PHASE_BRIGHTNESS[phase.ordinal() & 7] : 1.0f;
             float[] fog = {cam.fogData.color.x, cam.fogData.color.y, cam.fogData.color.z};

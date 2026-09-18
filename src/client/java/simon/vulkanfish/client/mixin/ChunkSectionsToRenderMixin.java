@@ -1,7 +1,7 @@
 package simon.vulkanfish.client.mixin;
 
-import com.mojang.blaze3d.textures.GpuSampler;
-import com.mojang.blaze3d.textures.GpuTextureView;
+import com.mojang.renderpearl.api.textures.GpuSampler;
+import com.mojang.renderpearl.api.textures.GpuTextureView;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayerGroup;
 import net.minecraft.client.renderer.chunk.ChunkSectionsToRender;
 import org.spongepowered.asm.mixin.Mixin;

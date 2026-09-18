@@ -1,6 +1,6 @@
 package simon.vulkanfish.client.mixin;
 
-import com.mojang.blaze3d.vulkan.VulkanBackend;
+import com.mojang.renderpearl.backend.vulkan.VulkanBackend;
 import org.lwjgl.util.vma.Vma;
 import org.lwjgl.util.vma.VmaAllocatorCreateInfo;
 import org.spongepowered.asm.mixin.Mixin;

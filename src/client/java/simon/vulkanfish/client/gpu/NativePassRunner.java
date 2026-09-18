@@ -1,10 +1,10 @@
 package simon.vulkanfish.client.gpu;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import com.mojang.blaze3d.vulkan.VulkanCommandEncoder;
-import com.mojang.blaze3d.vulkan.VulkanConst;
-import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
-import com.mojang.blaze3d.vulkan.VulkanGpuTextureView;
+import com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder;
+import com.mojang.renderpearl.backend.vulkan.VulkanConst;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
@@ -387,9 +387,11 @@ public final class NativePassRunner {
             ByteBuffer offB = MemoryUtil.memByteBuffer(genOffs.mapped(), nImp * 24);
             for (int i = 0; i < p.improved.size(); i++) {
                 var n = p.improved.get(i);
-                byte[] perm = ((simon.vulkanfish.client.mixin.worldgen.ImprovedNoiseAccessor) (Object) n).vf$P();
+                byte[] perm = simon.vulkanfish.client.lod.gen.NoiseTables.perms(n);
+                double[] poff = simon.vulkanfish.client.lod.gen.NoiseTables.offsets(n);
+                if (perm == null || poff == null) throw new IllegalStateException("Rausch-Tabellen nicht greifbar");
                 for (int j = 0; j < 256; j++) permB.put(i * 256 + j, perm[j]);
-                offB.putDouble(i * 24, n.xo).putDouble(i * 24 + 8, n.yo).putDouble(i * 24 + 16, n.zo);
+                offB.putDouble(i * 24, poff[0]).putDouble(i * 24 + 8, poff[1]).putDouble(i * 24 + 16, poff[2]);
             }
             int nOct = Math.max(1, p.octaves.size());
             genOct = makeBuffer(arena, nOct * 16L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
@@ -408,14 +410,14 @@ public final class NativePassRunner {
                 nf.putDouble(i * 8, p.normalFactor.get(i));
             }
             int nBl = Math.max(1, p.blended.size());
-            genBlendD = makeBuffer(arena, nBl * 64L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
-            genBlendOct = makeBuffer(arena, nBl * 160L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
-            ByteBuffer bd = MemoryUtil.memByteBuffer(genBlendD.mapped(), nBl * 64);
-            ByteBuffer bo = MemoryUtil.memByteBuffer(genBlendOct.mapped(), nBl * 160);
+            genBlendD = makeBuffer(arena, nBl * 32L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
+            genBlendOct = makeBuffer(arena, nBl * 24L, stor | VK10.VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host);
+            ByteBuffer bd = MemoryUtil.memByteBuffer(genBlendD.mapped(), nBl * 32);
+            ByteBuffer bo = MemoryUtil.memByteBuffer(genBlendOct.mapped(), nBl * 24);
             for (int i = 0; i < p.blended.size(); i++) {
                 double[] d = p.blended.get(i);
-                for (int j = 0; j < 8; j++) bd.putDouble(i * 64 + j * 8, d[j]);
-                for (int j = 0; j < 40; j++) bo.putInt(i * 160 + j * 4, (int) d[8 + j]);
+                for (int j = 0; j < 4; j++) bd.putDouble(i * 32 + j * 8, d[j]);
+                for (int j = 0; j < 6; j++) bo.putInt(i * 24 + j * 4, (int) d[6 + j]);
             }
             genFlatSlots = Math.max(1, p.flatSlots);
             genInterpSlots = Math.max(1, p.interpSlots);
@@ -1960,7 +1962,7 @@ public final class NativePassRunner {
             var tex = net.minecraft.client.Minecraft.getInstance().getTextureManager().getTexture(
                     net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_ITEMS);
             var view = tex.getTextureView();
-            if (view instanceof com.mojang.blaze3d.vulkan.VulkanGpuTextureView vk) return vk.vkImageView();
+            if (view instanceof com.mojang.renderpearl.backend.vulkan.VulkanGpuTextureView vk) return vk.vkImageView();
         } catch (Throwable ignored) {
         }
         return 0L;
@@ -3334,7 +3336,7 @@ public final class NativePassRunner {
     }
 
     /** Vulkan-Format von Mojangs Zielen (nur die hier vorkommenden). */
-    static int vkFormat(com.mojang.blaze3d.textures.GpuTexture t) {
+    static int vkFormat(com.mojang.renderpearl.api.textures.GpuTexture t) {
         return switch (t.getFormat().name()) {
             case "D32_FLOAT" -> VK10.VK_FORMAT_D32_SFLOAT;
             case "RGBA16_FLOAT" -> VK10.VK_FORMAT_R16G16B16A16_SFLOAT;

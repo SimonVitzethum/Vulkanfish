@@ -24,16 +24,18 @@ public final class NoiseTerms {
     }
 
     private final List<Term> terms = new ArrayList<>();
-    private final double[] offs; // xo, yo, zo je ImprovedNoise
+    private final double[] offs; // xo, yo, zo je PerlinNoise
     public final int[] termBase;
 
     public NoiseTerms(DensityProgram p) {
         offs = new double[p.improved.size() * 3];
         for (int i = 0; i < p.improved.size(); i++) {
-            var n = p.improved.get(i);
-            offs[i * 3] = n.xo;
-            offs[i * 3 + 1] = n.yo;
-            offs[i * 3 + 2] = n.zo;
+            double[] o = simon.vulkanfish.client.lod.gen.NoiseTables.offsets(p.improved.get(i));
+            if (o != null) {
+                offs[i * 3] = o[0];
+                offs[i * 3 + 1] = o[1];
+                offs[i * 3 + 2] = o[2];
+            }
         }
         int words = 0;
         for (var c : p.code) words += c.size();
@@ -53,7 +55,7 @@ public final class NoiseTerms {
                     case DensityProgram.OP_SHIFTA -> normal(p, c.getInt(pc + 2), new int[]{SRC_X, SRC_NONE, SRC_Z}, 0.25, 0.25, false);
                     case DensityProgram.OP_SHIFTB -> normal(p, c.getInt(pc + 2), new int[]{SRC_Z, SRC_X, SRC_NONE}, 0.25, 0.25, false);
                     case DensityProgram.OP_SHIFT -> normal(p, c.getInt(pc + 2), new int[]{SRC_X, SRC_Y, SRC_Z}, 0.25, 0.25, false);
-                    case DensityProgram.OP_BLENDED -> blended(p.blended.get(c.getInt(pc + 2)));
+                    case DensityProgram.OP_BLENDED -> blended(p, p.blended.get(c.getInt(pc + 2)));
                     default -> {
                         continue;
                     }
@@ -69,34 +71,33 @@ public final class NoiseTerms {
     }
 
     private void normal(DensityProgram p, int idx, int[] src, double xz, double ys, boolean shifted) {
-        for (int half = 0; half < 2; half++) {
-            int start = p.normals.getInt(idx * 4 + half * 2), count = p.normals.getInt(idx * 4 + half * 2 + 1);
-            for (int i = start; i < start + count; i++) {
-                double[] o = p.octaves.get(i);
-                double f = o[1] * (half == 0 ? 1.0 : F2);
-                double[] k = new double[3];
-                for (int a = 0; a < 3; a++) k[a] = src[a] == SRC_NONE ? 0 : (a == 1 ? ys : xz) * f;
-                terms.add(new Term((int) o[0], src, k, shifted ? f : 0, 0));
-            }
+        // 26.3: flache Lagen (Frequenz/Amplitude/Fudge je Oktave, keine Halbierung mehr)
+        int start = p.normals.getInt(idx * 2), count = p.normals.getInt(idx * 2 + 1);
+        for (int i = start; i < start + count; i++) {
+            double[] o = p.octaves.get(i);
+            double f = o[1];
+            double[] k = new double[3];
+            for (int a = 0; a < 3; a++) k[a] = src[a] == SRC_NONE ? 0 : (a == 1 ? ys : xz) * f;
+            terms.add(new Term((int) o[0], src, k, shifted ? f : 0, o[3]));
         }
     }
 
-    /** Reihenfolge wie gBlendOct: 16 min, 16 max, 8 Haupt-Oktaven. */
-    private void blended(double[] d) {
-        double xzMul = d[0], yMul = d[1], xzFac = d[2], yFac = d[3], smear = d[4];
-        double limitSmear = yMul * smear, mainSmear = limitSmear / yFac;
+    /**
+     * Reihenfolge wie gBlendOct: min-, max-, Haupt-Stapel je als Oktav-Bereich;
+     * Smear je Lage (Fudge), Skalen aus den Blend-Skalaren.
+     */
+    private void blended(DensityProgram p, double[] d) {
+        double xzMul = d[0], yMul = d[1], xzFac = d[2], yFac = d[3];
         int[] src = {SRC_X, SRC_Y, SRC_Z};
-        for (int part = 0; part < 2; part++) {
-            double pw = 1.0;
-            for (int i = 0; i < 16; i++) {
-                terms.add(new Term((int) d[8 + part * 16 + i], src, new double[]{xzMul * pw, yMul * pw, xzMul * pw}, 0, limitSmear * pw));
-                pw *= 0.5;
-            }
-        }
-        double pw = 1.0;
-        for (int i = 0; i < 8; i++) {
-            terms.add(new Term((int) d[40 + i], src, new double[]{xzMul / xzFac * pw, yMul / yFac * pw, xzMul / xzFac * pw}, 0, mainSmear * pw));
-            pw *= 0.5;
+        stack(p, xzMul, yMul, (int) d[6], (int) d[7], src);
+        stack(p, xzMul, yMul, (int) d[8], (int) d[9], src);
+        stack(p, xzMul / xzFac, yMul / yFac, (int) d[10], (int) d[11], src);
+    }
+
+    private void stack(DensityProgram p, double xz, double ys, int start, int count, int[] src) {
+        for (int i = start; i < start + count; i++) {
+            double[] o = p.octaves.get(i);
+            terms.add(new Term((int) o[0], src, new double[]{xz * o[1], ys * o[1], xz * o[1]}, 0, o[3]));
         }
     }
 

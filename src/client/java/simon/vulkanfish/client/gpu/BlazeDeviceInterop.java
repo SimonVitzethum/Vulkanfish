@@ -1,8 +1,8 @@
 package simon.vulkanfish.client.gpu;
 
-import com.mojang.blaze3d.systems.GpuDevice;
+import com.mojang.renderpearl.api.device.GpuDevice;
 import com.mojang.blaze3d.systems.RenderSystem;
-import com.mojang.blaze3d.vulkan.VulkanDevice;
+import com.mojang.renderpearl.backend.vulkan.VulkanDevice;
 import org.lwjgl.vulkan.VkDevice;
 import org.lwjgl.vulkan.VkInstance;
 import org.lwjgl.vulkan.VkPhysicalDevice;
@@ -11,9 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Holt die nativen Vulkan-Handles aus MC 26.2 Blaze3D (kein VulkanMod noetig).
+ * Holt die nativen Vulkan-Handles aus Mojangs RenderPearl (kein VulkanMod noetig).
  *
- * <p>Pfad: {@code RenderSystem.getDevice()} -&gt; {@code VulkanDevice} -&gt;
+ * <p>Pfad: {@code RenderSystem.getDevice()} -&gt; Backend ({@code VulkanDevice}) -&gt;
  * {@code vkDevice()} (LWJGL), dazu Graphics/Compute/Transfer-Queues und
  * {@code VulkanPhysicalDevice.hasDeviceExtension(..)} zum Faehigkeits-Check.
  * Alles mit Graceful-Fallback: fehlt etwas, laeuft der Vanilla-Pfad weiter.
@@ -30,7 +30,7 @@ public final class BlazeDeviceInterop {
     public static final String KHR_DRAW_INDIRECT_COUNT = "VK_KHR_draw_indirect_count";
 
     private VulkanDevice device;
-    private com.mojang.blaze3d.vulkan.VulkanPhysicalDevice physical;
+    private com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice physical;
     private boolean meshShading;
     private boolean raytracing;
     private boolean indirectCount;
@@ -44,9 +44,9 @@ public final class BlazeDeviceInterop {
                 LOG.warn("[vulkanfish] Noch kein GpuDevice, Fallback Vanilla");
                 return false;
             }
-            // GpuDevice haelt das Backend (VulkanDevice) privat – Reflection,
-            // da es keinen public Getter gibt (26.2, javap-verifiziert).
-            var backendField = GpuDevice.class.getDeclaredField("backend");
+            // GpuDevice ist ein Interface – das Backend steckt privat in der
+            // Laufzeitklasse (FrontendGpuDevice.backend, 26.3 javap-verifiziert).
+            var backendField = gpu.getClass().getDeclaredField("backend");
             backendField.setAccessible(true);
             Object backend = backendField.get(gpu);
             if (!(backend instanceof VulkanDevice vk)) {
@@ -81,17 +81,17 @@ public final class BlazeDeviceInterop {
         }
     }
 
-    private static com.mojang.blaze3d.vulkan.VulkanPhysicalDevice getPhysicalDevice(VulkanDevice vk) {
+    private static com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice getPhysicalDevice(VulkanDevice vk) {
         // Mojang speichert den Wrapper nirgends, aber Mojangs VkDevice kennt
         // sein physisches Device -> exakt die GPU, auf der wir rendern.
         try {
-            return new com.mojang.blaze3d.vulkan.VulkanPhysicalDevice(vk.vkDevice().getPhysicalDevice());
-        } catch (com.mojang.blaze3d.systems.BackendCreationException e) {
+            return new com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice(vk.vkDevice().getPhysicalDevice());
+        } catch (com.mojang.renderpearl.api.device.BackendCreationException e) {
             throw new IllegalStateException("PhysicalDevice-Wrapper fehlgeschlagen", e);
         }
     }
 
-    private static boolean has(com.mojang.blaze3d.vulkan.VulkanPhysicalDevice phys, String ext) {
+    private static boolean has(com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice phys, String ext) {
         try {
             return phys.hasDeviceExtension(ext);
         } catch (Throwable t) {
@@ -125,7 +125,7 @@ public final class BlazeDeviceInterop {
     }
 
     /** Mojangs Command-Encoder: eigene Command-Buffer per execute() in die Frame-Submission haengen. */
-    public com.mojang.blaze3d.vulkan.VulkanCommandEncoder commandEncoder() {
+    public com.mojang.renderpearl.backend.vulkan.VulkanCommandEncoder commandEncoder() {
         return device.createCommandEncoder();
     }
 

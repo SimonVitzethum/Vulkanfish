@@ -1,10 +1,10 @@
 package simon.vulkanfish.client.gpu;
 
-import com.mojang.blaze3d.vulkan.VulkanBackend;
-import com.mojang.blaze3d.vulkan.VulkanPhysicalDevice;
-import com.mojang.blaze3d.vulkan.init.VulkanFeature;
-import com.mojang.blaze3d.vulkan.init.VulkanPNextStruct;
-import java.util.Collection;
+import com.mojang.renderpearl.backend.vulkan.VulkanFeatureSets;
+import com.mojang.renderpearl.backend.vulkan.VulkanPhysicalDevice;
+import com.mojang.renderpearl.backend.vulkan.init.FeatureSet;
+import com.mojang.renderpearl.backend.vulkan.init.VulkanFeature;
+import com.mojang.renderpearl.backend.vulkan.init.VulkanPNextStruct;
 import java.util.Set;
 import org.lwjgl.vulkan.EXTMeshShader;
 import org.lwjgl.vulkan.KHRAccelerationStructure;
@@ -22,9 +22,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Schaltet die Extensions/Features des GPU-driven Pfads direkt auf MOJANGS
- * VkDevice frei (per Mixin in {@code VulkanBackend.createDevice}, BEVOR das
- * Device erzeugt wird).
+ * Schaltet die Extensions/Features des GPU-driven Pfads auf MOJANGS VkDevice frei (26.3:
+ * eigene {@link FeatureSet}s, die der Mixin an {@code VulkanFeatureSets.optionalFeatureSets}
+ * haengt – Vanilla aktiviert sie nur bei Support, sonst Classic-Fallback/Vanilla).
  *
  * <p>Hintergrund: Mojang aktiviert nur dynamic_rendering, push_descriptor,
  * synchronization2, vertex_attribute_divisor, swapchain (+multi_draw).
@@ -32,6 +32,9 @@ import org.slf4j.LoggerFactory;
  * LWJGL laedt dann die Function-Pointer (vkCmdDrawMeshTasks*EXT) automatisch
  * in Mojangs VkDevice-Wrapper. Damit teilen wir Device, Queue und Frame-
  * Submission mit Blaze3D und koennen direkt in dessen Main-Target rendern.
+ *
+ * <p>Flags werden in {@link #probeDevice} gesetzt (aus dem createDevice-Mixin, VOR
+ * VMA-Erzeugung – die VMA-Flags haengen an rayQueryEnabled).
  */
 public final class MeshShaderSupport {
     private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
@@ -55,39 +58,86 @@ public final class MeshShaderSupport {
     private MeshShaderSupport() {
     }
 
-    /** Aus dem VulkanBackend-Mixin: Extension-/Feature-Sets vor vkCreateDevice ergaenzen. */
-    public static void augment(Collection<String> extensions, VulkanPhysicalDevice physicalDevice,
-                               Set<VulkanFeature> features) {
+    private static VulkanFeature meshFeature() {
+        return new VulkanFeature(new VulkanPNextStruct(VkPhysicalDeviceMeshShaderFeaturesEXT.class,
+                EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
+                VkPhysicalDeviceMeshShaderFeaturesEXT.SIZEOF),
+                "meshShader", VkPhysicalDeviceMeshShaderFeaturesEXT.MESHSHADER);
+    }
+
+    private static VulkanFeature indirectCountFeature() {
+        return new VulkanFeature(VulkanFeatureSets.VK12_FEATURES_STRUCT,
+                "drawIndirectCount", VkPhysicalDeviceVulkan12Features.DRAWINDIRECTCOUNT);
+    }
+
+    private static VulkanFeature storageReadFeature() {
+        return new VulkanFeature(VulkanFeatureSets.VK10_FEATURES_STRUCT,
+                "shaderStorageImageReadWithoutFormat",
+                VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEREADWITHOUTFORMAT);
+    }
+
+    private static VulkanFeature storageWriteFeature() {
+        return new VulkanFeature(VulkanFeatureSets.VK10_FEATURES_STRUCT,
+                "shaderStorageImageWriteWithoutFormat",
+                VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEWRITEWITHOUTFORMAT);
+    }
+
+    private static VulkanFeature fragmentStoresFeature() {
+        return new VulkanFeature(VulkanFeatureSets.VK10_FEATURES_STRUCT,
+                "fragmentStoresAndAtomics", VkPhysicalDeviceFeatures.FRAGMENTSTORESANDATOMICS);
+    }
+
+    private static VulkanFeature float64Feature() {
+        return new VulkanFeature(VulkanFeatureSets.VK10_FEATURES_STRUCT,
+                "shaderFloat64", VkPhysicalDeviceFeatures.SHADERFLOAT64);
+    }
+
+    /** Basis (Classic-Raster + Compute + OIT): ohne fragmentStores laeuft nur Vanilla. */
+    public static FeatureSet baseFeatureSet() {
+        return new FeatureSet("Vulkanfish base", Set.of(),
+                Set.of(fragmentStoresFeature(), indirectCountFeature(), storageReadFeature(), storageWriteFeature()));
+    }
+
+    /** Mesh-Stage (sonst Classic-Raster-Fallback, Culling bleibt GPU-driven). */
+    public static FeatureSet meshFeatureSet() {
+        return new FeatureSet("Vulkanfish mesh", Set.of(EXT_MESH, EXT_SPIRV_14), Set.of(meshFeature()));
+    }
+
+    /** GPU-Worldgen: Noise-Koordinaten in double wie Vanilla (sonst CPU-Fallback dort). */
+    public static FeatureSet float64FeatureSet() {
+        return new FeatureSet("Vulkanfish float64", Set.of(), Set.of(float64Feature()));
+    }
+
+    /**
+     * Hardware-Raytracing fuer die Blocklicht-Schatten: Ray Queries aus dem Deferred-
+     * Compute gegen BLAS, die direkt aus unserem Vertexpuffer gebaut werden (R16G16B16_UNORM,
+     * Stride 16). Ohne eines der Teile bleibt es beim Vanilla-Blocklicht.
+     */
+    public static FeatureSet rtFeatureSet() {
+        return new FeatureSet("Vulkanfish raytracing", Set.of(EXT_AS, EXT_RAY_QUERY, EXT_DEFERRED_HOST),
+                Set.of(new VulkanFeature(new VulkanPNextStruct(
+                                VkPhysicalDeviceAccelerationStructureFeaturesKHR.class,
+                                KHRAccelerationStructure.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
+                                VkPhysicalDeviceAccelerationStructureFeaturesKHR.SIZEOF),
+                                "accelerationStructure",
+                                VkPhysicalDeviceAccelerationStructureFeaturesKHR.ACCELERATIONSTRUCTURE),
+                        new VulkanFeature(new VulkanPNextStruct(VkPhysicalDeviceRayQueryFeaturesKHR.class,
+                                KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
+                                VkPhysicalDeviceRayQueryFeaturesKHR.SIZEOF),
+                                "rayQuery", VkPhysicalDeviceRayQueryFeaturesKHR.RAYQUERY),
+                        new VulkanFeature(VulkanFeatureSets.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
+                                VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS)));
+    }
+
+    /**
+     * Aus dem createDevice-Mixin (VOR vkCreateDevice-Nutzung/VMA): Faehigkeiten abfragen und
+     * Flags setzen. Entscheidend ist, was auf Mojangs Device AKTIVIERT wird (FeatureSets oben),
+     * die Abfrage hier spiegelt exakt deren Bedingungen (Support = aktiviert).
+     */
+    public static void probeDevice(VulkanPhysicalDevice physicalDevice) {
         try {
-            // Basis-Features gelten MIT und OHNE Mesh-Shader (Classic-Raster-Fallback braucht
-            // dieselben Compute-/Fragment-Faehigkeiten, nur keine Mesh-Stage).
             boolean hasMeshExt = physicalDevice.hasDeviceExtension(EXT_MESH)
                     && physicalDevice.hasDeviceExtension(EXT_SPIRV_14);
-            VulkanPNextStruct meshStruct = new VulkanPNextStruct(
-                    EXTMeshShader.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT,
-                    VkPhysicalDeviceMeshShaderFeaturesEXT.SIZEOF);
-            VulkanFeature mesh = new VulkanFeature(meshStruct, "meshShader",
-                    VkPhysicalDeviceMeshShaderFeaturesEXT.MESHSHADER);
-            VulkanFeature indirectCount = new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT,
-                    "drawIndirectCount", VkPhysicalDeviceVulkan12Features.DRAWINDIRECTCOUNT);
-            // Nicht genutzte Slang-Module (Denoise/LOD) schreiben RWTextures ohne Format
-            VulkanFeature storageRead = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
-                    "shaderStorageImageReadWithoutFormat",
-                    VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEREADWITHOUTFORMAT);
-            VulkanFeature storageWrite = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
-                    "shaderStorageImageWriteWithoutFormat",
-                    VkPhysicalDeviceFeatures.SHADERSTORAGEIMAGEWRITEWITHOUTFORMAT);
-            // Glas/Eis: der Fragment-Shader haengt Fragmente per Atomik in Pro-Pixel-Listen
-            VulkanFeature fragmentStores = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
-                    "fragmentStoresAndAtomics", VkPhysicalDeviceFeatures.FRAGMENTSTORESANDATOMICS);
-            // Atlas-Anisotropie gegen Mip-Flimmern an Seiten (best-effort: fehlt sie, nimmt der
-            // Sampler den plain-Pfad; ohne ist gerade Savanna-Gelb auf Dreck sichtbar unruhig)
-            VulkanFeature aniso = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
-                    "samplerAnisotropy", VkPhysicalDeviceFeatures.SAMPLERANISOTROPY);
-            // GPU-Worldgen: Noise-Koordinaten in double wie Vanilla
-            VulkanFeature float64 = new VulkanFeature(VulkanBackend.VK10_FEATURES_STRUCT,
-                    "shaderFloat64", VkPhysicalDeviceFeatures.SHADERFLOAT64);
-
             try (Arena arena = new Arena()) {
                 VkPhysicalDeviceFeatures2 query = VkPhysicalDeviceFeatures2.calloc(arena.stack()).sType$Default();
                 VkPhysicalDeviceVulkan12Features f12 = VkPhysicalDeviceVulkan12Features.calloc(arena.stack()).sType$Default();
@@ -102,38 +152,21 @@ public final class MeshShaderSupport {
                 fAs.pNext(fRq.address());
                 VK12.vkGetPhysicalDeviceFeatures2(physicalDevice.vkPhysicalDevice(), query);
                 // Basis zuerst (Classic-Raster + Compute + OIT kommen ohne Mesh-Stage aus)
-                if (!fragmentStores.get(query)) {
+                if (!fragmentStoresFeature().get(query)) {
                     LOG.warn("[vulkanfish] fragmentStoresAndAtomics nicht unterstuetzt – Vanilla rendert");
                     return;
                 }
-                features.add(fragmentStores);
                 meshEnabled = false;
-                if (indirectCount.get(query)) {
-                    features.add(indirectCount);
-                    indirectCountEnabled = true;
-                }
-                if (float64.get(query)) {
-                    features.add(float64);
-                    float64Enabled = true;
-                }
-                if (storageRead.get(query)) features.add(storageRead);
-                if (storageWrite.get(query)) features.add(storageWrite);
-                if (aniso.get(query)) {
-                    features.add(aniso);
-                } else {
-                    LOG.info("[vulkanfish] samplerAnisotropy fehlt – Atlas ohne Anisotropie (Seiten unruhiger)");
-                }
+                indirectCountEnabled = indirectCountFeature().get(query);
+                float64Enabled = float64Feature().get(query);
                 // Mesh-Stage nur mit Extension + Feature (sonst Classic-Raster-Fallback)
-                if (hasMeshExt && mesh.get(query)) {
-                    extensions.add(EXT_MESH);
-                    extensions.add(EXT_SPIRV_14);
-                    features.add(mesh);
+                if (hasMeshExt && meshFeature().get(query)) {
                     meshEnabled = true;
                 } else {
                     LOG.info("[vulkanfish] GPU ohne {}/{} oder meshShader-Feature – Classic-Raster-Fallback (Compute-Culling bleibt)",
                             EXT_MESH, EXT_SPIRV_14);
                 }
-                augmentRayQuery(extensions, physicalDevice, features, fAs, fRq, f12, arena);
+                probeRayQuery(physicalDevice, fAs, fRq, f12, arena);
             }
             LOG.info("[vulkanfish] Mojang-Device erweitert: mesh={} (drawIndirectCount={})",
                     meshEnabled, indirectCountEnabled);
@@ -141,19 +174,15 @@ public final class MeshShaderSupport {
             meshEnabled = false;
             indirectCountEnabled = false;
             rayQueryEnabled = false;
-            LOG.warn("[vulkanfish] Device-Erweiterung fehlgeschlagen – Vanilla rendert", t);
+            LOG.warn("[vulkanfish] Device-Abfrage fehlgeschlagen – Vanilla rendert", t);
         }
     }
 
-    /**
-     * Hardware-Raytracing fuer die Blocklicht-Schatten: Ray Queries aus dem Deferred-
-     * Compute gegen BLAS, die direkt aus unserem Vertexpuffer gebaut werden (R16G16B16_UNORM,
-     * Stride 16). Ohne eines der Teile bleibt es beim Vanilla-Blocklicht.
-     */
-    private static void augmentRayQuery(Collection<String> extensions, VulkanPhysicalDevice physicalDevice,
-                                        Set<VulkanFeature> features, VkPhysicalDeviceAccelerationStructureFeaturesKHR fAs,
-                                        VkPhysicalDeviceRayQueryFeaturesKHR fRq, VkPhysicalDeviceVulkan12Features f12,
-                                        Arena arena) {
+    private static void probeRayQuery(VulkanPhysicalDevice physicalDevice,
+                                      VkPhysicalDeviceAccelerationStructureFeaturesKHR fAs,
+                                      VkPhysicalDeviceRayQueryFeaturesKHR fRq, VkPhysicalDeviceVulkan12Features f12,
+                                      Arena arena) {
+        rayQueryEnabled = false;
         if (!GpuDrivenConfig.load().enableRaytracing()) {
             LOG.info("[vulkanfish] Raytracing per Config aus");
             return;
@@ -173,20 +202,6 @@ public final class MeshShaderSupport {
             LOG.info("[vulkanfish] R16G16B16_UNORM nicht als BLAS-Vertexformat – Blocklicht ohne Raytracing");
             return;
         }
-        VulkanPNextStruct asStruct = new VulkanPNextStruct(
-                KHRAccelerationStructure.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR,
-                VkPhysicalDeviceAccelerationStructureFeaturesKHR.SIZEOF);
-        VulkanPNextStruct rqStruct = new VulkanPNextStruct(
-                KHRRayQuery.VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR,
-                VkPhysicalDeviceRayQueryFeaturesKHR.SIZEOF);
-        extensions.add(EXT_AS);
-        extensions.add(EXT_RAY_QUERY);
-        extensions.add(EXT_DEFERRED_HOST);
-        features.add(new VulkanFeature(asStruct, "accelerationStructure",
-                VkPhysicalDeviceAccelerationStructureFeaturesKHR.ACCELERATIONSTRUCTURE));
-        features.add(new VulkanFeature(rqStruct, "rayQuery", VkPhysicalDeviceRayQueryFeaturesKHR.RAYQUERY));
-        features.add(new VulkanFeature(VulkanBackend.VK12_FEATURES_STRUCT, "bufferDeviceAddress",
-                VkPhysicalDeviceVulkan12Features.BUFFERDEVICEADDRESS));
         rayQueryEnabled = true;
         LOG.info("[vulkanfish] Mojang-Device erweitert: {} + {} (Raytracing fuer Blocklicht-Schatten)", EXT_AS, EXT_RAY_QUERY);
     }

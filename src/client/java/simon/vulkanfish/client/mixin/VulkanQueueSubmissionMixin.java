@@ -9,7 +9,7 @@ import org.spongepowered.asm.mixin.injection.At;
 import simon.vulkanfish.client.gpu.FgPresenter;
 
 /** Mojangs Queue-Submits unter der gemeinsamen Queue-Sperre (Present-Thread der Frame Generation). */
-@Mixin(targets = "com.mojang.blaze3d.vulkan.VulkanQueue$Submission")
+@Mixin(targets = "com.mojang.renderpearl.backend.vulkan.VulkanQueue$Submission")
 public class VulkanQueueSubmissionMixin {
     @WrapOperation(method = "close", at = @At(value = "INVOKE",
             target = "Lorg/lwjgl/vulkan/KHRSynchronization2;vkQueueSubmit2KHR(Lorg/lwjgl/vulkan/VkQueue;Lorg/lwjgl/vulkan/VkSubmitInfo2$Buffer;J)I"))

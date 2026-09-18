@@ -1044,7 +1044,7 @@ public final class LodManager {
             ClientLevel lvl = level;
             if (lvl == null) return;
             SerializableChunkData data = SerializableChunkData.parse(lvl, PalettedContainerFactory.create(lvl.registryAccess()), tag);
-            if (!data.chunkStatus().isOrAfter(ChunkStatus.CARVERS)) { // Rand der Erkundung: Gelaende noch unfertig
+            if (!data.chunkStatus().isOrAfter(ChunkStatus.TERRAIN)) { // Rand der Erkundung: Gelaende noch unfertig
                 noData(e, cx, cz, dist);
                 return;
             }

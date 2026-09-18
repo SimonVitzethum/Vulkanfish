@@ -1,6 +1,6 @@
 package simon.vulkanfish.client.gpu;
 
-import com.mojang.blaze3d.GpuFormat;
+import com.mojang.renderpearl.api.GpuFormat;
 import com.mojang.blaze3d.pipeline.RenderTarget;
 import com.mojang.blaze3d.pipeline.TextureTarget;
 
@@ -41,7 +41,8 @@ public final class RenderScale {
         if (s >= 0.999f || real == null) return;
         int w = Math.max(1, Math.round(real.width * s)), h = Math.max(1, Math.round(real.height * s));
         if (low == null) {
-            low = new TextureTarget("Vulkanfish Render", w, h, true, GpuFormat.RGBA8_UNORM);
+            // 26.3: (name, w, h, colorFormat, depthFormat) – Tiefe wie Vanillas Main-Target
+            low = new TextureTarget("Vulkanfish Render", w, h, GpuFormat.RGBA8_UNORM, GpuFormat.D32_FLOAT);
         } else if (low.width != w || low.height != h) {
             low.resize(w, h);
         }

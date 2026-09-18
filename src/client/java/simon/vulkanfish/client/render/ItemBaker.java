@@ -48,7 +48,8 @@ public final class ItemBaker {
     }
 
     /** Ein Fang-Auftrag (Pose einkopiert, Quads per Referenz – BakedQuads sind unveraenderlich). */
-    private record Captured(Matrix4f pose, List<BakedQuad> quads, int[] tints, ItemStackRenderState.FoilType foil) {
+    private record Captured(Matrix4f pose, net.minecraft.client.resources.model.geometry.ItemQuads quads,
+                            int[] tints, ItemStackRenderState.FoilType foil) {
     }
 
     private static final class CaptureCollector implements SubmitNodeCollector {
@@ -61,7 +62,8 @@ public final class ItemBaker {
 
         @Override
         public void submitItem(PoseStack poseStack, ItemDisplayContext displayContext, int lightCoords,
-                               int overlayCoords, int outlineColor, int[] tintLayers, List<BakedQuad> quads,
+                               int overlayCoords, int outlineColor, int[] tintLayers,
+                               net.minecraft.client.resources.model.geometry.ItemQuads quads,
                                ItemStackRenderState.FoilType foilType) {
             batches.add(new Captured(new Matrix4f(poseStack.last().pose()), quads, tintLayers, foilType));
         }
@@ -90,9 +92,20 @@ public final class ItemBaker {
         }
 
         @Override
+        public void submitTextBackground(PoseStack poseStack, float x, float y, float width, float height,
+                                         int color, net.minecraft.client.gui.Font.DisplayMode displayMode, int outlineColor) {
+        }
+
+        @Override
         public <S> void submitModel(Model<? super S> model, S state, PoseStack poseStack, RenderType renderType,
-                                    int lightCoords, int overlayCoords, int tintedColor, TextureAtlasSprite sprite,
-                                    int outlineColor, ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
+                                    int lightCoords, int overlayCoords, int tintedColor,
+                                    net.minecraft.client.renderer.texture.UvMapping uvMapping, int outlineColor) {
+        }
+
+        @Override
+        public <S> void submitCrumblingOverlay(Model<? super S> model, S state, PoseStack poseStack,
+                                               RenderType renderType, int lightCoords, int overlayCoords, int tintedColor,
+                                               ModelFeatureRenderer.CrumblingOverlay crumblingOverlay) {
         }
 
         @Override
@@ -106,7 +119,8 @@ public final class ItemBaker {
         }
 
         @Override
-        public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress) {
+        public void submitBreakingBlockModel(PoseStack poseStack, List<BlockStateModelPart> parts, int progress,
+                                             boolean withOverlay) {
         }
 
         @Override
@@ -149,9 +163,9 @@ public final class ItemBaker {
         var layers = ((ItemStackRenderStateAccessor) (Object) state.item).vulkanfish$layers();
         int active = ((ItemStackRenderStateAccessor) (Object) state.item).vulkanfish$activeLayerCount();
         if (layers == null || active <= 0 || layers[0] == null) return false;
-        List<BakedQuad> firstQuads = layers[0].prepareQuadList();
-        if (firstQuads.isEmpty()) return false;
-        BakedQuad first = firstQuads.get(0);
+        var layerQuads = ((simon.vulkanfish.client.mixin.ItemLayerQuadsAccessor) (Object) layers[0]).vulkanfish$quads();
+        if (layerQuads == null || layerQuads.all().isEmpty()) return false;
+        BakedQuad first = layerQuads.all().get(0);
         long key = ((long) System.identityHashCode(first) << 32) | (active & 0xFFFFFFFFL);
         Integer slot = KIND_TO_SLOT.get(key);
         if (slot != null) {
@@ -190,8 +204,9 @@ public final class ItemBaker {
             for (Captured b : capture.batches) {
                 if (b.foil() != ItemStackRenderState.FoilType.NONE) return null;
                 if (b.tints() != null && b.tints().length > 0) return null;
+                if (!b.quads().translucent().isEmpty()) return null; // transluzent -> Vanilla
                 float[] m = mojangToJoml(b.pose());
-                for (BakedQuad q : b.quads()) {
+                for (BakedQuad q : b.quads().all()) {
                     int flags = q.materialInfo().flags();
                     if ((flags & BakedQuad.FLAG_TRANSLUCENT) != 0) return null;
                     var sprite = q.materialInfo().sprite();

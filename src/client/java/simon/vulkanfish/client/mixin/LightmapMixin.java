@@ -1,7 +1,7 @@
 package simon.vulkanfish.client.mixin;
 
-import com.mojang.blaze3d.textures.GpuTexture;
-import com.mojang.blaze3d.vulkan.VulkanGpuTexture;
+import com.mojang.renderpearl.api.textures.GpuTexture;
+import com.mojang.renderpearl.backend.vulkan.VulkanGpuTexture;
 import net.minecraft.client.renderer.Lightmap;
 import net.minecraft.client.renderer.state.LightmapRenderState;
 import org.spongepowered.asm.mixin.Final;

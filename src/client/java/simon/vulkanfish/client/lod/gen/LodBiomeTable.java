@@ -25,8 +25,6 @@ import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.WorldGenerationContext;
 import net.minecraft.world.level.levelgen.blending.Blender;
-import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;
-import net.minecraft.world.level.levelgen.feature.configurations.TreeConfiguration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import simon.vulkanfish.client.lod.LodMaterials;
@@ -214,16 +212,19 @@ public final class LodBiomeTable {
             }
         }
         Heightmap.primeHeightmaps(chunk, EnumSet.of(Heightmap.Types.WORLD_SURFACE_WG, Heightmap.Types.OCEAN_FLOOR_WG));
-        var sampler = src.randomState.sampler();
-        chunk.fillBiomesFromNoise((qx, qy, qz, s) -> biome, sampler);
-        chunk.setPersistedStatus(ChunkStatus.NOISE);
+        chunk.fillBiomesFromNoise((qx, qy, qz) -> biome);
+        chunk.setPersistedStatus(ChunkStatus.TERRAIN);
         BiomeManager bm = new BiomeManager((qx, qy, qz) -> biome, BiomeManager.obfuscateSeed(src.seed));
         int sea = src.settings.seaLevel();
         Aquifer.FluidStatus seaStatus = new Aquifer.FluidStatus(sea, water);
-        NoiseChunk nc = chunk.getOrCreateNoiseChunk(c -> NoiseChunk.forChunk(c, src.randomState, Beardifier.EMPTY, src.settings,
-                (x, y, z) -> seaStatus, Blender.empty()));
-        src.randomState.surfaceSystem().buildSurface(src.randomState, bm, src.settings.useLegacyRandomSource(),
-                new WorldGenerationContext(src.generator, src.heights), chunk, nc, src.settings.surfaceRule(), null);
+        // 26.3: NoiseChunk direkt bauen (Volumen des Chunks), MaterialSystem statt SurfaceSystem
+        var volume = new net.minecraft.world.level.levelgen.densityfunction.DensityVolume(
+                16, src.heights.getHeight(), 16, pos.getMinBlockX(), minY, pos.getMinBlockZ());
+        NoiseChunk nc = new NoiseChunk(src.randomState, Beardifier.EMPTY, src.settings,
+                (x, y, z) -> seaStatus, Blender.empty(), volume);
+        src.randomState.surfaceSystem().buildSurface(src.randomState, bm,
+                new WorldGenerationContext(src.generator, src.heights), chunk, nc,
+                src.settings.materialRule().value(), java.util.Set.of());
         return chunk;
     }
 
@@ -240,20 +241,21 @@ public final class LodBiomeTable {
             outer:
             for (var set : biome.value().getGenerationSettings().features()) {
                 for (var placed : set) {
-                    for (var cf : (Iterable<Holder<ConfiguredFeature<?, ?>>>) placed.value().getFeatures()::iterator) {
-                        var all = new ArrayList<ConfiguredFeature<?, ?>>();
-                        all.add(cf.value());
-                        cf.value().getSubFeatures().forEach(h -> all.add(h.value()));
-                        for (ConfiguredFeature<?, ?> f : all) {
-                            if (f.config() instanceof TreeConfiguration tc) {
-                                RandomSource r = RandomSource.create(1);
-                                try {
-                                    leaves = tc.foliageProvider.getState(null, r, BlockPos.ZERO);
-                                    log = tc.trunkProvider.getState(null, r, BlockPos.ZERO);
-                                } catch (Throwable ignored) {
-                                }
-                                if (leaves != null) break outer;
+                    java.util.List<Holder<net.minecraft.world.level.levelgen.feature.Feature>> all = new ArrayList<>();
+                    placed.value().getFeatures().forEach(all::add);
+                    for (Holder<net.minecraft.world.level.levelgen.feature.Feature> h : List.copyOf(all)) {
+                        h.value().getSubFeatures().forEach(all::add);
+                    }
+                    for (Holder<net.minecraft.world.level.levelgen.feature.Feature> h : all) {
+                        // 26.3: TreeFeature ist ein Record (kein ConfiguredFeature mehr)
+                        if (h.value() instanceof net.minecraft.world.level.levelgen.feature.TreeFeature tf) {
+                            RandomSource r = RandomSource.create(1);
+                            try {
+                                leaves = tf.foliageProvider().value().getState(null, r, BlockPos.ZERO);
+                                log = tf.trunkProvider().value().getState(null, r, BlockPos.ZERO);
+                            } catch (Throwable ignored) {
                             }
+                            if (leaves != null) break outer;
                         }
                     }
                 }
