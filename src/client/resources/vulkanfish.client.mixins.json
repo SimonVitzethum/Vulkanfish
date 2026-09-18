@@ -18,7 +18,6 @@
 		"LightmapExtractorMixin",
 		"LightmapMixin",
 		"ManageServerScreenMixin",
-		"ParticleEngineMixin",
 		"PreparedFrameInvoker",
 		"PreparedFrameMixin",
 		"RenderSystemMixin",
