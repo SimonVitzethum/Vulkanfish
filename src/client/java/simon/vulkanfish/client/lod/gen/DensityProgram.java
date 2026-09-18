@@ -493,7 +493,8 @@ public final class DensityProgram {
             }
             if (s == STAGE_V && resultReg >= 0) lastUse[resultReg] = Integer.MAX_VALUE;
             if (s == STAGE_D) for (int r : directResults) lastUse[r] = Integer.MAX_VALUE;
-            // 2. physische Register vergeben, nach letzter Nutzung freigeben
+            // 2. physische Register vergeben, nach letzter Nutzung freigeben (Linear-Scan:
+            // Quellen auf physisch umschreiben, sterbende Slots anhand der Stufe-1-Nutzung freigeben)
             int[] phys = new int[vregs];
             java.util.Arrays.fill(phys, -1);
             java.util.ArrayDeque<Integer> free = new java.util.ArrayDeque<>();
@@ -504,16 +505,14 @@ public final class DensityProgram {
                 int[] reads = readSlots(c, pc);
                 for (int r : reads) {
                     int v = c.getInt(r);
-                    if ((v & CONST_REF) == 0) lastUse[v] = pc;
-                }
-                // Quellen, deren Leben hier endet, freigeben (Ziel darf sie wiederverwenden)
-                for (int r : reads) {
-                    int orig = findOrig(phys, c.getInt(r));
-                    if (orig >= 0 && lastUse[orig] == pc) {
-                        free.push(phys[orig]);
-                        lastUse[orig] = -2;
+                    if ((v & CONST_REF) != 0) continue;
+                    c.set(r, phys[v]);
+                    if (lastUse[v] == pc && lastUse[v] != -2) {
+                        free.push(phys[v]); // spaeter ungenutzt -> Slot wiederverwendbar
+                        lastUse[v] = -2;
                     }
                 }
+                // Quellen, deren Leben hier endet, freigeben (Ziel darf sie wiederverwenden)
                 if (op != OP_STORE) {
                     int v = c.getInt(pc + 1);
                     int p = free.isEmpty() ? maxPhys++ : free.pop();
