@@ -169,18 +169,22 @@ public final class WorldgenSource {
         Random rnd = new Random(1234);
         double maxErr = 0, sumErr = 0;
         int n = 400, signMismatch = 0;
+        String worst = "";
         for (int i = 0; i < n; i++) {
             int x = rnd.nextInt(20000) - 10000, y = rnd.nextInt(384) - 64, z = rnd.nextInt(20000) - 10000;
             // 26.3: compute() ist weg – Vanillas Sampler direkt (exakt, ohne Context)
             double ref = rs.sampleBlockValueUncached(f, x, y, z);
             double got = cpu.evalDirect(x, y, z);
             double err = Math.abs(ref - got);
-            maxErr = Math.max(maxErr, err);
+            if (err > maxErr) {
+                maxErr = err;
+                worst = x + "/" + y + "/" + z + " ref=" + ref + " got=" + got;
+            }
             sumErr += err;
             if ((ref > 0) != (got > 0)) signMismatch++;
         }
-        LOG.info("[vulkanfish] LOD-Generator: Programm vs. Vanilla an {} Punkten: max. Fehler {}, mittel {}, Vorzeichen falsch {} ({} Register)",
-                n, String.format("%.2e", maxErr), String.format("%.2e", sumErr / n), signMismatch, direct.regCount[DensityProgram.STAGE_V]);
+        LOG.info("[vulkanfish] LOD-Generator: Programm vs. Vanilla an {} Punkten: max. Fehler {} ({}), mittel {}, Vorzeichen falsch {} ({} Register)",
+                n, String.format("%.2e", maxErr), worst, String.format("%.2e", sumErr / n), signMismatch, direct.regCount[DensityProgram.STAGE_V]);
         return signMismatch <= n / 200;
     }
 
