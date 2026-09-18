@@ -5,6 +5,7 @@ import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -946,8 +947,27 @@ public final class LodManager {
     // bleibt reaktionsschnell); Ueberlauf wartet einen Frame (Eintrag bleibt an der Spitze).
     private final java.util.concurrent.atomic.AtomicInteger pendingStored = new java.util.concurrent.atomic.AtomicInteger();
     private static final int MAX_STORED_IN_FLIGHT = 256;
+    private LodSummaryCache summaries; // persistente Bobby-Spalten (lazy je Welt)
+
+    /** Summary-Cache zu den aktuellen Bobby-Ordnern (leer ohne Bobby -> inaktiv). */
+    private synchronized LodSummaryCache summaries() {
+        if (summaries == null) {
+            java.util.Map<String, Path> dirs = new java.util.LinkedHashMap<>();
+            for (Path d : bobby.snapshotDirs()) dirs.put(LodSummaryCache.summaryId(d), d);
+            summaries = new LodSummaryCache(dirs, Minecraft.getInstance().gameDirectory.toPath());
+        }
+        return summaries;
+    }
 
     private void requestStored(ChunkEntry e, int cx, int cz, double dist) {
+        // 0. Summary-Cache (persistent, ohne NBT/Future/Cap): Treffer -> direkt bauen.
+        // Nur wenn fein genug (minLevel <= wantLevel), sonst normaler Pfad (feiner nachladen).
+        LodColumn cached = summaries().get(cx, cz);
+        if (cached != null && cached.minLevel <= e.wantLevel) {
+            final LodColumn c = cached;
+            WorkerPool.submit(WorkerPool.PRIO_LOD + (long) dist, () -> publishColumn(cx, cz, c, e, 0, 0));
+            return;
+        }
         ChunkPos pos = new ChunkPos(cx, cz);
         java.util.concurrent.CompletableFuture<Optional<CompoundTag>> bobbyTag;
         try {
@@ -1035,6 +1055,14 @@ public final class LodManager {
                 if (idx >= 0 && idx < sections.length) sections[idx] = sd.chunkSection();
             }
             buildColumn(sections, cx, cz, source, e);
+            if (source == LodColumn.SOURCE_BOBBY && e.column != null && e.column.source == LodColumn.SOURCE_BOBBY) {
+                // Persistieren (Worker): naechste Session ohne NBT-Parse. Nur Bobby-Gebautes
+                // (Quell-Check: behaltene bessere Spalten, z. B. Live, nie cachen).
+                try {
+                    summaries().put(cx, cz, e.column, tag.getIntOr("DataVersion", -1));
+                } catch (Throwable ignored) {
+                }
+            }
         } catch (Throwable t) {
             noData(e);
         } finally {
@@ -1064,20 +1092,30 @@ public final class LodManager {
         long t0 = System.nanoTime();
         b.fillFromSections(sections, height);
         long t1 = System.nanoTime();
-        e.column = b.build(cx, cz, source, Math.min(e.wantLevel, MAX_LEVEL), minY);
-        e.noFinerData = false;
+        LodColumn col = b.build(cx, cz, source, Math.min(e.wantLevel, MAX_LEVEL), minY);
         long t2 = System.nanoTime();
-        COLUMN_TIMES.addAndGet(0, t1 - t0);
-        COLUMN_TIMES.addAndGet(1, t2 - t1);
+        publishColumn(cx, cz, col, e, t1 - t0, t2 - t1);
+    }
+
+    /** Gebaute Saeule veroeffentlichen (Bau- wie Cache-Pfad): Vorrang, Statistik, Hash, Dirty. */
+    private void publishColumn(int cx, int cz, LodColumn col, ChunkEntry e, long fillNs, long buildNs) {
+        LodColumn old = e.column;
+        if (old != null && old.source > col.source && old.minLevel <= e.wantLevel) {
+            e.state = STATE_READY; // bessere Quelle schon da
+            return;
+        }
+        e.column = col;
+        e.noFinerData = false;
+        COLUMN_TIMES.addAndGet(0, fillNs);
+        COLUMN_TIMES.addAndGet(1, buildNs);
         COLUMN_TIMES.incrementAndGet(2);
         e.state = STATE_READY;
         synchronized (sourceCount) {
-            sourceCount[source]++;
+            sourceCount[col.source]++;
             columnsBuilt++;
         }
         // Welche Stufen haben sich gegenueber dem letzten Stand geaendert? (fehlende Stufen behalten den alten Hash)
         long key = chunkKey(cx, cz);
-        LodColumn col = e.column;
         int changed = 0;
         synchronized (publishedHash) {
             long[] prev = publishedHash.get(key);
@@ -1402,6 +1440,10 @@ public final class LodManager {
 
     private void resetAll() {
         memoryPressure = false;
+        if (summaries != null) {
+            summaries.close();
+            summaries = null; // neue Welt/Dimension -> neue Bobby-Ordner (lazy)
+        }
         nodes.clear();
         publishedHash.clear();
         updatedChunks.clear();

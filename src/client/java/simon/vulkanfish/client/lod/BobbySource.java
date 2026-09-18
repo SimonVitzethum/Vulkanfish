@@ -311,6 +311,13 @@ final class BobbySource {
         }
     }
 
+    /** Aktuelle Cache-Ordner (je Seed-Dir, exakter zuerst) – fuer Abdeckung und Summary-Cache. */
+    java.util.List<Path> snapshotDirs() {
+        java.util.List<Path> out = new java.util.ArrayList<>(disks.size());
+        for (DiskEntry e : disks) out.add(e.dir());
+        return out;
+    }
+
     /** Bobbys Ersatz fuer unzulaessige Ordnernamen (Guava PercentEscaper mit ".-_ " als sicher). */
     private static String escape(String s) {
         StringBuilder b = new StringBuilder();

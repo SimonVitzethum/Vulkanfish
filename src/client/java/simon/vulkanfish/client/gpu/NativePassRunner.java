@@ -463,7 +463,7 @@ public final class NativePassRunner {
     private final double[] lgMsSum = new double[7]; // je Stufe + gesamt
     private int lgMsN;
     private int lgJobsSum;
-    private double lgBudgetMs = 1.5;
+    private double lgBudgetMs = 3.0;
 
     // Messung: -Dvulkanfish.lodBench=<Stufe> generiert jeden Frame dieselben 8 Knoten (ohne Uebernahme)
     private static final int LOD_BENCH = Integer.getInteger("vulkanfish.lodBench", -1);

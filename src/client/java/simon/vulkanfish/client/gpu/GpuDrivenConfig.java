@@ -37,7 +37,7 @@ public record GpuDrivenConfig(
     private static final int DEFAULT_LOD_CHUNKS = 64;
     private static final float DEFAULT_LOD_PIXEL_ERROR = 1.0f;
     // GPU-Zeit je Frame fuer LOD-Generierung + Meshing, solange Knoten fehlen
-    private static final float DEFAULT_LOD_GPU_MS = 1.5f;
+    private static final float DEFAULT_LOD_GPU_MS = 3.0f;
 
     public static GpuDrivenConfig defaults() {
         return new GpuDrivenConfig(true, true, true, true, true,
