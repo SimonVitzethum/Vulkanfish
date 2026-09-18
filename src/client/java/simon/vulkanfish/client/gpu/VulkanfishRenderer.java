@@ -192,33 +192,52 @@ public final class VulkanfishRenderer {
 
     private int vramGuardFrame;
     private int vramBand = 3; // 3 ok, 2 Warnung (<300 MiB), 1 RT weg (<150), 0 LOD weg (<100)
+    private int lodCalmChecks; // stabile Band-3-Phasen seit LOD-Abwurf (6x ~5 s = 30 s -> Reaktivierung)
 
     /**
      * VRAM-Wache (alle ~5 s): Die Init-Skalierung garantiert die Reserve nur beim Start;
      * schrumpft sie spaeter (fremde Apps, 4K-Resize, Treiber), wird erst RT, dann LOD
-     * abgeworfen (einseitig, mit Log – nichts wird automatisch wieder eingeschaltet).
+     * abgeworfen (mit Log). LOD kommt zurueck, sobald die Reserve 30 s stabil steht –
+     * transiente Einbrueche (Fuell-Burst!) duerfen das Fernfeld nicht dauerhaft toeten.
+     * Struktureller Mangel (<300 MiB ueber 30 s) bleibt aus (kein Flattern).
      */
     private void vramGuard() {
         if (nativeRunner == null) return;
         long headroom = nativeRunner.vramHeadroomBytes();
         if (headroom == Long.MIN_VALUE) return; // unbekannt: statische Caps + OOM-Halbierung greifen
         int band = headroom < (100L << 20) ? 0 : headroom < (150L << 20) ? 1 : headroom < (300L << 20) ? 2 : 3;
-        if (band >= vramBand) {
-            vramBand = band; // Erholung: lautlos (einseitig, kein automatisches Wiedereinschalten)
-            return;
+        if (band < vramBand) {
+            vramBand = band;
+            if (band <= 1 && nativeRunner.dropRtGpu()) {
+                LOG.warn("[vulkanfish] VRAM knapp ({} MiB frei): Raytracing-Blocklicht abgeworfen (Vanilla-Blocklicht aktiv)",
+                        headroom >> 20);
+            }
+            if (band == 0 && lod != null) {
+                LOG.warn("[vulkanfish] VRAM kritisch ({} MiB frei): LOD-Fernfeld abgeworfen (Nebel deckt die Ferne)",
+                        headroom >> 20);
+                nativeRunner.dropLodGpu();
+                lod = null;
+            } else if (band == 2) {
+                LOG.info("[vulkanfish] VRAM-Reserve unterschritten ({} MiB frei, Ziel 300 MiB)", headroom >> 20);
+            }
+        } else {
+            vramBand = band; // Erholung: lautlos
         }
-        vramBand = band;
-        if (band <= 1 && nativeRunner.dropRtGpu()) {
-            LOG.warn("[vulkanfish] VRAM knapp ({} MiB frei): Raytracing-Blocklicht abgeworfen (Vanilla-Blocklicht aktiv)",
-                    headroom >> 20);
-        }
-        if (band == 0 && lod != null) {
-            LOG.warn("[vulkanfish] VRAM kritisch ({} MiB frei): LOD-Fernfeld abgeworfen (Nebel deckt die Ferne)",
-                    headroom >> 20);
-            nativeRunner.dropLodGpu();
-            lod = null;
-        } else if (band == 2) {
-            LOG.info("[vulkanfish] VRAM-Reserve unterschritten ({} MiB frei, Ziel 300 MiB)", headroom >> 20);
+        if (band == 3 && lod == null && config.enableLod()) {
+            // Reaktivierung nur bei stabiler Reserve (kein Flattern bei strukturellem Mangel)
+            if (++lodCalmChecks >= 6 && nativeRunner.relodGpu(shaderLoader)) {
+                lodCalmChecks = 0;
+                lod = new simon.vulkanfish.client.lod.LodManager(simon.vulkanfish.client.VulkanfishSettings.lodChunks(),
+                        simon.vulkanfish.client.VulkanfishSettings.lodPixelError());
+                nativeRunner.setLod(lod);
+                lod.setNearField(streamer);
+                nativeRunner.setLodGpuBudget(simon.vulkanfish.client.VulkanfishSettings.lodGpuMs());
+                lod.setRunner(nativeRunner);
+                FrameDataCapture.lodFogDistance = lod.farBlocks();
+                LOG.info("[vulkanfish] LOD-Fernfeld reaktiviert (Reserve 30 s stabil, baut neu auf)");
+            }
+        } else if (band < 3) {
+            lodCalmChecks = 0;
         }
     }
 

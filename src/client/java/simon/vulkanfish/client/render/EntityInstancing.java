@@ -15,6 +15,8 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.RenderShape;
 import net.minecraft.world.level.block.state.BlockState;
 import org.joml.Matrix4f;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import simon.vulkanfish.client.VulkanfishClient;
 import simon.vulkanfish.client.gpu.FrameDataCapture;
 import simon.vulkanfish.client.gpu.NativePassRunner;
@@ -33,6 +35,7 @@ import simon.vulkanfish.client.gpu.NativePassRunner;
  * Modell, vollem Puffer oder abgeschaltet via -Dvulkanfish.entityPipeline=false).
  */
 public final class EntityInstancing {
+    private static final Logger LOG = LoggerFactory.getLogger("vulkanfish");
     /** Instanz-Layout (104 Byte = EntityInstance + light): 12 Modell + 4 Tint/Flag + 3+1+3+1+2. */
     public static final int FLOATS_PER_INSTANCE = 26;
     public static final int MAX_INSTANCES = 8192;
@@ -187,6 +190,8 @@ public final class EntityInstancing {
             for (int i = 0; i < indices.length; i++) indices[i] = ip.get(i);
             boolean translucent =
                     (model.materialFlags() & net.minecraft.client.resources.model.geometry.BakedQuad.FLAG_TRANSLUCENT) != 0;
+            LOG.info("[vulkanfish] Entity-Modell gebacken: {} Quads (Block {}, transluzent={})",
+                    indices.length / 6, state, translucent);
             return new BakedModel(verts, indices, translucent,
                     new float[]{minX, minY, minZ, maxX, maxY, maxZ}, -1);
         } catch (Throwable t) {

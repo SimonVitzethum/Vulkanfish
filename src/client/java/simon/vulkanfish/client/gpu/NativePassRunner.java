@@ -207,6 +207,7 @@ public final class NativePassRunner {
     private long pipeEntityG, pipeEntityS, layoutEntity;
     private long entityVertMod, entityShadowVertMod, entityFragMod;
     private static volatile boolean entityReady;
+    private static boolean entityDrawLogged;
     private record EntityModelBufs(Buf verts, Buf idx, int idxCount) {
     }
 
@@ -1958,6 +1959,10 @@ public final class NativePassRunner {
         uploadPendingEntityBaked(arena);
         int n = simon.vulkanfish.client.render.EntityInstancing.instanceCount();
         if (n == 0 || !entityReady || pipeEntityG == 0L) return;
+        if (!entityDrawLogged) {
+            entityDrawLogged = true;
+            LOG.info("[vulkanfish] Entity-Pipeline zeichnet: {} Instanzen ({} Modelle)", n, entityModels.size());
+        }
         float[] src = simon.vulkanfish.client.render.EntityInstancing.instanceData();
         float[] dst = simon.vulkanfish.client.render.EntityInstancing.scratch();
         final int stride = simon.vulkanfish.client.render.EntityInstancing.FLOATS_PER_INSTANCE;
@@ -2241,6 +2246,23 @@ public final class NativePassRunner {
         cellCount = free(cellCount);
         cellLights = free(cellLights);
         return true;
+    }
+
+    /**
+     * LOD nach VRAM-Notbremse reaktivieren (stabile Reserve setzt der Renderer voraus):
+     * GPU-Puffer neu aufbauen (Pipes/Module bleiben, Duplikate bis destroy). Danach neuer
+     * Manager beim Renderer (CPU-Spalten; GPU-Generierung erst ab naechstem Weltbeitritt).
+     */
+    public boolean relodGpu(SlangShaderLoader loader) {
+        if (lodReady && lodGpuReady) return true;
+        waitValue(timelineValue); // laufende Frames abwarten (wie beim Abwerfen)
+        try (Arena arena = new Arena()) {
+            initLod(arena, loader);
+        } catch (Throwable t) {
+            LOG.warn("[vulkanfish] LOD-Reaktivierung fehlgeschlagen", t);
+            return false;
+        }
+        return lodReady;
     }
 
     /**
