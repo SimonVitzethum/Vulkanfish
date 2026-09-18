@@ -120,6 +120,24 @@ public final class EntityInstancing {
     }
 
     private static void writeTail(BakedModel m, int lightCoords, float white, int o) {
+        instances[o + 12] = 1.0f;
+        instances[o + 13] = 1.0f; // Tint weiss (getoente Arten bleiben Vanilla, siehe ItemBaker)
+        instances[o + 14] = 1.0f;
+        instances[o + 15] = white; // Fuse-Blitz
+        instances[o + 16] = m.aabb()[0];
+        instances[o + 17] = m.aabb()[1];
+        instances[o + 18] = m.aabb()[2];
+        instances[o + 19] = 0.0f; // emissive
+        instances[o + 20] = m.aabb()[3];
+        instances[o + 21] = m.aabb()[4];
+        instances[o + 22] = m.aabb()[5];
+        instances[o + 23] = m.slot();
+        float block = ((lightCoords >> 4) & 15) / 15.0f;
+        float sky = ((lightCoords >> 20) & 15) / 15.0f;
+        instances[o + 24] = block;
+        instances[o + 25] = sky;
+        instances[o + 26] = m.itemsAtlas() ? 1.0f : 0.0f;
+    }
 
     /** Modell zum BlockState (bake bei Bedarf, Render-Thread). null = Vanilla lassen. */
     public static synchronized BakedModel modelFor(BlockState state) {

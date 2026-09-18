@@ -1959,7 +1959,8 @@ public final class NativePassRunner {
         try {
             var tex = net.minecraft.client.Minecraft.getInstance().getTextureManager().getTexture(
                     net.minecraft.client.renderer.texture.TextureAtlas.LOCATION_ITEMS);
-            if (tex instanceof com.mojang.blaze3d.vulkan.VulkanGpuTextureView vk) return vk.vkImageView();
+            var view = tex.getTextureView();
+            if (view instanceof com.mojang.blaze3d.vulkan.VulkanGpuTextureView vk) return vk.vkImageView();
         } catch (Throwable ignored) {
         }
         return 0L;

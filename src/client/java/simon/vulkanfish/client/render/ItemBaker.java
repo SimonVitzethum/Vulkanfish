@@ -10,13 +10,13 @@ import net.minecraft.client.renderer.block.dispatch.BlockStateModelPart;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.entity.state.ItemEntityRenderState;
 import net.minecraft.client.renderer.feature.ModelFeatureRenderer;
-import net.minecraft.client.renderer.item.ItemDisplayContext;
+import net.minecraft.world.item.ItemDisplayContext;
 import net.minecraft.client.renderer.item.ItemStackRenderState;
 import net.minecraft.client.renderer.rendertype.RenderType;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.QuadParticleRenderState;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
-import net.minecraft.client.resources.model.Model;
+import net.minecraft.client.model.Model;
 import net.minecraft.client.resources.model.geometry.BakedQuad;
 import net.minecraft.core.Direction;
 import net.minecraft.network.chat.Component;
@@ -124,7 +124,7 @@ public final class ItemBaker {
         }
 
         @Override
-        public void submitGizmoPrimitives(net.minecraft.client.renderer.DrawableGizmoPrimitives.Group group,
+        public void submitGizmoPrimitives(net.minecraft.client.renderer.gizmos.DrawableGizmoPrimitives.Group group,
                                           CameraRenderState camera, boolean onTop) {
         }
     }
@@ -164,7 +164,7 @@ public final class ItemBaker {
             }
         }
         // Neu oder kollidiert: einmal backen (Fang-Submit, selten).
-        BakedModel baked = bakeKind(state);
+        EntityInstancing.BakedModel baked = bakeKind(state);
         if (baked == null) return false;
         int newSlot = EntityInstancing.registerBaked(baked);
         KIND_TO_SLOT.put(key, newSlot);
@@ -173,7 +173,7 @@ public final class ItemBaker {
     }
 
     /** Fang-Submit aller Layer, Pruefungen, Decode in BakedModel (Modellraum, Layer-Transforms drin). */
-    private static BakedModel bakeKind(ItemEntityRenderState state) {
+    private static EntityInstancing.BakedModel bakeKind(ItemEntityRenderState state) {
         try {
             var layers = ((ItemStackRenderStateAccessor) (Object) state.item).vulkanfish$layers();
             int active = ((ItemStackRenderStateAccessor) (Object) state.item).vulkanfish$activeLayerCount();
@@ -275,24 +275,24 @@ public final class ItemBaker {
     }
 
     /** Mojang-Matrix (column-major Felder) -> JOML-Array (column-major). */
-    private static float[] mojangToJoml(com.mojang.math.Matrix4f m) {
+    private static float[] mojangToJoml(org.joml.Matrix4f m) {
         float[] a = new float[16];
-        a[0] = m.m00;
-        a[1] = m.m01;
-        a[2] = m.m02;
-        a[3] = m.m03;
-        a[4] = m.m10;
-        a[5] = m.m11;
-        a[6] = m.m12;
-        a[7] = m.m13;
-        a[8] = m.m20;
-        a[9] = m.m21;
-        a[10] = m.m22;
-        a[11] = m.m23;
-        a[12] = m.m30;
-        a[13] = m.m31;
-        a[14] = m.m32;
-        a[15] = m.m33;
+        a[0] = m.m00();
+        a[1] = m.m01();
+        a[2] = m.m02();
+        a[3] = m.m03();
+        a[4] = m.m10();
+        a[5] = m.m11();
+        a[6] = m.m12();
+        a[7] = m.m13();
+        a[8] = m.m20();
+        a[9] = m.m21();
+        a[10] = m.m22();
+        a[11] = m.m23();
+        a[12] = m.m30();
+        a[13] = m.m31();
+        a[14] = m.m32();
+        a[15] = m.m33();
         return a;
     }
 
