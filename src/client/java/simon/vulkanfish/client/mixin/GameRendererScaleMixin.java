@@ -1,7 +1,6 @@
 package simon.vulkanfish.client.mixin;
 
 import com.mojang.blaze3d.pipeline.RenderTarget;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.GameRenderer;
 import org.spongepowered.asm.mixin.Final;
 import org.spongepowered.asm.mixin.Mixin;
@@ -23,14 +22,17 @@ public class GameRendererScaleMixin {
     }
 
     @Inject(method = "renderLevel", at = @At("HEAD"))
-    private void vulkanfish$beginLevel(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void vulkanfish$beginLevel(CallbackInfo ci) {
         RenderScale.beginLevel(mainRenderTarget);
     }
 
-    /** Vor der Hand: hat niemand hochskaliert (Renderer aus), das kleine Bild notfalls aufziehen. */
+    /**
+     * Vor Hand/GUI (26.3: eigene render3dHud-Methode): hat niemand hochskaliert
+     * (Renderer aus), das kleine Bild notfalls aufziehen.
+     */
     @Inject(method = "renderLevel", at = @At(value = "INVOKE",
-            target = "Lnet/minecraft/client/renderer/GameRenderer;renderItemInHand(Lnet/minecraft/client/renderer/state/level/CameraRenderState;FLorg/joml/Matrix4fc;)V"))
-    private void vulkanfish$beforeHand(DeltaTracker deltaTracker, CallbackInfo ci) {
+            target = "Lnet/minecraft/client/renderer/GameRenderer;render3dHud(Lnet/minecraft/client/renderer/state/level/CameraRenderState;Lnet/minecraft/client/renderer/state/level/PlayerRenderState;Lnet/minecraft/client/renderer/state/OptionsRenderState;Z)V"))
+    private void vulkanfish$beforeHand(CallbackInfo ci) {
         if (!RenderScale.active()) return;
         RenderTarget low = RenderScale.redirect(mainRenderTarget);
         RenderScale.endLevel();
@@ -38,7 +40,7 @@ public class GameRendererScaleMixin {
     }
 
     @Inject(method = "renderLevel", at = @At("RETURN"))
-    private void vulkanfish$endLevel(DeltaTracker deltaTracker, CallbackInfo ci) {
+    private void vulkanfish$endLevel(CallbackInfo ci) {
         RenderScale.endLevel();
     }
 }

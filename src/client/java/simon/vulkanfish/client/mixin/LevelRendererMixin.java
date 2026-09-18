@@ -5,14 +5,12 @@ import com.llamalad7.mixinextras.injector.wrapoperation.WrapOperation;
 import com.llamalad7.mixinextras.sugar.Local;
 import com.mojang.renderpearl.api.buffers.GpuBufferSlice;
 import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
-import net.minecraft.client.DeltaTracker;
 import net.minecraft.client.renderer.LevelRenderer;
 import net.minecraft.client.renderer.chunk.ChunkSectionLayer;
 import net.minecraft.client.renderer.chunk.SectionMesh;
 import net.minecraft.client.renderer.chunk.SectionRenderDispatcher;
 import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
-import org.joml.Matrix4fc;
 import org.joml.Vector4f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Shadow;
@@ -35,13 +33,12 @@ public class LevelRendererMixin {
 
     @Inject(method = "render", at = @At("HEAD"))
     private void vulkanfish$onFrameStart(GraphicsResourceAllocator allocator,
-                                         DeltaTracker deltaTracker,
-                                         boolean renderBlockOutline,
+                                         boolean renderOutline,
                                          CameraRenderState cameraState,
-                                         Matrix4fc viewMatrix,
-                                         GpuBufferSlice projectionSlice,
+                                         GpuBufferSlice terrainFog,
                                          Vector4f fogColor,
-                                         boolean detailedSky,
+                                         boolean shouldRenderSky,
+                                         boolean consistentDepthRequired,
                                          CallbackInfo ci) {
         if (VulkanfishClient.RENDERER != null) {
             VulkanfishClient.RENDERER.onFrameStart(cameraState,

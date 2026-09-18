@@ -25,7 +25,10 @@ public abstract class ChunkSectionsToRenderMixin {
     public abstract GpuTextureView textureView();
 
     @Inject(method = "renderGroup", at = @At("HEAD"))
-    private void vulkanfish$renderGpuDrivenTerrain(ChunkSectionLayerGroup group, GpuSampler sampler, CallbackInfo ci) {
+    private void vulkanfish$renderGpuDrivenTerrain(ChunkSectionLayerGroup group,
+                                                   com.mojang.renderpearl.api.commands.RenderPass renderPass,
+                                                   GpuSampler sampler, GpuTextureView atlasView,
+                                                   boolean respectTranslucentOrder, CallbackInfo ci) {
         if (VulkanfishClient.RENDERER == null) return;
         if (group == ChunkSectionLayerGroup.OPAQUE) {
             VulkanfishClient.RENDERER.renderOpaqueTerrain(textureView());
