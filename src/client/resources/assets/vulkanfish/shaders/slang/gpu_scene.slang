@@ -153,15 +153,16 @@ uint3 unpackTri(uint p)
     return uint3(p & 0xFF, (p >> 8) & 0xFF, (p >> 16) & 0xFF);
 }
 
-// ---- Entity-Instanz (30k+, 96 Byte) ----
+// ---- Entity-Instanz (30k+, 104 Byte) ----
 struct EntityInstance
 {
     float3x4 model;      // Rotation+Translation (CPU schreibt nur Deltas)
-    float4 tint_flags;   // rgb=Tint, a=Flags (emissive, translucent...)
+    float4 tint_flags;   // rgb=Tint, a=Flags (Fuse-Blitz, ...)
     float3 aabbMin;
     float emissive;
     float3 aabbMax;
     uint archetype;      // Geometrie-Typ (ein BLAS pro Archetyp im RT-Pfad)
+    float2 light;        // x=Block, y=Himmel (0..1, wie G-Buffer-Light)
 };
 
 // ---- VkDrawMeshTasksIndirectCommandEXT ----

@@ -21,6 +21,24 @@
    "spv": "meshlet_cull.spv"
   },
   {
+   "file": "entity.slang",
+   "entry": "entityVert",
+   "stage": "vertex",
+   "spv": "entity_vert.spv"
+  },
+  {
+   "file": "entity.slang",
+   "entry": "entityShadowInstVert",
+   "stage": "vertex",
+   "spv": "entity_shadow_vert.spv"
+  },
+  {
+   "file": "entity.slang",
+   "entry": "entityFrag",
+   "stage": "fragment",
+   "spv": "entity_frag.spv"
+  },
+  {
    "file": "terrain_mesh.slang",
    "entry": "terrainMeshDirect",
    "stage": "mesh",

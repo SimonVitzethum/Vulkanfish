@@ -164,6 +164,7 @@ public final class VulkanfishRenderer {
         frameT0 = System.nanoTime(); // Profil: gesamtes Level-render (Vanilla + unsere Paesse)
         ensureInitialized();
         pendingFrame = null;
+        simon.vulkanfish.client.render.EntityInstancing.beginFrame();
         if (!initialized || !nativeRunner.isReady()) return;
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || cameraState == null) return;

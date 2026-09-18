@@ -201,6 +201,19 @@ public final class NativePassRunner {
     private final Buf[] entityMotion = new Buf[FRAMES];
     private float[] entityMotionData = new float[0];
     private int entityMotionCount;
+    // Eigene Entity-Pipeline (instanced starre Modelle): ein Draw pro Modell fuer alle Instanzen.
+    private final java.util.Map<Integer, EntityModelBufs> entityModels = new java.util.HashMap<>();
+    private final Buf[] entityInst = new Buf[FRAMES];
+    private long pipeEntityG, pipeEntityS, layoutEntity;
+    private long entityVertMod, entityShadowVertMod, entityFragMod;
+    private static volatile boolean entityReady;
+    private record EntityModelBufs(Buf verts, Buf idx, int idxCount) {
+    }
+
+    /** Eigene Entity-Pipeline aufnahmebereit (Bake/Divert sonst Vanilla). */
+    public static boolean entityReady() {
+        return entityReady;
+    }
     // DLSS Ray Reconstruction: Hilfspuffer aus dem G-Buffer (rr_guide.slang)
     private long layoutRrGuide, pipeRrGuide, layoutRrResolve, pipeRrResolve;
     private Img rrDiffuse, rrSpecular, rrNormals, rrColor, rrOut; // rrColor/rrOut: HDR (RR verlangt HDR)
@@ -1120,6 +1133,7 @@ public final class NativePassRunner {
             if (rtWanted) initRt(arena, loader);
             initLod(arena, loader);
             initEntityShadow(arena, loader);
+            initEntityPipes(arena, loader);
             initDlss(arena, loader);
             shadowMap = makeImage(arena, SHADOW_RES, SHADOW_RES, 1, FMT_DEPTH,
                     VK10.VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK10.VK_IMAGE_USAGE_SAMPLED_BIT
@@ -1887,6 +1901,115 @@ public final class NativePassRunner {
             } else {
                 VK10.vkCmdDraw(cmd, b.vertexCount() - b.vertexCount() % 3, 1, 0, 0);
             }
+        }
+    }
+
+    /** Eigene Entity-Pipeline: Vertex-Pulling aus Baked + Instanzen (beide Raster-Modi). */
+    private void initEntityPipes(Arena arena, SlangShaderLoader loader) {
+        int V = VK10.VK_SHADER_STAGE_VERTEX_BIT, F = VK10.VK_SHADER_STAGE_FRAGMENT_BIT;
+        try {
+            // Bindings: 0S Baked-Verts, 1S Instanzen, 2U Frame, 3I Atlas, 4SMP Sampler
+            layoutEntity = pipelineLayout(arena,
+                    setLayout(arena, new int[][]{{0, SB}, {1, SB}, {2, UB}, {3, SI}, {4, SM}}, V | F), 0, 0);
+            entityVertMod = module(arena, loader, "entityVert");
+            entityShadowVertMod = module(arena, loader, "entityShadowInstVert");
+            entityFragMod = module(arena, loader, "entityFrag");
+            pipeEntityG = vertPipe(arena, layoutEntity, entityVertMod, entityFragMod,
+                    2, FMT_GBUF, VK10.VK_COMPARE_OP_GREATER_OR_EQUAL, false, BLEND_NONE, true, true, VK10.VK_CULL_MODE_NONE);
+            pipeEntityS = vertPipe(arena, layoutEntity, entityShadowVertMod, 0L,
+                    0, FMT_GBUF, VK10.VK_COMPARE_OP_LESS_OR_EQUAL, true, BLEND_NONE, true, true, VK10.VK_CULL_MODE_NONE);
+            int host = VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            for (int i = 0; i < FRAMES; i++) {
+                entityInst[i] = makeBuffer(arena,
+                        (long) simon.vulkanfish.client.render.EntityInstancing.MAX_INSTANCES * 104L,
+                        VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host);
+            }
+            entityReady = true;
+            LOG.info("[vulkanfish] Entity-Pipeline bereit (instanced starre Modelle)");
+        } catch (Throwable t) {
+            entityReady = false;
+            LOG.warn("[vulkanfish] Entity-Pipeline aus (Vanilla.Entities bleiben)", t.toString());
+        }
+    }
+
+    /** Anstehende Bakes als host-sichtbare Puffer anlegen (winziger Working-Set, L1-freundlich). */
+    private void uploadPendingEntityBaked(Arena arena) {
+        var uploads = simon.vulkanfish.client.render.EntityInstancing.takeBakedUploads();
+        if (uploads.isEmpty()) return;
+        int host = VK10.VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK10.VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        for (var up : uploads) {
+            if (entityModels.containsKey(up.slot())) continue;
+            var models = simon.vulkanfish.client.render.EntityInstancing.models();
+            if (up.slot() < 0 || up.slot() >= models.size() || models.get(up.slot()).translucent()) continue;
+            try {
+                Buf vb = makeBuffer(arena, (long) up.verts().length * 4L, VK10.VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, host);
+                MemoryUtil.memFloatBuffer(vb.mapped(), up.verts().length).put(0, up.verts(), 0, up.verts().length);
+                Buf ib = makeBuffer(arena, (long) up.indices().length * 4L, VK10.VK_BUFFER_USAGE_INDEX_BUFFER_BIT, host);
+                MemoryUtil.memIntBuffer(ib.mapped(), up.indices().length).put(0, up.indices(), 0, up.indices().length);
+                entityModels.put(up.slot(), new EntityModelBufs(vb, ib, up.indices().length));
+            } catch (Throwable t) {
+                LOG.warn("[vulkanfish] Entity-Bake-Upload fehlgeschlagen ({})", t.toString());
+            }
+        }
+    }
+
+    /** Ein Draw pro Modell (alle Instanzen): partitioniert per Slot-Scan in den Scratch. */
+    private void recordEntityInstanced(Arena arena, VkCommandBuffer cmd, int slot, long atlasView) {
+        uploadPendingEntityBaked(arena);
+        int n = simon.vulkanfish.client.render.EntityInstancing.instanceCount();
+        if (n == 0 || !entityReady || pipeEntityG == 0L) return;
+        float[] src = simon.vulkanfish.client.render.EntityInstancing.instanceData();
+        float[] dst = simon.vulkanfish.client.render.EntityInstancing.scratch();
+        final int stride = simon.vulkanfish.client.render.EntityInstancing.FLOATS_PER_INSTANCE;
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeEntityG);
+        int cursor = 0;
+        for (var e : entityModels.entrySet()) {
+            int start = cursor;
+            for (int i = 0; i < n; i++) {
+                if ((int) src[i * stride + 23] != e.getKey()) continue;
+                System.arraycopy(src, i * stride, dst, cursor * stride, stride);
+                cursor++;
+            }
+            int count = cursor - start;
+            if (count == 0) continue;
+            MemoryUtil.memFloatBuffer(entityInst[slot].mapped(), n * stride).put(start * stride, dst, start * stride,
+                    count * stride);
+            EntityModelBufs mb = e.getValue();
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntity,
+                    W.sb(0, mb.verts()), W.sb(1, entityInst[slot]), W.ub(2, uniforms[slot]),
+                    W.si(3, atlasView), W.sm(4, atlasSampler));
+            VK10.vkCmdBindIndexBuffer(cmd, mb.idx().buffer(), 0L, VK10.VK_INDEX_TYPE_UINT32);
+            VK10.vkCmdDrawIndexed(cmd, mb.idxCount(), count, 0, 0, start);
+        }
+    }
+
+    /** Gleiches fuer die Schattenkarte (Tiefe only, verzerrter Lichtraum im Shader). */
+    private void recordEntityInstancedShadow(Arena arena, VkCommandBuffer cmd, int slot, long atlasView) {
+        uploadPendingEntityBaked(arena);
+        int n = simon.vulkanfish.client.render.EntityInstancing.instanceCount();
+        if (n == 0 || !entityReady || pipeEntityS == 0L) return;
+        float[] src = simon.vulkanfish.client.render.EntityInstancing.instanceData();
+        float[] dst = simon.vulkanfish.client.render.EntityInstancing.scratch();
+        final int stride = simon.vulkanfish.client.render.EntityInstancing.FLOATS_PER_INSTANCE;
+        VK10.vkCmdBindPipeline(cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, pipeEntityS);
+        int cursor = 0;
+        for (var e : entityModels.entrySet()) {
+            int start = cursor;
+            for (int i = 0; i < n; i++) {
+                if ((int) src[i * stride + 23] != e.getKey()) continue;
+                System.arraycopy(src, i * stride, dst, cursor * stride, stride);
+                cursor++;
+            }
+            int count = cursor - start;
+            if (count == 0) continue;
+            MemoryUtil.memFloatBuffer(entityInst[slot].mapped(), n * stride).put(start * stride, dst, start * stride,
+                    count * stride);
+            EntityModelBufs mb = e.getValue();
+            push(arena, cmd, VK10.VK_PIPELINE_BIND_POINT_GRAPHICS, layoutEntity,
+                    W.sb(0, mb.verts()), W.sb(1, entityInst[slot]), W.ub(2, shadowUniforms[slot]),
+                    W.si(3, atlasView), W.sm(4, atlasSampler));
+            VK10.vkCmdBindIndexBuffer(cmd, mb.idx().buffer(), 0L, VK10.VK_INDEX_TYPE_UINT32);
+            VK10.vkCmdDrawIndexed(cmd, mb.idxCount(), count, 0, 0, start);
         }
     }
 
@@ -3811,6 +3934,7 @@ public final class NativePassRunner {
             else EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodShadowIndirect.buffer(), 0L, 1, 12);
         }
         recordEntityShadows(arena, cmd, slot, entityBatches);
+        recordEntityInstancedShadow(arena, cmd, slot, atlasView);
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
         barrier(arena, cmd, VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK10.VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                 VK10.VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK10.VK_ACCESS_SHADER_READ_BIT);
@@ -3878,6 +4002,7 @@ public final class NativePassRunner {
             if (classicRaster) drawClassic(cmd, cmdLod, lodIndirect, lodMaxMeshlets);
             else EXTMeshShader.vkCmdDrawMeshTasksIndirectEXT(cmd, lodIndirect.buffer(), 0L, 1, 12);
         }
+        if (first) recordEntityInstanced(arena, cmd, slot, atlasView);
         KHRDynamicRendering.vkCmdEndRenderingKHR(cmd);
         barrier(arena, cmd,
                 VK10.VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK10.VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT
@@ -4154,6 +4279,8 @@ public final class NativePassRunner {
     public void destroy() {
         if (dev == null) return;
         ready = false;
+        entityReady = false;
+        entityModels.clear();
         FgPresenter fp = FgPresenter.instance();
         if (fp != null) fp.destroy();
         FgPresenter.QUEUE_LOCK.lock();
