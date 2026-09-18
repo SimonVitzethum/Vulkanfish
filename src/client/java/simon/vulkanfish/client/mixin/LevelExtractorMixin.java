@@ -14,10 +14,8 @@ import net.minecraft.client.renderer.culling.Frustum;
 import net.minecraft.client.renderer.entity.state.EntityRenderState;
 import net.minecraft.client.renderer.extract.LevelExtractor;
 import net.minecraft.client.renderer.state.level.LevelRenderState;
-import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.util.Mth;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.LivingEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -42,13 +40,8 @@ import simon.vulkanfish.client.gpu.WorkerPool;
  * seriell: geteilter Collector, strikt geordnete Nodes, beliebiger Mod-Code in Feature-Renderern.
  * Abschaltbar: -Dvulkanfish.entityParallel=false. Anker mit require = 0 (Optimierung crasht nie).
  *
- * <p>Typ-Sortierung (Multidraw-Ersatz): executeGroup faehrt pro Draw einen vollen
- * Pipeline-Bind + Draw – Vanillas Konsolidierung (lastDraw/indexOf) greift nur bei gleichen Typen
- * hintereinander. 2000 gemischte Entities = ~1800 Draws. Stabile Sortierung nach EntityType
- * (Registrierungs-ID, deterministisch, innerhalb eines Typs bleibt die Ordnung) macht daraus
- * Dutzende – gleiche Fragmente, keine Reorder-Artefakte (Vanillas Transluzenz-Ordnung zwischen
- * Typen war ohnehin beliebig). Echtes vkCmd*Indirect geht nicht: Vanillas Backend duldet keine
- * fremden Commands (State-Tracking-Desync) – das Ziel (wenige Calls) ist so identisch erreicht.
+ * <p>Typ-Sortierung entfaellt bewusst: Das Upload-Merging (StagedVertexBufferMixin) faltet
+ * gleiche Typen ohnehin positionsunabhaengig – Sortieren waere reine CPU-Kosten ohne Effekt.
  */
 @Mixin(LevelExtractor.class)
 public abstract class LevelExtractorMixin {
@@ -60,8 +53,6 @@ public abstract class LevelExtractorMixin {
     private static final int EXTRACT_TASKS =
             Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors() / 2));
     private static boolean parallelLogged;
-    /** Registrierungs-IDs der EntityTypen (Singletons, nie veraltet; nur Render-Thread). */
-    private static final java.util.IdentityHashMap<EntityType<?>, Integer> TYPE_IDS = new java.util.IdentityHashMap<>();
 
     @Shadow
     private ClientLevel level;
@@ -77,16 +68,6 @@ public abstract class LevelExtractorMixin {
     @Inject(method = "setSectionDirty(IIIZ)V", at = @At("HEAD"))
     private void vulkanfish$sectionDirty(int sectionX, int sectionY, int sectionZ, boolean playerChanged, CallbackInfo ci) {
         TerrainStreamer.markDirty(sectionX, sectionY, sectionZ);
-    }
-
-    private static int typeId(Entity e) {
-        EntityType<?> t = e.getType();
-        Integer id = TYPE_IDS.get(t);
-        if (id == null) {
-            id = BuiltInRegistries.ENTITY_TYPE.getId(t);
-            TYPE_IDS.put(t, id);
-        }
-        return id;
     }
 
     @Inject(method = "extractVisibleEntities", at = @At("HEAD"), cancellable = true, require = 0)
@@ -111,10 +92,6 @@ public abstract class LevelExtractorMixin {
                 entity.zOld = entity.getZ();
             }
             vis.add(entity);
-        }
-        if (vis.size() >= 64) {
-            // Gleiche Typen hintereinander (stabil, deterministisch): aus ~1800 Draws werden Dutzende.
-            vis.sort((a, b) -> Integer.compare(typeId(a), typeId(b)));
         }
         if (!PARALLEL || vis.size() < 32) {
             // Kleine Mengen: seriell wie Vanilla (kein Thread-Overhead)

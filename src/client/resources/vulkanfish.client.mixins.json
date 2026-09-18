@@ -29,6 +29,7 @@
 		"SpriteContentsAccessor",
 		"StagedDrawAccessor",
 		"StagedVertexBufferAccessor",
+		"StagedVertexBufferMixin",
 		"VideoSettingsScreenMixin",
 		"VulkanBackendMixin",
 		"VulkanBackendVmaMixin",

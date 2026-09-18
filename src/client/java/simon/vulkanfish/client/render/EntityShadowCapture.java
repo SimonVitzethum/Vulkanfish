@@ -39,6 +39,8 @@ public final class EntityShadowCapture {
     private static final Set<StagedVertexBuffer.Draw> SEEN = Collections.newSetFromMap(new IdentityHashMap<>());
     private static List<Batch> frame = List.of();
     private static int lastDraws, lastBatches; // Profil: Zeichnungen/Batches des letzten Frames
+    /** Draw -> RenderType (fuer Draw-Merging im Upload; pro Frame neu, siehe clearDrawTypes). */
+    private static final IdentityHashMap<StagedVertexBuffer.Draw, RenderType> DRAW_TYPES = new IdentityHashMap<>();
 
     private EntityShadowCapture() {
     }
@@ -54,6 +56,7 @@ public final class EntityShadowCapture {
     }
 
     public static void onDraw(StagedVertexBuffer.Draw draw, RenderType type) {
+        if (draw != null && type != null) DRAW_TYPES.put(draw, type); // Merging-Schluessel (auch ohne Capture)
         if (!capturing || draw == null || SEEN.contains(draw)) return;
         String name = ((RenderTypeAccessor) type).vulkanfish$name();
         if (name.contains("emissive") || name.contains("glint")) return;
@@ -109,5 +112,12 @@ public final class EntityShadowCapture {
 
     public static int lastBatches() {
         return lastBatches;
+    }
+
+    /** Draw-Typen des Frames (Upload-Merging) + Karte leeren. */
+    public static java.util.Map<StagedVertexBuffer.Draw, RenderType> takeDrawTypes() {
+        java.util.Map<StagedVertexBuffer.Draw, RenderType> m = new IdentityHashMap<>(DRAW_TYPES);
+        DRAW_TYPES.clear();
+        return m;
     }
 }

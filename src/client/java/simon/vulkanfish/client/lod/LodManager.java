@@ -58,8 +58,6 @@ public final class LodManager {
     private static final int RECHECK_FRAMES = 15;               // wartende Knoten nur alle N Frames pruefen
     private static final int MAX_LIVE_COPIES_PER_FRAME = 24;
     private static final long UPLOAD_BYTES_PER_FRAME = 12L << 20; // LOD-Backfill: PCIe schafft Vielfaches, Framespitze ~0,5 ms
-    // Rueckstand: 4x Budget (ca. 2-ms-Spitze nur in der Ladephase, danach automatisch zurueck auf 12 MiB)
-    private static final long UPLOAD_BYTES_BACKLOG = UPLOAD_BYTES_PER_FRAME * 4;
     // GPU-Kapazitaet des Fernfelds (Quads a 8 Byte, Meshlets a 64 Byte)
     public static final int QUAD_BYTES = 8;
     public static final int MAX_QUADS = 32 << 20;
@@ -1108,7 +1106,8 @@ public final class LodManager {
         }
         toRetire.clear();
 
-        long budget = deferred.size() + buildQueue.size() > 500 ? UPLOAD_BYTES_BACKLOG : UPLOAD_BYTES_PER_FRAME;
+        // Rueckstand: Ring voll ausnutzen (die Staging-Wache pro Knoten haelt); ruhig: 12 MiB.
+        long budget = deferred.size() + buildQueue.size() > 500 ? Long.MAX_VALUE : UPLOAD_BYTES_PER_FRAME;
         Built b;
         boolean anyReady = false;
         while (budget > 0 && (b = built.peek()) != null) {
