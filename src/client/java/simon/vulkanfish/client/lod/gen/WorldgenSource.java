@@ -164,6 +164,7 @@ public final class WorldgenSource {
             LOG.warn("[vulkanfish] LOD-Generator: nicht unterstuetzte Dichtefunktionen {}", direct.unsupported);
             return false;
         }
+        if (Boolean.getBoolean("vulkanfish.dumpProgram")) dumpProgram(direct);
         DensityCpu cpu = new DensityCpu(direct);
         Random rnd = new Random(1234);
         double maxErr = 0, sumErr = 0;
@@ -181,5 +182,25 @@ public final class WorldgenSource {
         LOG.info("[vulkanfish] LOD-Generator: Programm vs. Vanilla an {} Punkten: max. Fehler {}, mittel {}, Vorzeichen falsch {} ({} Register)",
                 n, String.format("%.2e", maxErr), String.format("%.2e", sumErr / n), signMismatch, direct.regCount[DensityProgram.STAGE_V]);
         return signMismatch <= n / 200;
+    }
+
+    /** Diagnose-Dump des Direktprogramms (nur mit -Dvulkanfish.dumpProgram). */
+    private static void dumpProgram(DensityProgram p) {
+        var c = p.code[DensityProgram.STAGE_V];
+        String[] names = {"END", "CONST", "COORD", "ADD", "MUL", "MIN", "MAX", "ADDK", "MULK", "MAP", "CLAMP",
+                "YGRAD", "NOISE", "SNOISE", "SHIFTA", "SHIFTB", "SHIFT", "RANGE", "INTERVAL", "SPLINE",
+                "BLENDED", "LOADF", "LOADI", "STORE", "SUB", "DIV", "LERP"};
+        StringBuilder b = new StringBuilder("Direktprogramm (consts=").append(p.consts.size()).append("):");
+        for (int pc = 0; pc < c.size();) {
+            int op = c.getInt(pc);
+            String nm = op >= 0 && op < names.length ? names[op] : "OP" + op;
+            int len = DensityProgram.length(c, pc);
+            b.append("\n  @").append(pc).append(' ').append(nm);
+            for (int i = 1; i < len && pc + i < c.size(); i++) b.append(' ').append(c.getInt(pc + i));
+            if (len <= 0) break;
+            pc += len;
+            if (op == 0) break;
+        }
+        LOG.info("[vulkanfish] {}", b);
     }
 }
