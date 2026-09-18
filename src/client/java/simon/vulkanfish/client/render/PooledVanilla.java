@@ -1,7 +1,6 @@
 package simon.vulkanfish.client.render;
 
 import net.minecraft.core.BlockPos;
-import net.minecraft.world.phys.Vec3;
 import org.joml.Quaternionf;
 
 /**
@@ -23,10 +22,5 @@ public final class PooledVanilla {
     /** Wie {@code BlockPos.containing(x, y, z)}, ohne Allokation. */
     public static BlockPos containing(double x, double y, double z) {
         return POS.set(x, y, z);
-    }
-
-    /** Wie {@code BlockPos.containing(Vec3)}, ohne Allokation. */
-    public static BlockPos containing(Vec3 v) {
-        return POS.set(v.x(), v.y(), v.z());
     }
 }

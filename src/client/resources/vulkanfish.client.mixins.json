@@ -10,7 +10,6 @@
 		"ChunkSectionsToRenderMixin",
 		"ClientChunkCacheMixin",
 		"ExampleClientMixin",
-		"EntityRendererMixin",
 		"FeatureRenderDispatcherAccessor",
 		"GameRendererMixin",
 		"GameRendererScaleMixin",
